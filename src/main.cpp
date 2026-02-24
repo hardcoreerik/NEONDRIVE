@@ -8020,7 +8020,7 @@ static void drawAbout() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(2);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString("CYD PorkChop Port", content.x + 2, content.y + 8);
+  tft.drawString("NEONdrive CYD", content.x + 2, content.y + 8);
 
   tft.setTextSize(1);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
