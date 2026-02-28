@@ -1,8 +1,11 @@
 ﻿// Main firmware entry point and UI orchestration for the CYD target.
 #include <Arduino.h>
 #include <SPI.h>
+#include <Wire.h>
 #include <TFT_eSPI.h>
+#if !defined(ARDUINO_LILYGO_T_DISPLAY_S3)
 #include <XPT2046_Touchscreen.h>
+#endif
 #include <LittleFS.h>
 #include <SD.h>
 using fs::File;
@@ -13,13 +16,13 @@ using fs::File;
 #include <Update.h>
 #include <esp_wifi.h>
 #include <esp_timer.h>
+#include <esp_heap_caps.h>
 
 #include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
 #include <freertos/semphr.h>
 #include "deauth_hunter.h"
-#include "pineap_hunter.h"
 #include "bruce_wifi.h"
 #include "wpasec_client.h"
 #include "yoink_engine.h"
@@ -38,6 +41,43 @@ using fs::File;
     intentionally disabled until explicit coexistence validation is completed on CYD.
 */
 
+#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+static constexpr bool BOARD_HAS_TOUCH = false;
+static constexpr bool BOARD_HAS_SD = false;
+static constexpr bool TFT_USES_SPI_BUS = false;
+static constexpr int PIN_LCD_POWER_ON = 15;
+
+// TFT is 8-bit parallel on this board, so SPI TFT pins are unused.
+static constexpr int PIN_TFT_SCLK = -1;
+static constexpr int PIN_TFT_MISO = -1;
+static constexpr int PIN_TFT_MOSI = -1;
+static constexpr int PIN_TFT_CS   = -1;
+
+static constexpr int PIN_TOUCH_CS = -1;
+static constexpr int PIN_TOUCH_SDA = 18;
+static constexpr int PIN_TOUCH_SCL = 17;
+static constexpr int PIN_TOUCH_INT = 16;
+static constexpr int PIN_TOUCH_RST = 13;
+static constexpr uint8_t TOUCH_ADDR_CST_SELF = 0x15;    // CST816/CST820 family
+static constexpr uint8_t TOUCH_ADDR_CST_MUTUAL = 0x1A;  // CST328 family
+static constexpr int PIN_SD_SCLK  = -1;
+static constexpr int PIN_SD_MISO  = -1;
+static constexpr int PIN_SD_MOSI  = -1;
+static constexpr int PIN_SD_CS    = -1;
+
+// T-Display-S3 has one TFT backlight pin.
+static constexpr int BL_PINS[] = {38};
+static constexpr uint8_t BL_PWM_CHANNELS[] = {4};
+
+// No discrete RGB status LED on T-Display-S3.
+static constexpr int LED_PINS[] = {-1, -1, -1};
+static constexpr uint8_t LED_PWM_CHANNELS[] = {0, 1, 2};
+#else
+static constexpr bool BOARD_HAS_TOUCH = true;
+static constexpr bool BOARD_HAS_SD = true;
+static constexpr bool TFT_USES_SPI_BUS = true;
+static constexpr int PIN_LCD_POWER_ON = -1;
+
 static constexpr int PIN_TFT_SCLK = 14;
 static constexpr int PIN_TFT_MISO = 12;
 static constexpr int PIN_TFT_MOSI = 13;
@@ -52,12 +92,14 @@ static constexpr int PIN_SD_CS    = 5;
 // CYD TFT backlight (variant-safe pins)
 static constexpr int BL_PINS[] = {21, 27};
 static constexpr uint8_t BL_PWM_CHANNELS[] = {4, 5};
-static bool backlightPwmReady = false;
-static uint8_t backlightLevel = 255;  // Always full LCD backlight on boot
 
 // CYD onboard RGB LED (active-low)
 static constexpr int LED_PINS[] = {4, 16, 17};  // R, G, B
 static constexpr uint8_t LED_PWM_CHANNELS[] = {0, 1, 2};
+#endif
+static bool backlightPwmReady = false;
+static uint8_t backlightLevel = 255;  // Always full LCD backlight on boot
+
 static bool statusLedPwmReady = false;
 
 // Touch raw ranges (no calibration defaults)
@@ -67,7 +109,9 @@ static constexpr int RAW_Y_MIN = 250;
 static constexpr int RAW_Y_MAX = 3850;
 
 TFT_eSPI tft;
+#if !defined(ARDUINO_LILYGO_T_DISPLAY_S3)
 XPT2046_Touchscreen ts(PIN_TOUCH_CS);
+#endif
 static uint32_t g_touchDebounceUntilMs = 0;
 
 // ---------- Utilities ----------
@@ -96,23 +140,38 @@ static uint32_t hashText(const char* s) {
 }
 
 static void backlightBringup() {
+  if (PIN_LCD_POWER_ON >= 0) {
+    pinMode(PIN_LCD_POWER_ON, OUTPUT);
+    digitalWrite(PIN_LCD_POWER_ON, HIGH);
+  }
+
   for (int pin : BL_PINS) {
+    if (pin < 0) continue;
     pinMode(pin, OUTPUT);
     digitalWrite(pin, HIGH);
   }
 
+#if !defined(ARDUINO_LILYGO_T_DISPLAY_S3)
   // Quick blink test (2 blinks)
   for (int i = 0; i < 2; i++) {
-    for (int pin : BL_PINS) digitalWrite(pin, LOW);
+    for (int pin : BL_PINS) {
+      if (pin < 0) continue;
+      digitalWrite(pin, LOW);
+    }
     delay(120);
-    for (int pin : BL_PINS) digitalWrite(pin, HIGH);
+    for (int pin : BL_PINS) {
+      if (pin < 0) continue;
+      digitalWrite(pin, HIGH);
+    }
     delay(120);
   }
+#endif
 }
 
 static void initBacklightPwmIfNeeded() {
   if (backlightPwmReady) return;
   for (size_t i = 0; i < sizeof(BL_PINS) / sizeof(BL_PINS[0]); i++) {
+    if (BL_PINS[i] < 0) continue;
     ledcSetup(BL_PWM_CHANNELS[i], 5000, 8);  // 8-bit brightness
     ledcAttachPin(BL_PINS[i], BL_PWM_CHANNELS[i]);
   }
@@ -123,13 +182,16 @@ static void applyBacklightLevel(uint8_t level) {
   backlightLevel = level;
   initBacklightPwmIfNeeded();
   for (size_t i = 0; i < sizeof(BL_PINS) / sizeof(BL_PINS[0]); i++) {
+    if (BL_PINS[i] < 0) continue;
     ledcWrite(BL_PWM_CHANNELS[i], backlightLevel);
   }
 }
 
 static void initStatusLedPwmIfNeeded() {
+  if (LED_PINS[0] < 0) return;
   if (statusLedPwmReady) return;
   for (size_t i = 0; i < sizeof(LED_PINS) / sizeof(LED_PINS[0]); i++) {
+    if (LED_PINS[i] < 0) continue;
     pinMode(LED_PINS[i], OUTPUT);
     ledcSetup(LED_PWM_CHANNELS[i], 5000, 8);
     ledcAttachPin(LED_PINS[i], LED_PWM_CHANNELS[i]);
@@ -138,6 +200,7 @@ static void initStatusLedPwmIfNeeded() {
 }
 
 static void applyStatusLedState(uint8_t brightness, uint8_t red, uint8_t green, uint8_t blue) {
+  if (LED_PINS[0] < 0) return;
   initStatusLedPwmIfNeeded();
 
   const uint8_t r = (uint8_t)(((uint16_t)red * (uint16_t)brightness) / 255);
@@ -150,10 +213,23 @@ static void applyStatusLedState(uint8_t brightness, uint8_t red, uint8_t green, 
   ledcWrite(LED_PWM_CHANNELS[2], 255 - b);
 }
 
+#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+static void tdisplayNavBuild();
+static void tdisplayNavDrawHeaderStatus();
+static void tdisplayNavDrawSelectedOutline();
+static bool tdisplayNavConsumeRefreshRequest();
+static void tdisplayRedrawCurrentScreen();
+#endif
+
 static void drawBorder() {
   const int w = tft.width();
   const int h = tft.height();
   tft.drawRect(0, 0, w, h, TFT_DARKGREY);
+#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+  tdisplayNavBuild();
+  tdisplayNavDrawHeaderStatus();
+  tdisplayNavDrawSelectedOutline();
+#endif
 }
 
 // ---------- Touch (baked PRESET #5) ----------
@@ -171,10 +247,184 @@ static int g_lastTouchRawX = -1;
 static int g_lastTouchRawY = -1;
 static int g_lastTouchRawZ = 0;
 
+#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+static bool tdisplayHandleButtonInput(int& outX, int& outY);
+
+enum class TDisplayTouchController : uint8_t {
+  NONE = 0,
+  CST_SELF = 1,
+  CST_MUTUAL = 2,
+};
+
+static TDisplayTouchController g_tdisplayTouchController = TDisplayTouchController::NONE;
+static bool g_tdisplayTouchPresent = false;
+static uint8_t g_tdisplayTouchAddr = 0;
+static bool g_tdisplayTouchAxesLocked = false;
+static bool g_tdisplayTouchLandscapeCoords = false;
+
+static bool tdisplayI2cProbe(uint8_t addr) {
+  Wire.beginTransmission(addr);
+  return (Wire.endTransmission() == 0);
+}
+
+static bool tdisplayI2cRead8(uint8_t addr, uint8_t reg, uint8_t* out, size_t len) {
+  if (!out || len == 0) return false;
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  size_t got = Wire.requestFrom((int)addr, (int)len);
+  if (got != len) return false;
+  for (size_t i = 0; i < len; i++) out[i] = Wire.read();
+  return true;
+}
+
+static bool tdisplayI2cRead16(uint8_t addr, uint16_t reg, uint8_t* out, size_t len) {
+  if (!out || len == 0) return false;
+  Wire.beginTransmission(addr);
+  Wire.write((uint8_t)(reg >> 8));
+  Wire.write((uint8_t)(reg & 0xFF));
+  if (Wire.endTransmission(false) != 0) return false;
+  size_t got = Wire.requestFrom((int)addr, (int)len);
+  if (got != len) return false;
+  for (size_t i = 0; i < len; i++) out[i] = Wire.read();
+  return true;
+}
+
+static bool tdisplayReadTouchRaw(int& outRawX, int& outRawY, int& outZ) {
+  outRawX = -1;
+  outRawY = -1;
+  outZ = 0;
+
+  if (!g_tdisplayTouchPresent) return false;
+
+  if (g_tdisplayTouchController == TDisplayTouchController::CST_SELF) {
+    uint8_t data[5] = {0};
+    if (!tdisplayI2cRead8(g_tdisplayTouchAddr, 0x02, data, sizeof(data))) return false;
+    const uint8_t points = data[0] & 0x0F;
+    if (points == 0) return false;
+    outRawX = ((int)(data[1] & 0x0F) << 8) | data[2];
+    outRawY = ((int)(data[3] & 0x0F) << 8) | data[4];
+    outZ = points;
+    return true;
+  }
+
+  if (g_tdisplayTouchController == TDisplayTouchController::CST_MUTUAL) {
+    uint8_t data[6] = {0};
+    if (!tdisplayI2cRead16(g_tdisplayTouchAddr, 0xD000, data, sizeof(data))) return false;
+    uint8_t points = data[5] & 0x0F;
+    if (points == 0) points = data[0] & 0x0F;
+    if (points == 0) return false;
+    outRawX = ((int)data[1] << 4) | ((data[3] >> 4) & 0x0F);
+    outRawY = ((int)data[2] << 4) | (data[3] & 0x0F);
+    outZ = points;
+    return true;
+  }
+
+  return false;
+}
+
+static void tdisplayMapTouchToScreen(int rawX, int rawY, int& outX, int& outY) {
+  const int w = tft.width();
+  const int h = tft.height();
+
+  // First touch determines whether controller is reporting portrait or landscape axes.
+  if (!g_tdisplayTouchAxesLocked) {
+    // If X exceeds screen height, we are almost certainly already in landscape coords.
+    // If Y exceeds screen height, controller is in portrait coords.
+    if (rawX > h) {
+      g_tdisplayTouchLandscapeCoords = true;
+      g_tdisplayTouchAxesLocked = true;
+      Serial.println("[touch] axis mode: landscape");
+    } else if (rawY > h) {
+      g_tdisplayTouchLandscapeCoords = false;
+      g_tdisplayTouchAxesLocked = true;
+      Serial.println("[touch] axis mode: portrait");
+    }
+  }
+
+  if (g_tdisplayTouchLandscapeCoords) {
+    outX = clampi(rawX, 0, w - 1);
+    outY = clampi(rawY, 0, h - 1);
+    return;
+  }
+
+  // Default for T-Display-S3 touch modules: portrait touch axes with TFT rotation(1).
+  outX = clampi(rawY, 0, w - 1);
+  outY = clampi((h - 1) - rawX, 0, h - 1);
+}
+
+static void tdisplayTouchResetPulse() {
+  pinMode(PIN_TOUCH_RST, OUTPUT);
+  digitalWrite(PIN_TOUCH_RST, HIGH);
+  delay(2);
+  digitalWrite(PIN_TOUCH_RST, LOW);
+  delay(12);
+  digitalWrite(PIN_TOUCH_RST, HIGH);
+  delay(60);
+}
+
+static bool tdisplayTouchInit() {
+  Wire.begin(PIN_TOUCH_SDA, PIN_TOUCH_SCL);
+  Wire.setClock(400000);
+  pinMode(PIN_TOUCH_INT, INPUT_PULLUP);
+  tdisplayTouchResetPulse();
+
+  g_tdisplayTouchPresent = false;
+  g_tdisplayTouchController = TDisplayTouchController::NONE;
+  g_tdisplayTouchAddr = 0;
+  g_tdisplayTouchAxesLocked = false;
+  g_tdisplayTouchLandscapeCoords = false;
+
+  if (tdisplayI2cProbe(TOUCH_ADDR_CST_SELF)) {
+    g_tdisplayTouchPresent = true;
+    g_tdisplayTouchController = TDisplayTouchController::CST_SELF;
+    g_tdisplayTouchAddr = TOUCH_ADDR_CST_SELF;
+  } else if (tdisplayI2cProbe(TOUCH_ADDR_CST_MUTUAL)) {
+    g_tdisplayTouchPresent = true;
+    g_tdisplayTouchController = TDisplayTouchController::CST_MUTUAL;
+    g_tdisplayTouchAddr = TOUCH_ADDR_CST_MUTUAL;
+  }
+
+  if (!g_tdisplayTouchPresent) return false;
+
+  const char* ctrl =
+      (g_tdisplayTouchController == TDisplayTouchController::CST_SELF) ? "CST_SELF"
+      : (g_tdisplayTouchController == TDisplayTouchController::CST_MUTUAL) ? "CST_MUTUAL"
+                                                                            : "UNKNOWN";
+  Serial.printf("[touch] detected controller=%s addr=0x%02X (SDA=%d SCL=%d INT=%d RST=%d)\n",
+                ctrl, g_tdisplayTouchAddr, PIN_TOUCH_SDA, PIN_TOUCH_SCL, PIN_TOUCH_INT, PIN_TOUCH_RST);
+  return true;
+}
+#endif
+
 static TouchState readTouch() {
   TouchState s{};
   s.down = false;
 
+#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+  int rx = -1;
+  int ry = -1;
+  int rz = 0;
+  if (!tdisplayReadTouchRaw(rx, ry, rz)) {
+    return s;
+  }
+
+  int mappedX = 0;
+  int mappedY = 0;
+  tdisplayMapTouchToScreen(rx, ry, mappedX, mappedY);
+
+  s.rx = rx;
+  s.ry = ry;
+  s.z = rz;
+  s.x = mappedX;
+  s.y = mappedY;
+  s.down = true;
+
+  g_lastTouchRawX = s.rx;
+  g_lastTouchRawY = s.ry;
+  g_lastTouchRawZ = s.z;
+  return s;
+#else
   // NOTE: On some CYD/XPT2046 boards, ts.touched() can get "stuck true" after redraws.
   // We avoid that by always sampling getPoint() and using pressure (z) as truth.
   TS_Point p = ts.getPoint();
@@ -204,11 +454,27 @@ static TouchState readTouch() {
 
   s.down = true;
   return s;
+#endif
 }
 
 static bool touchEdgeTriggered(int &outX, int &outY) {
   static bool wasDown = false;
   if (millis() < g_touchDebounceUntilMs) return false;
+
+#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+  TouchState s = readTouch();
+
+  if (s.down && !wasDown) {
+    wasDown = true;
+    outX = s.x;
+    outY = s.y;
+    return true;
+  }
+  if (!s.down) wasDown = false;
+
+  // Hardware buttons remain available as NEXT/SELECT fallback.
+  return tdisplayHandleButtonInput(outX, outY);
+#else
   TouchState s = readTouch();
 
   if (s.down && !wasDown) {
@@ -219,6 +485,7 @@ static bool touchEdgeTriggered(int &outX, int &outY) {
   }
   if (!s.down) wasDown = false;
   return false;
+#endif
 }
 
 static void resetTouchLatch() {
@@ -327,6 +594,8 @@ static bool macFromString(const char* str, uint8_t* mac);
 static void sendDeauthFrame(const uint8_t* bssid, const uint8_t* station, uint8_t reason);
 static String normalizeSdWebPath(String path);
 static void startAPMode();
+static void uiMemLog(const char* tag);
+static void uiMemBudgetBoot();
 
 // AutoMode must be declared before handleCapturedPacket so the promiscuous
 // callback can filter on JAMMIT mode without a forward-declaration problem.
@@ -485,12 +754,17 @@ static const char* spoofModeNames[] = { "STANDARD", "MAC_POOL", "VENDOR_OUI", "H
 static SpoofMode justGoSpoofMode = SpoofMode::STANDARD;  // Can be switched per run
 
 // LED victory flash system (for handshakes/wins)
+#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#define LED_PIN -1
+#else
 #define LED_PIN 21
+#endif
 static uint32_t ledFlashEndTime = 0;
 static bool ledFlashing = false;
 
 // Flash LED for N seconds when winning (handshake/PMKID capture)
 static void flashLEDForVictory(uint32_t durationSeconds = 10) {
+  if (LED_PIN < 0) return;
   // Start flashing green for victory
   ledFlashEndTime = millis() + (durationSeconds * 1000);
   ledFlashing = true;
@@ -504,6 +778,7 @@ extern "C" void triggerLEDVictoryFlash() {
 
 // Update LED flash state (call from loop)
 static void updateLEDFlash() {
+  if (LED_PIN < 0) return;
   if (!ledFlashing) return;
   
   uint32_t now = millis();
@@ -840,6 +1115,11 @@ static SPIClass sdSpi(HSPI);
 
 static bool mountSdCard(bool verbose) {
   if (sdReady) return true;
+  if (!BOARD_HAS_SD) {
+    if (verbose) Serial.println("[sd] disabled on this target");
+    sdReady = false;
+    return false;
+  }
 
   // Use dedicated VSPI bus for SD so we do not disturb touch/TFT SPI bus.
   sdSpi.begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
@@ -1218,6 +1498,7 @@ static void startSniff() {
 
   Serial.printf("[monitor] start: ssid='%s' bssid=%s ch=%d\n",
                 target.ssid.c_str(), target.bssid.c_str(), target.channel);
+  uiMemLog("after_start_sniff");
 }
 
 // ---------- Automate Modes (Milestone D v8.1) ----------
@@ -1403,6 +1684,7 @@ static void stopSniff() {
   captureDir[0] = '\0';
 
   Serial.println("[monitor] stop");
+  uiMemLog("after_stop_sniff");
 }
 
 static void updateSniffStats() {
@@ -2039,11 +2321,20 @@ static void handleSerialDebugCommands() {
 }
 
 struct Button { int x, y, w, h; const char* label; };
+#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+static constexpr int HYPERCUBE_UI_SCALE = 2;
+#else
 static constexpr int HYPERCUBE_UI_SCALE = 4;
+#endif
 static constexpr int HYPERCUBE_BASE_SIZE_PX = 24;
 static constexpr int HYPERCUBE_TARGET_SIZE_PX = HYPERCUBE_BASE_SIZE_PX * HYPERCUBE_UI_SCALE;
+#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+static constexpr int UI_TOP_BUTTON_SHIFT_Y = 0;
+static constexpr int UI_TOP_BUTTON_SHIFT_THRESHOLD_Y = 0;
+#else
 static constexpr int UI_TOP_BUTTON_SHIFT_Y = 34;
 static constexpr int UI_TOP_BUTTON_SHIFT_THRESHOLD_Y = 72;
+#endif
 
 static inline int buttonRenderYOffset(const Button& b) {
   // Keep existing logical layouts, but move top rows below the enlarged hypercube.
@@ -2060,7 +2351,11 @@ static bool hit(const Button& b, int px, int py) {
 static constexpr int HOME_BTN_COLS = 3;
 static constexpr int HOME_BTN_ROWS = 3;
 static constexpr int HOME_BTN_COUNT = 8;
+#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+static constexpr uint8_t UI_BUTTON_TEXT_SIZE = 1;
+#else
 static constexpr uint8_t UI_BUTTON_TEXT_SIZE = 2;
+#endif
 
 // utility for picking neon border colour; indexed same order as labels below.
 static uint16_t homeBtnBorderColor(int idx) {
@@ -2075,9 +2370,9 @@ static uint16_t homeBtnBorderColor(int idx) {
 
 static void drawButton(const Button& b, uint16_t fill, uint16_t border, uint16_t text) {
   const int yOff = buttonRenderYOffset(b);
-  // Render button at ~90% of logical hitbox size for better text fit
-  const int drawW = (b.w * 9) / 10;
-  const int drawH = (b.h * 9) / 10;
+  // Render button at ~95% of logical hitbox size for better text fit.
+  const int drawW = (b.w * 95) / 100;
+  const int drawH = (b.h * 95) / 100;
   const int drawX = b.x + (b.w - drawW) / 2;
   const int drawY = (b.y + yOff) + (b.h - drawH) / 2;
   const int r = (drawH >= 28) ? 8 : 6;
@@ -2086,8 +2381,14 @@ static void drawButton(const Button& b, uint16_t fill, uint16_t border, uint16_t
   tft.drawRoundRect(drawX, drawY, drawW, drawH, r, border);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(text, fill);
-  
-  tft.setTextSize(UI_BUTTON_TEXT_SIZE);
+
+  // Keep labels inside button bounds; shrink only when needed.
+  int labelSize = UI_BUTTON_TEXT_SIZE;
+  tft.setTextSize(labelSize);
+  while (labelSize > 1 && tft.textWidth(b.label) > (drawW - 10)) {
+    labelSize--;
+    tft.setTextSize(labelSize);
+  }
   tft.drawString(b.label, b.x + b.w / 2, (b.y + yOff) + b.h / 2);
 }
 
@@ -2110,11 +2411,88 @@ static void layoutHypercubeBox();
 #define UI_LOGF(...) do {} while (0)
 #endif
 
+#ifndef UI_DEBUG_MEM
+#define UI_DEBUG_MEM 0
+#endif
+
+#ifndef MEM_BUDGET_MIN_FREE_HEAP
+#define MEM_BUDGET_MIN_FREE_HEAP (40U * 1024U)
+#endif
+
+#if UI_DEBUG_MEM
+extern "C" {
+  extern uint8_t _data_start;
+  extern uint8_t _data_end;
+  extern uint8_t _bss_start;
+  extern uint8_t _bss_end;
+}
+
+static void uiMemLog(const char* tag) {
+  const uint32_t free8 = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  const uint32_t largest8 = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  const uint32_t freeHeap = (uint32_t)ESP.getFreeHeap();
+  const uint32_t heapSize = (uint32_t)ESP.getHeapSize();
+  const uint32_t sketchSize = (uint32_t)ESP.getSketchSize();
+  const uint32_t freeSketch = (uint32_t)ESP.getFreeSketchSpace();
+  Serial.printf("[mem] %s free8=%lu largest8=%lu freeHeap=%lu heapSize=%lu sketch=%lu freeSketch=%lu",
+                tag ? tag : "(null)",
+                (unsigned long)free8,
+                (unsigned long)largest8,
+                (unsigned long)freeHeap,
+                (unsigned long)heapSize,
+                (unsigned long)sketchSize,
+                (unsigned long)freeSketch);
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+  if (psramFound()) {
+    Serial.printf(" psramFree=%lu psramSize=%lu",
+                  (unsigned long)ESP.getFreePsram(),
+                  (unsigned long)ESP.getPsramSize());
+  } else {
+    Serial.print(" psram=absent");
+  }
+#else
+  Serial.print(" psram=disabled");
+#endif
+  Serial.println();
+}
+
+static void uiMemBudgetBoot() {
+  const uint32_t dataBytes = (uint32_t)(&_data_end - &_data_start);
+  const uint32_t bssBytes = (uint32_t)(&_bss_end - &_bss_start);
+  const uint32_t staticBytes = dataBytes + bssBytes;
+  const uint32_t free8 = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  const uint32_t largest8 = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  Serial.printf("[mem-budget] free8=%lu largest8=%lu data=%lu bss=%lu static=%lu min_safe=%lu\n",
+                (unsigned long)free8,
+                (unsigned long)largest8,
+                (unsigned long)dataBytes,
+                (unsigned long)bssBytes,
+                (unsigned long)staticBytes,
+                (unsigned long)MEM_BUDGET_MIN_FREE_HEAP);
+  if (free8 < MEM_BUDGET_MIN_FREE_HEAP) {
+    Serial.printf("[mem-budget][WARN] free8=%lu below threshold=%lu\n",
+                  (unsigned long)free8,
+                  (unsigned long)MEM_BUDGET_MIN_FREE_HEAP);
+  }
+}
+#else
+static inline void uiMemLog(const char*) {}
+static inline void uiMemBudgetBoot() {}
+#endif
+
+#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+static constexpr int UI_SAFE_MARGIN = 4;
+static constexpr int UI_TOP_GAP = 4;
+static constexpr int UI_BOTTOM_BAR_H = 30;
+static constexpr int UI_BUTTON_H = 24;
+static constexpr int UI_BUTTON_GAP = 4;
+#else
 static constexpr int UI_SAFE_MARGIN = 8;
 static constexpr int UI_TOP_GAP = 6;
 static constexpr int UI_BOTTOM_BAR_H = 36;
 static constexpr int UI_BUTTON_H = 30;
 static constexpr int UI_BUTTON_GAP = 6;
+#endif
 static void drawCyberBackdrop();
 static void drawHypercubeWidget(bool clearBg);
 
@@ -2190,7 +2568,7 @@ static void drawHeaderTitleOverlay() {
   if (!currentHeaderTitle || currentHeaderTitle[0] == '\0') return;
   layoutHypercubeBox();
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(2);
+  tft.setTextSize((tft.height() <= 180) ? 1 : 2);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   String headerTitle = String(currentHeaderTitle);
   const int maxTitleW = (hypercubeBoxX - 12) - 8;
@@ -2280,6 +2658,7 @@ static Button btnWifiYes, btnWifiNo;
 static Button btnTargetBack, btnTargetAutomate, btnTargetMonitor, btnTargetSniff, btnTargetLock;
 static Button btnMonitorBack;
 static Button btnAutoBack, btnAutoY0INK, btnAutoRAW, btnAutoSCOPE, btnAutoJAMMIT;
+static Button btnMonitorUpDir, btnMonitorUp, btnMonitorDown;
 // Just Go screen buttons
 static Button btnJustGoBack, btnJustGoToggle, btnJustGoSpray;
 static Button btnJustGoStayMinus, btnJustGoStayPlus;
@@ -2304,19 +2683,44 @@ static Button btnWifiPwCancel, btnWifiPwConnect;
 static Button btnWebserverBack, btnWebserverStartAP, btnWebserverStartServer;
 static Button btnWebserverStopServer;
 static Button btnWebserverWpaSecSync, btnWebserverDownloadResults;
-static Button btnCfgWifiConnect, btnCfgWebserver, btnCfgLed;  // Add button refs for Config screen
+static Button btnCfgWifiConnect, btnCfgWebserver, btnCfgLed;
+static Button btnCfgStartup, btnCfgTelemetry;
 
 static int wifiListTopY = 92;
 static int wifiListBottomY = 200;
 static int wifiRowH = 34;
+static Button btnWifiRows[4];
 
 static Button btnHopMinus, btnHopPlus;
 static Button btnScanMinus, btnScanPlus;
 static Button btnDeauthToggle;
+static Button btnWifiDefaultLockToggle;
 static Button btnCfgWifi;
+static Button btnStartupAutoReconnect, btnStartupDefaultLockToggle;
+static Button btnTelemetryMinus, btnTelemetryPlus, btnTelemetryVerboseToggle;
 static Button btnMonitorTab1, btnMonitorTab2;
 static Button btnReconBack, btnReconStart, btnReconClear;
 static Button btnScopeBack, btnScopeRefresh;
+
+static ScreenId monitorReturnScreen = ScreenId::TARGET_DETAILS;
+static constexpr int MONITOR_FILE_MAX = 24;
+struct MonitorFileEntry {
+  char name[40];
+  uint32_t size;
+  bool isDir;
+};
+static MonitorFileEntry monitorFiles[MONITOR_FILE_MAX];
+static int monitorFileCount = 0;
+static int monitorFileScroll = 0;
+static char monitorFilePath[96] = "/";
+static char monitorFileInfo[80] = "";
+static uint32_t monitorFileLastRefreshMs = 0;
+static int monitorFileListX = 0;
+static int monitorFileListY = 0;
+static int monitorFileListW = 0;
+static int monitorFileListH = 0;
+static int monitorFileRowH = 14;
+static int monitorFileVisibleRows = 0;
 
 // LED Control state (buttons are local to reduce DRAM)
 static uint8_t ledBrightness = 128;
@@ -2510,6 +2914,12 @@ static void drawLedControlDynamic() {
 // Bruce Monitor screen buttons and state
 static Button btnBruceMonBack;
 static Button btnBruceMonFiles;
+static Button bruceMenuBtns[6];
+static Button btnBruceSetTargetBack;
+static Button btnBruceSetTargetAll;
+static Button btnBruceSetTargetRows[8];
+static Button btnBruceSetTargetUp;
+static Button btnBruceSetTargetDown;
 // Bruce attack target selection (compact storage)
 static uint8_t bruceTargetBssid[6] = {0};
 static char bruceTargetSsid[20] = {0};  // Reduced to save DRAM
@@ -2638,17 +3048,314 @@ static uint8_t justGoLastPmkidCount = 0;
 static uint32_t justGoLastDeauthCount = 0;
 static uint32_t justGoLastConsoleUpdateMs = 0;
 
+#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+static constexpr uint8_t TDISPLAY_NAV_MAX_ITEMS = 64;
+static Button tdisplayNavItems[TDISPLAY_NAV_MAX_ITEMS];
+static uint8_t tdisplayNavCount = 0;
+static uint8_t tdisplayNavIndex = 0;
+static ScreenId tdisplayNavScreen = ScreenId::HOME;
+static bool tdisplayNavRefreshRequested = false;
+
+static bool tdisplayNavButtonValid(const Button& b) {
+  return (b.w > 2 && b.h > 2);
+}
+
+static void tdisplayNavPush(const Button& b) {
+  if (!tdisplayNavButtonValid(b)) return;
+  if (tdisplayNavCount >= TDISPLAY_NAV_MAX_ITEMS) return;
+  tdisplayNavItems[tdisplayNavCount++] = b;
+}
+
+static String tdisplayNavCurrentLabel() {
+  if (tdisplayNavCount == 0) return "none";
+  const char* raw = tdisplayNavItems[tdisplayNavIndex].label;
+  if (!raw || raw[0] == '\0') return "item";
+  return String(raw);
+}
+
+static void tdisplayNavDrawHeaderStatus() {
+  if (!currentHeaderTitle || currentHeaderTitle[0] == '\0') return;
+  layoutHypercubeBox();
+
+  const bool compact = (tft.height() <= 180);
+  const int titleSize = compact ? 1 : 2;
+  const int titleX = 8;
+  const int titleY = 8;
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(titleSize);
+  String headerTitle = String(currentHeaderTitle);
+  const int maxTitleW = (hypercubeBoxX - 12) - 8;
+  if (maxTitleW > 8) {
+    while (headerTitle.length() > 3 && tft.textWidth(headerTitle) > maxTitleW) {
+      headerTitle.remove(headerTitle.length() - 1);
+    }
+    if (headerTitle != String(currentHeaderTitle) && headerTitle.length() > 3) {
+      headerTitle.remove(headerTitle.length() - 3);
+      headerTitle += "...";
+    }
+  }
+
+  const int titleW = tft.textWidth(headerTitle);
+  const int statusX = titleX + titleW + 6;
+  const int statusRight = hypercubeBoxX - 12;
+  const int statusW = statusRight - statusX;
+  if (statusW < 38) return;
+
+  tft.fillRect(statusX, titleY - 1, statusW, compact ? 10 : 14, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+
+  String msg = "SEL: " + tdisplayNavCurrentLabel();
+  while (msg.length() > 3 && tft.textWidth(msg) > (statusW - 2)) {
+    msg.remove(msg.length() - 1);
+  }
+  if (msg.length() > 3 && tft.textWidth(msg) > (statusW - 2)) return;
+
+  tft.drawString(msg, statusX + 1, titleY + (compact ? 1 : 2));
+}
+
+static void tdisplayNavDrawSelectedOutline() {
+  if (tdisplayNavCount == 0) return;
+
+  const Button& b = tdisplayNavItems[tdisplayNavIndex];
+  const int yOff = buttonRenderYOffset(b);
+  const int bx0 = b.x;
+  const int by0 = b.y + yOff;
+  const int bx1 = b.x + b.w - 1;
+  const int by1 = by0 + b.h - 1;
+
+  const int x0 = clampi(bx0 - 2, 1, tft.width() - 2);
+  const int y0 = clampi(by0 - 2, 1, tft.height() - 2);
+  const int x1 = clampi(bx1 + 2, 1, tft.width() - 2);
+  const int y1 = clampi(by1 + 2, 1, tft.height() - 2);
+
+  const int w = x1 - x0 + 1;
+  const int h = y1 - y0 + 1;
+  if (w <= 2 || h <= 2) return;
+
+  tft.drawRect(x0, y0, w, h, TFT_YELLOW);
+  if (w > 4 && h > 4) {
+    tft.drawRect(x0 + 1, y0 + 1, w - 2, h - 2, TFT_CYAN);
+  }
+}
+
+static void tdisplayNavDrawHint() {
+  tdisplayNavBuild();
+  tdisplayNavDrawHeaderStatus();
+  tdisplayNavDrawSelectedOutline();
+}
+
+static void tdisplayNavBuild() {
+  if (screen != tdisplayNavScreen) {
+    tdisplayNavScreen = screen;
+    tdisplayNavIndex = 0;
+  }
+
+  tdisplayNavCount = 0;
+
+  switch (screen) {
+    case ScreenId::HOME:
+      if (homeReconnectPromptActive || homeTargetsPromptActive) {
+        tdisplayNavPush(btnHomePromptNo);
+        tdisplayNavPush(btnHomePromptYes);
+      } else {
+        for (int i = 0; i < HOME_BTN_COUNT; i++) tdisplayNavPush(homeBtns[i]);
+      }
+      break;
+    case ScreenId::JUST_GO:
+      tdisplayNavPush(btnJustGoBack);
+      tdisplayNavPush(btnJustGoToggle);
+      tdisplayNavPush(btnJustGoSpray);
+      tdisplayNavPush(btnJustGoStayMinus);
+      tdisplayNavPush(btnJustGoStayPlus);
+      tdisplayNavPush(btnJustGoProfilePrev);
+      tdisplayNavPush(btnJustGoProfileNext);
+      break;
+    case ScreenId::WIFI_SCAN:
+      tdisplayNavPush(btnWifiBack);
+      tdisplayNavPush(btnWifiScan);
+      tdisplayNavPush(btnWifiStop);
+      tdisplayNavPush(btnWifiUp);
+      tdisplayNavPush(btnWifiDown);
+      for (int i = 0; i < 4; i++) {
+        if ((apScroll + i) < apCount) tdisplayNavPush(btnWifiRows[i]);
+      }
+      break;
+    case ScreenId::CONFIRM_TARGET:
+      tdisplayNavPush(btnWifiNo);
+      tdisplayNavPush(btnWifiYes);
+      break;
+    case ScreenId::TARGET_DETAILS:
+      tdisplayNavPush(btnTargetBack);
+      tdisplayNavPush(btnTargetAutomate);
+      tdisplayNavPush(btnTargetMonitor);
+      tdisplayNavPush(btnTargetLock);
+      tdisplayNavPush(btnTargetSniff);
+      break;
+    case ScreenId::AUTOMATE_MENU:
+      tdisplayNavPush(btnAutoBack);
+      tdisplayNavPush(btnAutoY0INK);
+      tdisplayNavPush(btnAutoRAW);
+      tdisplayNavPush(btnAutoSCOPE);
+      tdisplayNavPush(btnAutoJAMMIT);
+      break;
+    case ScreenId::CONFIG:
+      tdisplayNavPush(btnBack);
+      tdisplayNavPush(btnCfgWifi);
+      tdisplayNavPush(btnCfgWifiConnect);
+      tdisplayNavPush(btnCfgWebserver);
+      tdisplayNavPush(btnCfgStartup);
+      tdisplayNavPush(btnCfgTelemetry);
+      tdisplayNavPush(btnCfgLed);
+      break;
+    case ScreenId::WIFI_CONFIG:
+      tdisplayNavPush(btnBack);
+      tdisplayNavPush(btnSave);
+      tdisplayNavPush(btnHopMinus);
+      tdisplayNavPush(btnHopPlus);
+      tdisplayNavPush(btnScanMinus);
+      tdisplayNavPush(btnScanPlus);
+      tdisplayNavPush(btnDeauthToggle);
+      tdisplayNavPush(btnWifiDefaultLockToggle);
+      break;
+    case ScreenId::STARTUP_CONFIG:
+      tdisplayNavPush(btnBack);
+      tdisplayNavPush(btnStartupAutoReconnect);
+      tdisplayNavPush(btnStartupDefaultLockToggle);
+      break;
+    case ScreenId::TELEMETRY_CONFIG:
+      tdisplayNavPush(btnBack);
+      tdisplayNavPush(btnTelemetryMinus);
+      tdisplayNavPush(btnTelemetryPlus);
+      tdisplayNavPush(btnTelemetryVerboseToggle);
+      break;
+    case ScreenId::WIFI_CONNECT:
+      if (wifiConnectShowPasswordModal) {
+        for (int i = 0; i < wifiPwKeyCount; i++) tdisplayNavPush(btnWifiPwKeys[i]);
+        tdisplayNavPush(btnWifiPwShift);
+        tdisplayNavPush(btnWifiPwBack);
+        tdisplayNavPush(btnWifiPwSpace);
+        tdisplayNavPush(btnWifiPwClear);
+        tdisplayNavPush(btnWifiPwCancel);
+        tdisplayNavPush(btnWifiPwConnect);
+      } else {
+        tdisplayNavPush(btnWifiConnectBack);
+        tdisplayNavPush(btnWifiConnectScan);
+        tdisplayNavPush(btnWifiConnectSubmit);
+        tdisplayNavPush(btnWifiConnectDisconnect);
+        tdisplayNavPush(btnWifiConnectUp);
+        tdisplayNavPush(btnWifiConnectDown);
+        for (int i = 0; i < 3; i++) tdisplayNavPush(btnWifiConnectList[i]);
+      }
+      break;
+    case ScreenId::WEBSERVER:
+      tdisplayNavPush(btnWebserverBack);
+      tdisplayNavPush(btnWebserverStartAP);
+      tdisplayNavPush(btnWebserverStartServer);
+      tdisplayNavPush(btnWebserverWpaSecSync);
+      tdisplayNavPush(btnWebserverDownloadResults);
+      break;
+    case ScreenId::MONITOR:
+      tdisplayNavPush(btnMonitorBack);
+      tdisplayNavPush(btnMonitorTab1);
+      tdisplayNavPush(btnMonitorTab2);
+      tdisplayNavPush(btnMonitorUpDir);
+      tdisplayNavPush(btnMonitorUp);
+      tdisplayNavPush(btnMonitorDown);
+      break;
+    case ScreenId::RECON:
+      tdisplayNavPush(btnReconBack);
+      tdisplayNavPush(btnReconStart);
+      tdisplayNavPush(btnReconClear);
+      break;
+    case ScreenId::SCOPE_GRAPH:
+      tdisplayNavPush(btnScopeBack);
+      tdisplayNavPush(btnScopeRefresh);
+      break;
+    case ScreenId::ABOUT:
+    case ScreenId::TARGETS_PLACEHOLDER:
+    case ScreenId::LED_CONTROL:
+      tdisplayNavPush(btnBack);
+      break;
+    case ScreenId::BRUCE_MENU:
+      for (int i = 0; i < 6; i++) tdisplayNavPush(bruceMenuBtns[i]);
+      break;
+    case ScreenId::BRUCE_MONITOR:
+      tdisplayNavPush(btnBruceMonBack);
+      tdisplayNavPush(btnBruceMonFiles);
+      break;
+    case ScreenId::BRUCE_SET_TARGET:
+      tdisplayNavPush(btnBruceSetTargetAll);
+      for (int i = 0; i < 8; i++) tdisplayNavPush(btnBruceSetTargetRows[i]);
+      tdisplayNavPush(btnBruceSetTargetUp);
+      tdisplayNavPush(btnBruceSetTargetDown);
+      tdisplayNavPush(btnBruceSetTargetBack);
+      break;
+  }
+
+  if (tdisplayNavCount == 0) tdisplayNavPush(btnBack);
+  if (tdisplayNavCount > 0 && tdisplayNavIndex >= tdisplayNavCount) tdisplayNavIndex = 0;
+}
+
+static bool tdisplayNavConsumeRefreshRequest() {
+  const bool pending = tdisplayNavRefreshRequested;
+  tdisplayNavRefreshRequested = false;
+  return pending;
+}
+
+static bool tdisplayHandleButtonInput(int& outX, int& outY) {
+  static bool wasNextDown = false;
+  static bool wasSelectDown = false;
+
+  const bool nextDown = (digitalRead(BUTTON_1) == LOW);
+  const bool selectDown = (digitalRead(BUTTON_2) == LOW);
+
+  tdisplayNavBuild();
+
+  if (nextDown && !wasNextDown) {
+    wasNextDown = true;
+    if (tdisplayNavCount > 0) {
+      tdisplayNavIndex = (uint8_t)((tdisplayNavIndex + 1) % tdisplayNavCount);
+      tdisplayNavRefreshRequested = true;
+    }
+    return false;
+  }
+
+  if (selectDown && !wasSelectDown) {
+    wasSelectDown = true;
+    if (tdisplayNavCount > 0) {
+      const Button& b = tdisplayNavItems[tdisplayNavIndex];
+      const int yOff = buttonRenderYOffset(b);
+      outX = b.x + (b.w / 2);
+      outY = b.y + yOff + (b.h / 2);
+      g_lastTouchRawX = outX;
+      g_lastTouchRawY = outY;
+      g_lastTouchRawZ = 1;
+      tdisplayNavDrawHint();
+      return true;
+    }
+    return false;
+  }
+
+  if (!nextDown) wasNextDown = false;
+  if (!selectDown) wasSelectDown = false;
+  return false;
+}
+#endif
+
 static void layoutHome() {
   const int w = tft.width();
   const int h = tft.height();
-  const int pad = 10;
-  const int gapH = 10;
-  const int gapV = 10;
-  const int gridBtnH = 44;
+  const bool compact = (h <= 180);
+  const int pad = 8;
+  const int gapH = compact ? 6 : 8;
+  const int gapV = compact ? 4 : 8;
+  const int gridBtnH = compact ? 30 : 46;
   const int gridBtnW = (w - (pad * 2) - ((HOME_BTN_COLS - 1) * gapH)) / HOME_BTN_COLS;
 
   // Top row buttons match the same size as all other Home buttons.
-  const int topBtnY = 30;
+  const int topBtnY = compact ? (hypercubeReservedBottomY + 2) : 28;
   homeBtns[0] = {pad, topBtnY, gridBtnW, gridBtnH, "Just Go"};
   homeBtns[1] = {pad + gridBtnW + gapH, topBtnY, gridBtnW, gridBtnH, "WiFi"};
 
@@ -2657,7 +3364,7 @@ static void layoutHome() {
   const int footerTextY = h - 6;
   const int bottomRowY = (footerTextY - 10) - gridBtnH;
   const int gridTop = bottomRowY - (gridBtnH + gapV);
-  const char* gridLabels[6] = {"Logs", "Targets", "Recon", "Config", "About", "BRUCE"};
+  const char* gridLabels[6] = {"Logs", "Target", "Recon", "Config", "About", "BRUCE"};
   int idx = 2;
   for (int r = 0; r < 2; ++r) {
     const int y = gridTop + r * (gridBtnH + gapV);
@@ -2679,6 +3386,7 @@ struct HypercubePalette {
 
 static void layoutHypercubeBox() {
   const int w = tft.width();
+  const int h = tft.height();
   int headerTop = 2;
   int headerH = HYPERCUBE_TARGET_SIZE_PX + 4;
   int marginRight = 4;
@@ -2688,7 +3396,7 @@ static void layoutHypercubeBox() {
     headerH = HYPERCUBE_TARGET_SIZE_PX + 2;
     marginRight = 1;
   }
-  const int minSize = 48;
+  const int minSize = (h <= 180) ? 36 : 48;
   int size = HYPERCUBE_TARGET_SIZE_PX;
   if (size > w - 10) size = w - 10;
   if (size > headerH) size = headerH;
@@ -2853,7 +3561,11 @@ static void drawCyberBackdrop() {
 
 static void drawHome() {
   tft.fillScreen(TFT_BLACK);
+  #if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+  drawHeader("NEONDRIVE // T-DISPLAY-S3");
+  #else
   drawHeader("NEONDRIVE // CYD");
+  #endif
   drawUniversalBackground();
 
   layoutHome();
@@ -2866,7 +3578,11 @@ static void drawHome() {
   tft.setTextDatum(BC_DATUM);
   tft.setTextSize(1);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString("NeonDrive: CYD UI + WiFi scan + target ops", tft.width() / 2, tft.height() - 6);
+  if (tft.height() <= 180) {
+    tft.drawString("BTN1=Next  BTN2=Select", tft.width() / 2, tft.height() - 6);
+  } else {
+    tft.drawString("NeonDrive: CYD UI + WiFi scan + target ops", tft.width() / 2, tft.height() - 6);
+  }
   drawBorder();
   if (homeReconnectPromptActive) drawHomeReconnectPromptOverlay();
   if (homeTargetsPromptActive) drawHomeTargetsPromptOverlay();
@@ -2992,13 +3708,14 @@ static void drawWifiRow(int idx, int y, bool selected) {
 static void drawWifiConfirmOverlay() {
   const int w = tft.width();
   const int h = tft.height();
+  const bool compact = (h <= 180);
 
   // Dim background
   tft.fillRect(0, 34, w, h - 34, TFT_BLACK);
 
   // Modal box
   const int boxW = ((w - 40) * 9) / 10;
-  const int boxH = (140 * 9) / 10;
+  const int boxH = compact ? 98 : (140 * 9) / 10;
   const int boxX = (w - boxW) / 2;
   int boxY = (h - boxH) / 2;
   const int minBoxY = hypercubeReservedBottomY + 8;
@@ -3010,7 +3727,7 @@ static void drawWifiConfirmOverlay() {
   tft.fillRoundRect(boxX + 2, boxY + 2, boxW - 4, boxH - 4, 12, TFT_BLACK);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(2);
+  tft.setTextSize(compact ? 1 : 2);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("Set Target?", boxX + 12, boxY + 12);
 
@@ -3018,14 +3735,16 @@ static void drawWifiConfirmOverlay() {
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   
   // Display pending target details
-  tft.drawString(String("SSID: ") + pendingTarget.ssid, boxX + 12, boxY + 44);
+  tft.drawString(String("SSID: ") + pendingTarget.ssid, boxX + 12, boxY + (compact ? 30 : 44));
   char line2[96];
   snprintf(line2, sizeof(line2), "CH: %d  RSSI: %ddBm  SEC: %s", pendingTarget.channel, pendingTarget.rssi, authToStr(pendingTarget.auth));
-  tft.drawString(line2, boxX + 12, boxY + 60);
+  tft.drawString(line2, boxX + 12, boxY + (compact ? 44 : 60));
 
   // Buttons
-  btnWifiNo  = {boxX + 12, boxY + boxH - 52, 110, 40, "No"};
-  btnWifiYes = {boxX + boxW - 122, boxY + boxH - 52, 110, 40, "Yes"};
+  const int btnW = compact ? 84 : 110;
+  const int btnH = compact ? 28 : 40;
+  btnWifiNo  = {boxX + 12, boxY + boxH - (btnH + 10), btnW, btnH, "No"};
+  btnWifiYes = {boxX + boxW - (btnW + 12), boxY + boxH - (btnH + 10), btnW, btnH, "Yes"};
 
   drawButton(btnWifiNo, TFT_MAROON, TFT_CYAN, TFT_WHITE);
   drawButton(btnWifiYes, TFT_DARKGREEN, TFT_MAGENTA, TFT_WHITE);
@@ -3033,7 +3752,7 @@ static void drawWifiConfirmOverlay() {
   // Footer hint
   tft.setTextDatum(BC_DATUM);
   tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
-  tft.drawString("tap Yes to open Target Ops", w / 2, boxY + boxH - 6);
+  tft.drawString("tap Yes to open Target Ops", w / 2, boxY + boxH - 3);
 
   drawBorder();
 }
@@ -3045,10 +3764,11 @@ static void drawConfirmTarget() {
   
   const int w = tft.width();
   const int h = tft.height();
+  const bool compact = (h <= 180);
 
   // Modal box
   const int boxW = ((w - 40) * 9) / 10;
-  const int boxH = (140 * 9) / 10;
+  const int boxH = compact ? 98 : (140 * 9) / 10;
   const int boxX = (w - boxW) / 2;
   int boxY = (h - boxH) / 2;
   const int minBoxY = hypercubeReservedBottomY + 8;
@@ -3060,24 +3780,26 @@ static void drawConfirmTarget() {
   tft.fillRoundRect(boxX + 2, boxY + 2, boxW - 4, boxH - 4, 12, TFT_BLACK);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(2);
+  tft.setTextSize(compact ? 1 : 2);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("Proceed to Target?", boxX + 12, boxY + 12);
 
   tft.setTextSize(1);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   if (hasTarget) {
-    tft.drawString(String("SSID: ") + target.ssid, boxX + 12, boxY + 44);
+    tft.drawString(String("SSID: ") + target.ssid, boxX + 12, boxY + (compact ? 30 : 44));
     char line2[96];
     snprintf(line2, sizeof(line2), "CH: %d  RSSI: %ddBm  SEC: %s", target.channel, target.rssi, authToStr(target.auth));
-    tft.drawString(line2, boxX + 12, boxY + 60);
+    tft.drawString(line2, boxX + 12, boxY + (compact ? 44 : 60));
   } else {
-    tft.drawString("No target selected.", boxX + 12, boxY + 50);
+    tft.drawString("No target selected.", boxX + 12, boxY + (compact ? 36 : 50));
   }
 
   // Buttons
-  btnWifiNo  = {boxX + 12, boxY + boxH - 52, 110, 40, "No"};
-  btnWifiYes = {boxX + boxW - 122, boxY + boxH - 52, 110, 40, "Yes"};
+  const int btnW = compact ? 84 : 110;
+  const int btnH = compact ? 28 : 40;
+  btnWifiNo  = {boxX + 12, boxY + boxH - (btnH + 10), btnW, btnH, "No"};
+  btnWifiYes = {boxX + boxW - (btnW + 12), boxY + boxH - (btnH + 10), btnW, btnH, "Yes"};
 
   drawButton(btnWifiNo, TFT_MAROON, TFT_CYAN, TFT_WHITE);
   drawButton(btnWifiYes, TFT_DARKGREEN, TFT_MAGENTA, TFT_WHITE);
@@ -3092,19 +3814,20 @@ static void drawWifiScan() {
 
   const int w = tft.width();
   const int h = tft.height();
+  const bool compact = (h <= 180);
   // Bottom controls on the left: Back / Scan / Stop.
-  const int btnGap = 8;
-  const int btnH = 30;
-  const int btnY = h - 36;
+  const int btnGap = compact ? 4 : 8;
+  const int btnH = compact ? 24 : 30;
+  const int btnY = h - (compact ? 30 : 36);
   const int btnX0 = 8;
-  const int leftControlW = max(180, hypercubeBoxX - 16);
+  const int leftControlW = max(compact ? 164 : 180, hypercubeBoxX - 16);
   const int btnW = max(56, (leftControlW - (btnGap * 2)) / 3);
   btnWifiBack = {btnX0 + (btnW + btnGap) * 0, btnY, btnW, btnH, "Back"};
   btnWifiScan = {btnX0 + (btnW + btnGap) * 1, btnY, btnW, btnH, "Scan"};
   btnWifiStop = {btnX0 + (btnW + btnGap) * 2, btnY, btnW, btnH, "Stop"};
 
   // Square scroll buttons under the hypercube.
-  const int scrollBtn = clampi(hypercubeBoxW, 22, 30);
+  const int scrollBtn = clampi(hypercubeBoxW, compact ? 18 : 22, compact ? 24 : 30);
   int scrollTopY = hypercubeReservedBottomY + 8;
   const int scrollGap = 6;
   if (scrollTopY + (scrollBtn * 2) + scrollGap > btnY - 4) {
@@ -3130,13 +3853,13 @@ static void drawWifiScan() {
   const int wifiListWLocal = max(120, hypercubeBoxX - wifiListXLocal);
 
   // Top layout bands (avoid overlaps): title -> selected -> status -> hint -> list.
-  const int selectedY = 24;
+  const int selectedY = compact ? (hypercubeReservedBottomY + 2) : 24;
   const int statusY = selectedY + 12;
   const int hintY = statusY + 12;
   wifiListTopY = hintY + 14;
   wifiListBottomY = btnY - 6;
   const int availRowsH = wifiListBottomY - wifiListTopY;
-  wifiRowH = clampi(availRowsH / 4, 20, 30);  // Keep 4 visible rows.
+  wifiRowH = clampi(availRowsH / 4, compact ? 16 : 20, compact ? 24 : 30);  // Keep 4 visible rows.
 
   // Status line
   tft.setTextDatum(TL_DATUM);
@@ -3158,12 +3881,16 @@ static void drawWifiScan() {
     int idx = apScroll + r;
     int y = wifiListTopY + r * wifiRowH;
     bool sel = (idx == apSelected);
+    btnWifiRows[r] = {wifiListXLocal, y, wifiListWLocal, wifiRowH - 2, "AP"};
     if (idx < apCount) drawWifiRow(idx, y, sel);
     else {
       // blank row
       tft.fillRect(wifiListXLocal, y, wifiListWLocal, wifiRowH - 2, TFT_BLACK);
       tft.drawRect(wifiListXLocal, y, wifiListWLocal, wifiRowH - 2, TFT_DARKGREY);
     }
+  }
+  for (int r = maxRows; r < 4; r++) {
+    btnWifiRows[r] = {0, 0, 0, 0, ""};
   }
 
   // Selected line directly under title text.
@@ -3221,19 +3948,134 @@ static void drawTargetDetails() {
 
   const int w = tft.width();
   const int h = tft.height();
+  const bool compact = (h <= 180);
+  const UiRect bottom = computeBottomBarRect();
 
-  const int sniffBtnH = 30;
-  const int sniffBtnY = h - sniffBtnH - 6;
-  const int targetBoxY = hypercubeReservedBottomY + 44;
-  const int targetBoxH = (h <= 240) ? 70 : 92;
-  const int hudY = targetBoxY + targetBoxH + 6;
-  const int hudH = sniffBtnY - hudY - 6;
+  if (compact) {
+    const UiRect content = computeContentRect();
+    const int gap = 4;
 
-  btnTargetBack = {10, 40, 64, 30, "Back"};
-  btnTargetAutomate = {78, 40, 82, 30, "Automate"};
-  btnTargetMonitor = {164, 40, 74, 30, "Monitor"};
-  btnTargetLock = {242, hypercubeReservedBottomY + 4, 68, 30, lockChannel ? "LOCKED" : "LOCK"};
-  btnTargetSniff = {10, sniffBtnY, w - 20, sniffBtnH, sniffActive ? "Stop Sniff" : "Start Sniff"};
+    // Pull target summary near the title/hypercube band on compact displays.
+    const int targetBoxY = content.y + 2;
+    const int targetBoxH = 30;
+    const int btnY = targetBoxY + targetBoxH + gap;
+    const int btnH = 22;
+
+    const int actionX = content.x;
+    const int actionW = w - (content.x * 2);
+    const int backW = 56;
+    const int monitorW = 70;
+    const int lockW = 64;
+    int attackW = actionW - backW - monitorW - lockW - (gap * 3);
+    if (attackW < 56) attackW = 56;
+
+    btnTargetBack = {actionX, btnY, backW, btnH, "Back"};
+    btnTargetAutomate = {actionX + backW + gap, btnY, attackW, btnH, "Attack"};
+    btnTargetMonitor = {actionX + backW + gap + attackW + gap, btnY, monitorW, btnH, "Monitor"};
+    btnTargetLock = {actionX + backW + gap + attackW + gap + monitorW + gap, btnY, lockW, btnH,
+                     lockChannel ? "LOCKED" : "LOCK"};
+    btnTargetSniff = {bottom.x, bottom.y, bottom.w, UI_BUTTON_H, sniffActive ? "Stop Sniff" : "Start Sniff"};
+
+    int hudY = btnY + btnH + gap;
+    int hudH = bottom.y - hudY - 3;
+    if (hudH < 18) hudH = 18;
+
+    drawButton(btnTargetBack, TFT_NAVY, TFT_CYAN, TFT_WHITE);
+    drawButton(btnTargetAutomate, TFT_DARKCYAN, TFT_MAGENTA, TFT_WHITE);
+    drawButton(btnTargetMonitor, TFT_NAVY, TFT_MAGENTA, TFT_WHITE);
+    drawButton(btnTargetLock, lockChannel ? TFT_RED : TFT_DARKGREY, TFT_CYAN, TFT_WHITE);
+    drawButton(btnTargetSniff, sniffActive ? TFT_MAROON : TFT_DARKGREEN, TFT_MAGENTA, TFT_WHITE);
+
+    // Target summary box (moved up).
+    tft.drawRect(content.x, targetBoxY, content.w, targetBoxH, TFT_MAGENTA);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextSize(1);
+    tft.setTextColor(lockChannel ? TFT_RED : TFT_CYAN, TFT_BLACK);
+    tft.drawString(lockChannel ? "TARGET LOCKED" : "TARGET", content.x + 4, targetBoxY + 2);
+
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    char line[128];
+    if (hasTarget) {
+      String ssid = target.ssid.isEmpty() ? String("(hidden)") : target.ssid;
+      while (ssid.length() > 4 && tft.textWidth("SSID: " + ssid) > (content.w - 8)) {
+        ssid.remove(ssid.length() - 1);
+      }
+      snprintf(line, sizeof(line), "SSID: %s", ssid.c_str());
+      tft.drawString(line, content.x + 4, targetBoxY + 12);
+      snprintf(line, sizeof(line), "CH:%d RSSI:%ddBm %s",
+               target.channel, target.rssi, authToStr(target.auth));
+      tft.drawString(line, content.x + 4, targetBoxY + 22);
+    } else {
+      tft.drawString("No target selected.", content.x + 4, targetBoxY + 16);
+    }
+
+    // Compact HUD box.
+    tft.drawRect(content.x, hudY, content.w, hudH, TFT_CYAN);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString("HUD", content.x + 4, hudY + 2);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+
+    if (autoMode == AutoMode::Y0INK && YoinkEngine::isRunning()) {
+      snprintf(line, sizeof(line), "Y0INK %s CH:%d NET:%d",
+               YoinkEngine::getStateStr(),
+               YoinkEngine::getCurrentChannel(),
+               YoinkEngine::getNetworkCount());
+      tft.drawString(line, content.x + 4, hudY + 12);
+      snprintf(line, sizeof(line), "HS:%d PMK:%d CL:%d",
+               YoinkEngine::getHandshakeCount(),
+               YoinkEngine::getPmkidCount(),
+               YoinkEngine::getClientCount());
+      tft.drawString(line, content.x + 4, hudY + 22);
+    } else if (sniffActive) {
+      snprintf(line, sizeof(line), "mode:%s sniff:ON pps:%d",
+               autoModeStr(autoMode), sniffPps);
+      tft.drawString(line, content.x + 4, hudY + 12);
+      snprintf(line, sizeof(line), "pkts:%lu lock:%s ch:%d",
+               (unsigned long)sniffPacketCount,
+               lockChannel ? "ON" : "OFF",
+               hasTarget ? target.channel : -1);
+      tft.drawString(line, content.x + 4, hudY + 22);
+    } else {
+      snprintf(line, sizeof(line), "sniff:OFF mode:%s", autoModeStr(autoMode));
+      tft.drawString(line, content.x + 4, hudY + 12);
+      snprintf(line, sizeof(line), "lock:%s ch:%d",
+               lockChannel ? "ON" : "OFF",
+               hasTarget ? target.channel : -1);
+      tft.drawString(line, content.x + 4, hudY + 22);
+    }
+
+    drawBorder();
+    return;
+  }
+
+  const int topBtnY = compact ? (hypercubeReservedBottomY + 2) : 40;
+  const int topGap = compact ? 4 : 6;
+  const int topBtnH = compact ? 24 : 30;
+  const int actionX = 10;
+  const int lockW = compact ? 68 : 78;
+  const int lockX = w - 10 - lockW;
+  const int actionAreaW = max(120, lockX - actionX - topGap);
+  const int backW = compact ? 58 : 66;
+  const int monitorW = compact ? 68 : 76;
+  const int autoW = max(compact ? 64 : 72, actionAreaW - backW - monitorW - (topGap * 2));
+
+  btnTargetBack = {actionX, topBtnY, backW, topBtnH, "Back"};
+  btnTargetAutomate = {actionX + backW + topGap, topBtnY, autoW, topBtnH, "Attack"};
+  btnTargetMonitor = {actionX + backW + topGap + autoW + topGap, topBtnY, monitorW, topBtnH, "Monitor"};
+  btnTargetLock = {lockX, topBtnY, lockW, topBtnH, lockChannel ? "LOCKED" : "LOCK"};
+  btnTargetSniff = {bottom.x, bottom.y, bottom.w, UI_BUTTON_H, sniffActive ? "Stop Sniff" : "Start Sniff"};
+
+  int targetBoxY = topBtnY + topBtnH + 4;
+  int targetBoxH = compact ? 40 : ((h <= 240) ? 70 : 92);
+  int hudY = targetBoxY + targetBoxH + 4;
+  int hudH = bottom.y - hudY - 4;
+  const int minHudH = compact ? 20 : 36;
+  if (hudH < minHudH) {
+    const int need = minHudH - hudH;
+    targetBoxH = max(compact ? 24 : 48, targetBoxH - need);
+    hudY = targetBoxY + targetBoxH + 4;
+    hudH = bottom.y - hudY - 4;
+  }
 
   // Neon button palette
   drawButton(btnTargetBack, TFT_NAVY, TFT_CYAN, TFT_WHITE);
@@ -3245,7 +4087,7 @@ static void drawTargetDetails() {
   // Target info panel
   tft.drawRect(10, targetBoxY, w - 20, targetBoxH, TFT_MAGENTA);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(2);
+  tft.setTextSize(compact ? 1 : 2);
   tft.setTextColor(lockChannel ? TFT_RED : TFT_CYAN, TFT_BLACK);
   tft.drawString(lockChannel ? "TARGET LOCKED" : "TARGET", 16, targetBoxY + 6);
 
@@ -3254,18 +4096,27 @@ static void drawTargetDetails() {
 
   if (hasTarget) {
     char line[128];
+    if (compact) {
+      String ssid = target.ssid.isEmpty() ? String("(hidden)") : target.ssid;
+      if (ssid.length() > 18) ssid = ssid.substring(0, 15) + "...";
+      snprintf(line, sizeof(line), "SSID: %s", ssid.c_str());
+      tft.drawString(line, 16, targetBoxY + 18);
+      snprintf(line, sizeof(line), "CH:%d RSSI:%ddBm %s",
+               target.channel, target.rssi, authToStr(target.auth));
+      tft.drawString(line, 16, targetBoxY + 30);
+    } else {
+      snprintf(line, sizeof(line), "SSID: %s", target.ssid.c_str());
+      tft.drawString(line, 16, targetBoxY + 28);
 
-    snprintf(line, sizeof(line), "SSID: %s", target.ssid.c_str());
-    tft.drawString(line, 16, targetBoxY + 28);
+      snprintf(line, sizeof(line), "BSSID: %s", target.bssid.c_str());
+      tft.drawString(line, 16, targetBoxY + 42);
 
-    snprintf(line, sizeof(line), "BSSID: %s", target.bssid.c_str());
-    tft.drawString(line, 16, targetBoxY + 42);
-
-    snprintf(line, sizeof(line), "CH: %d   RSSI: %ddBm   SEC: %s",
-             target.channel, target.rssi, authToStr(target.auth));
-    tft.drawString(line, 16, targetBoxY + 56);
+      snprintf(line, sizeof(line), "CH: %d   RSSI: %ddBm   SEC: %s",
+               target.channel, target.rssi, authToStr(target.auth));
+      tft.drawString(line, 16, targetBoxY + 56);
+    }
   } else {
-    tft.drawString("No target selected.", 16, targetBoxY + 32);
+    tft.drawString("No target selected.", 16, targetBoxY + (compact ? 22 : 32));
   }
 
   // HUD / Stats
@@ -3274,7 +4125,37 @@ static void drawTargetDetails() {
   tft.drawString("HUD", 16, hudY + 6);
 
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  if (autoMode == AutoMode::Y0INK && YoinkEngine::isRunning()) {
+  if (compact && autoMode == AutoMode::Y0INK && YoinkEngine::isRunning()) {
+    char hud[96];
+    snprintf(hud, sizeof(hud), "Y0INK %s CH:%d NET:%d",
+             YoinkEngine::getStateStr(),
+             YoinkEngine::getCurrentChannel(),
+             YoinkEngine::getNetworkCount());
+    tft.drawString(hud, 16, hudY + 16);
+    snprintf(hud, sizeof(hud), "HS:%d PMK:%d CL:%d",
+             YoinkEngine::getHandshakeCount(),
+             YoinkEngine::getPmkidCount(),
+             YoinkEngine::getClientCount());
+    tft.drawString(hud, 16, hudY + 28);
+  } else if (compact && sniffActive) {
+    char hud[96];
+    snprintf(hud, sizeof(hud), "mode:%s sniff:ON pps:%d",
+             autoModeStr(autoMode), sniffPps);
+    tft.drawString(hud, 16, hudY + 16);
+    snprintf(hud, sizeof(hud), "pkts:%lu ch:%d lock:%s",
+             (unsigned long)sniffPacketCount,
+             hasTarget ? target.channel : -1,
+             lockChannel ? "ON" : "OFF");
+    tft.drawString(hud, 16, hudY + 28);
+  } else if (compact) {
+    char hud[96];
+    snprintf(hud, sizeof(hud), "sniff:OFF mode:%s", autoModeStr(autoMode));
+    tft.drawString(hud, 16, hudY + 16);
+    snprintf(hud, sizeof(hud), "lock:%s ch:%d",
+             lockChannel ? "ON" : "OFF",
+             hasTarget ? target.channel : -1);
+    tft.drawString(hud, 16, hudY + 28);
+  } else if (autoMode == AutoMode::Y0INK && YoinkEngine::isRunning()) {
     // === YOINK ENGINE HUD ===
     char hud[128];
     snprintf(hud, sizeof(hud), "STATE: %s  CH:%d  NETS:%d",
@@ -3334,18 +4215,20 @@ static void drawTargetDetails() {
     tft.drawString(hud2, 16, hudY + 34);
   }
 
-  // Vibe label in upper-right
-  tft.setTextDatum(TR_DATUM);
-  tft.setTextSize(1);
-  tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
-  tft.drawString("NEON OPS // chillwave mode", w - 6, 10);
+  if (!compact) {
+    // Vibe label in upper-right
+    tft.setTextDatum(TR_DATUM);
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
+    tft.drawString("NEON OPS // chillwave mode", w - 6, 10);
+  }
 
   drawBorder();
 }
 
 static void drawAutomateMenu() {
   tft.fillScreen(TFT_BLACK);
-  drawHeader("Automate");
+  drawHeader("Attacks");
   drawUniversalBackground();
 
   const int w = tft.width();
@@ -3362,21 +4245,26 @@ static void drawAutomateMenu() {
   tft.setTextSize(1);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   if (hasTarget) {
-    tft.drawString(String("Target: ") + target.ssid, content.x + 116, content.y + 2);
+    tft.drawString(String("Target: ") + target.ssid, content.x + 4, content.y + 2);
   } else {
-    tft.drawString("Target: (none)", content.x + 116, content.y + 2);
+    tft.drawString("Target: (none)", content.x + 4, content.y + 2);
   }
 
-  // Direct mode buttons (reliable touch hitboxes)
+  // Direct mode buttons: keep below the global top-button shift threshold,
+  // and ensure 2x2 grid fits fully above bottom bar.
   const int pad = 10;
-  const int top = content.y + 24;
-  const int bw = (w - (pad * 3)) / 2;
-  const int bh = 60;
+  const int gapX = 10;
+  const int gapY = 8;
+  const int minTop = UI_TOP_BUTTON_SHIFT_THRESHOLD_Y + 1;
+  const int top = max(content.y + 16, minTop);
+  const int bw = (w - (pad * 2) - gapX) / 2;
+  const int maxGridH = (bottom.y - 26) - top;  // reserve space for "Active" row
+  const int bh = clampi((maxGridH - gapY) / 2, 34, 46);
 
-  btnAutoY0INK  = {pad,            top,            bw, bh, "Y0INK"};
-  btnAutoRAW    = {pad * 2 + bw,   top,            bw, bh, "RAW"};
-  btnAutoSCOPE  = {pad,            top + bh + pad, bw, bh, "SCOPE"};
-  btnAutoJAMMIT = {pad * 2 + bw,   top + bh + pad, bw, bh, "JAMMIT"};
+  btnAutoY0INK  = {pad,          top,              bw, bh, "Y0INK"};
+  btnAutoRAW    = {pad + bw + gapX, top,           bw, bh, "RAW"};
+  btnAutoSCOPE  = {pad,          top + bh + gapY,  bw, bh, "SCOPE"};
+  btnAutoJAMMIT = {pad + bw + gapX, top + bh + gapY, bw, bh, "JAMMIT"};
 
   drawButton(btnAutoY0INK,  autoMode == AutoMode::Y0INK  ? TFT_DARKGREEN : TFT_DARKCYAN,  TFT_MAGENTA, TFT_WHITE);
   drawButton(btnAutoRAW,    autoMode == AutoMode::RAW    ? TFT_DARKGREEN : TFT_NAVY,      TFT_CYAN,    TFT_WHITE);
@@ -3386,14 +4274,15 @@ static void drawAutomateMenu() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString("Active:", 10, top + (bh * 2) + pad + 8);
-  tft.drawString(autoModeStr(autoMode), 58, top + (bh * 2) + pad + 8);
+  const int activeY = top + (bh * 2) + gapY + 4;
+  tft.drawString("Active:", 10, activeY);
+  tft.drawString(autoModeStr(autoMode), 58, activeY);
 
   // Footer hints
   tft.setTextDatum(BC_DATUM);
   tft.setTextSize(1);
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.drawString("Tap mode button to apply", w / 2, h - 6);
+  tft.drawString("Tap mode button to apply", w / 2, bottom.y - 2);
 
   uiLogLayout("drawAutomateMenu", content, bottom);
   uiLogButtonRect("Automate.Back", btnAutoBack);
@@ -3813,11 +4702,12 @@ static void drawJustGo() {
 
   const UiRect content = computeContentRect();
   const UiRect bottom = computeBottomBarRect();
+  const bool compact = (tft.height() <= 180);
   const int panelX = content.x;
-  const int panelY = 34; // directly under "Just Go" title
-  const int panelRightLimit = hypercubeBoxX - 10; // keep 10px clear from hypercube left edge
-  const int panelW = max(120, panelRightLimit - panelX);
-  const int panelH = 28;  // expanded to 2 rows (18->28, +10)
+  const int panelY = compact ? 30 : 34;
+  const int panelRightLimit = hypercubeBoxX - (compact ? 8 : 10); // keep clear from hypercube
+  const int panelW = max(compact ? 132 : 120, panelRightLimit - panelX);
+  const int panelH = compact ? 24 : 28;
   tft.drawRoundRect(panelX, panelY, panelW, panelH, 5, TFT_DARKGREY);
   tft.fillRoundRect(panelX + 1, panelY + 1, panelW - 2, panelH - 2, 5, TFT_BLACK);
   const char* stageStr = "IDLE";
@@ -3834,17 +4724,21 @@ static void drawJustGo() {
   tft.setTextColor(justGoActive ? TFT_GREEN : TFT_DARKGREY, TFT_BLACK);
   tft.drawString(justGoActive ? "RUNNING" : "IDLE", panelX + 5, panelY + 3);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString(String("Stage: ") + stageStr, panelX + 70, panelY + 3);
+  tft.drawString(String("Stage: ") + stageStr, panelX + (compact ? 64 : 70), panelY + 3);
   // Row 2: Status info
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(justGoStatusLine, panelX + 5, panelY + 14);
+  String statusLine = justGoStatusLine;
+  while (statusLine.length() > 4 && tft.textWidth(statusLine) > (panelW - 10)) {
+    statusLine.remove(statusLine.length() - 1);
+  }
+  tft.drawString(statusLine, panelX + 5, panelY + (compact ? 13 : 14));
 
   // Stay minutes controls relocated under the hypercube.
-  const int stayTextY = hypercubeBoxY + hypercubeBoxH + 10;
-  const int stayY = stayTextY + 10;
-  const int stayBtnW = 34;
-  const int stayBtnH = 24;
-  const int stayGap = 6;
+  const int stayTextY = compact ? (panelY + panelH + 2) : (hypercubeBoxY + hypercubeBoxH + 10);
+  const int stayY = stayTextY + (compact ? 8 : 10);
+  const int stayBtnW = compact ? 30 : 34;
+  const int stayBtnH = compact ? 20 : 24;
+  const int stayGap = compact ? 4 : 6;
   const int stayX = hypercubeBoxX + ((hypercubeBoxW - ((stayBtnW * 2) + stayGap)) / 2);
   btnJustGoStayMinus = {stayX, stayY, stayBtnW, stayBtnH, "-"};
   btnJustGoStayPlus = {stayX + stayBtnW + stayGap, stayY, stayBtnW, stayBtnH, "+"};
@@ -3860,54 +4754,58 @@ static void drawJustGo() {
   // Larger live console.
   const int consoleX = panelX;
   const int consoleW = panelW;  // align exactly with status box width
-  const int consoleY = panelY + panelH + 10;  // 10px gap after expanded status box
-  const int consoleBottom = bottom.y - 10;  // 10px above bottom button row
-  const int consoleH = max(24, consoleBottom - consoleY);
+  const int profileStripH = compact ? 18 : 28;
+  const int profileY = bottom.y - profileStripH - 2;
+  const int consoleY = panelY + panelH + (compact ? 4 : 10);
+  const int consoleBottom = profileY - 4;
+  const int consoleH = max(compact ? 34 : 24, consoleBottom - consoleY);
   tft.drawRect(consoleX, consoleY, consoleW, consoleH, TFT_CYAN);
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("LIVE CONSOLE", consoleX + 6, consoleY + 4);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  int lineY = consoleY + 16;
-  int maxLines = (consoleH - 18) / 10;
+  const int lineStep = compact ? 9 : 10;
+  int lineY = consoleY + (compact ? 14 : 16);
+  int maxLines = (consoleH - (compact ? 14 : 18)) / lineStep;
   if (maxLines < 1) maxLines = 1;
   int startIdx = 0;
   if (monitorLineCount > maxLines) startIdx = monitorLineCount - maxLines;
   for (int i = startIdx; i < monitorLineCount; i++) {
     tft.setTextColor(monitorLines[i].color, TFT_BLACK);
     tft.drawString(monitorLines[i].text, consoleX + 6, lineY);
-    lineY += 10;
+    lineY += lineStep;
     if (lineY > (consoleY + consoleH - 10)) break;
   }
 
-  // Bottom control bar: add Profile selector row above buttons
-  tft.fillRect(bottom.x, bottom.y - 30, bottom.w, 28, TFT_BLACK);
-  tft.drawRect(bottom.x + 2, bottom.y - 28, bottom.w - 4, 26, TFT_DARKGREY);
+  // Bottom control bar: profile selector strip above primary controls.
+  tft.fillRect(bottom.x, profileY, bottom.w, profileStripH, TFT_BLACK);
+  tft.drawRect(bottom.x + 1, profileY, bottom.w - 2, profileStripH, TFT_DARKGREY);
   
   // Profile selector buttons: < [PROFILE_NAME] >
-  const int profBtnW = 40;
-  const int profY = bottom.y - 24;
+  const int profBtnW = compact ? 36 : 40;
+  const int profBtnH = compact ? 16 : 20;
+  const int profY = profileY + (compact ? 1 : 2);
   const int profCenterX = bottom.x + (bottom.w / 2);  // Center of the box
   
-  btnJustGoProfilePrev = {bottom.x + 8, profY, profBtnW, 20, "<"};
-  btnJustGoProfileNext = {bottom.x + bottom.w - profBtnW - 8, profY, profBtnW, 20, ">"};
+  btnJustGoProfilePrev = {bottom.x + 8, profY, profBtnW, profBtnH, "<"};
+  btnJustGoProfileNext = {bottom.x + bottom.w - profBtnW - 8, profY, profBtnW, profBtnH, ">"};
   
   // Center profile label and name in the middle area
-  tft.setTextDatum(TC_DATUM);  // Top Center datum
+  tft.setTextDatum(TC_DATUM);
   tft.setTextSize(1);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString("Profile:", profCenterX - 50, bottom.y - 26);
+  tft.drawString("Profile:", profCenterX - 50, profileY + 1);
   tft.setTextColor(justGoActive ? TFT_GREEN : TFT_CYAN, TFT_BLACK);
-  tft.drawString(profileNames[(int)justGoProfile], profCenterX + 20, bottom.y - 26);
+  tft.drawString(profileNames[(int)justGoProfile], profCenterX + 20, profileY + 1);
   
   drawButton(btnJustGoProfilePrev, TFT_DARKGREY, TFT_CYAN, TFT_WHITE);
   drawButton(btnJustGoProfileNext, TFT_DARKGREY, TFT_CYAN, TFT_WHITE);
 
   // Bottom control bar: Back | Spray+Pray | GO/STOP
   tft.fillRect(bottom.x, bottom.y, bottom.w, bottom.h, TFT_BLACK);
-  const int gap = 6;
-  const int sideW = 72;
+  const int gap = compact ? 4 : 6;
+  const int sideW = compact ? 66 : 72;
   const int midW = bottom.w - (sideW * 2) - (gap * 2);
   btnJustGoBack = {bottom.x, bottom.y, sideW, UI_BUTTON_H, "Back"};
   btnJustGoSpray = {bottom.x + sideW + gap, bottom.y, midW, UI_BUTTON_H, "Spray+Pray"};
@@ -4268,49 +5166,56 @@ static void drawConfig() {
   drawHeader("Config");
   drawUniversalBackground();
 
+  const bool compact = (tft.height() <= 180);
   const UiRect content = computeContentRect();
   const UiRect bottom = computeBottomBarRect();
-  const int w = tft.width();
   const int pad = content.x + 4;
-  const int gap = 10;
+  const int gap = compact ? 4 : 10;
   const int cols = 2;
-  const int bh = 34;
+  const int bh = compact ? 22 : 34;
   const int bw = (content.w - 8 - gap) / cols;
-  const int top = content.y + 2;
+  const int top = content.y + (compact ? 0 : 2);
 
   btnBack = {bottom.x, bottom.y, 92, UI_BUTTON_H, "Back"};
   drawButton(btnBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
 
-  // Fill the top-left header band with a quick summary.
-  const int panelX = 8;
-  const int panelY = 34;
-  const int panelW = max(120, hypercubeBoxX - panelX - 6);
-  const int panelH = max(20, content.y - panelY - 4);
-  tft.drawRoundRect(panelX, panelY, panelW, panelH, 6, TFT_DARKGREY);
-  tft.fillRoundRect(panelX + 1, panelY + 1, panelW - 2, panelH - 2, 6, TFT_BLACK);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString("Adapter | WiFi Link | Web + AP", panelX + 5, panelY + 4);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Startup | Telemetry | LED", panelX + 5, panelY + 14);
+  if (!compact) {
+    // Fill the top-left header band with a quick summary.
+    const int panelX = 8;
+    const int panelY = 34;
+    const int panelW = max(120, hypercubeBoxX - panelX - 6);
+    const int panelH = max(20, content.y - panelY - 4);
+    tft.drawRoundRect(panelX, panelY, panelW, panelH, 6, TFT_DARKGREY);
+    tft.fillRoundRect(panelX + 1, panelY + 1, panelW - 2, panelH - 2, 6, TFT_BLACK);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.drawString("Adapter | WiFi Link | Web + AP", panelX + 5, panelY + 4);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("Startup | Telemetry | LED", panelX + 5, panelY + 14);
+  } else {
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.drawString("BTN1=Next  BTN2=Select", content.x + 2, content.y - 10);
+  }
 
-  btnCfgWifi = {pad, top, bw, bh, "Adapter"};
+  btnCfgWifi = {pad, top, bw, bh, compact ? "Adapter" : "Adapter"};
   drawButton(btnCfgWifi, TFT_DARKCYAN, TFT_MAGENTA, TFT_WHITE);
 
-  btnCfgWifiConnect = {pad + bw + gap, top, bw, bh, "WiFi Link"};
+  btnCfgWifiConnect = {pad + bw + gap, top, bw, bh, compact ? "WiFi" : "WiFi Link"};
   drawButton(btnCfgWifiConnect, TFT_DARKCYAN, TFT_CYAN, TFT_WHITE);
 
-  btnCfgWebserver = {pad, top + bh + gap, bw, bh, "Web + AP"};
+  btnCfgWebserver = {pad, top + bh + gap, bw, bh, compact ? "Web/AP" : "Web + AP"};
   drawButton(btnCfgWebserver, TFT_NAVY, TFT_GREEN, TFT_WHITE);
 
-  Button btnCfgStartup = {pad + bw + gap, top + bh + gap, bw, bh, "Startup"};
+  btnCfgStartup = {pad + bw + gap, top + bh + gap, bw, bh, "Startup"};
   drawButton(btnCfgStartup, TFT_DARKGREY, TFT_YELLOW, TFT_WHITE);
 
-  Button btnCfgTelemetry = {pad, top + ((bh + gap) * 2), bw, bh, "Telemetry"};
+  btnCfgTelemetry = {pad, top + ((bh + gap) * 2), bw, bh, compact ? "Telem" : "Telemetry"};
   drawButton(btnCfgTelemetry, TFT_DARKGREY, TFT_CYAN, TFT_WHITE);
 
-  btnCfgLed = {pad + bw + gap, top + ((bh + gap) * 2), bw, bh, "LED Control"};
+  btnCfgLed = {pad + bw + gap, top + ((bh + gap) * 2), bw, bh, compact ? "LED" : "LED Control"};
   drawButton(btnCfgLed, TFT_DARKGREY, TFT_YELLOW, TFT_WHITE);
 
   uiLogLayout("drawConfig", content, bottom);
@@ -4323,6 +5228,7 @@ static void drawStartupConfig() {
   drawHeader("Startup");
   drawUniversalBackground();
 
+  const bool compact = (tft.height() <= 180);
   const UiRect content = computeContentRect();
   const UiRect bottom = computeBottomBarRect();
   const int w = tft.width();
@@ -4330,28 +5236,38 @@ static void drawStartupConfig() {
   btnBack = {bottom.x, bottom.y, 92, UI_BUTTON_H, "Back"};
   drawButton(btnBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
 
+  const int row1Y = compact ? (content.y + 4) : (content.y + 28);
+  const int row2Y = compact ? (content.y + 34) : (content.y + 82);
+  const int btnY1 = compact ? (content.y + 2) : (content.y + 20);
+  const int btnY2 = compact ? (content.y + 32) : (content.y + 74);
+  const int btnW = compact ? 90 : 114;
+  const int btnH = compact ? 26 : 34;
+  const int btnX = w - (btnW + 12);
+
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Reconnect prompt on boot", content.x + 4, content.y + 28);
+  tft.drawString("Reconnect prompt on boot", content.x + 4, row1Y);
 
-  Button btnStartupAutoReconnect = {w - 126, content.y + 20, 114, 34, cfg.startup_autoReconnectPrompt ? "ON" : "OFF"};
+  btnStartupAutoReconnect = {btnX, btnY1, btnW, btnH, cfg.startup_autoReconnectPrompt ? "ON" : "OFF"};
   drawButton(btnStartupAutoReconnect,
              cfg.startup_autoReconnectPrompt ? TFT_DARKGREEN : TFT_MAROON,
              TFT_CYAN,
              TFT_WHITE);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Default channel lock", content.x + 4, content.y + 82);
+  tft.drawString("Default channel lock", content.x + 4, row2Y);
 
-  Button btnDefaultLockToggle = {w - 126, content.y + 74, 114, 34, cfg.wifi_defaultLockChannel ? "ON" : "OFF"};
-  drawButton(btnDefaultLockToggle,
+  btnStartupDefaultLockToggle = {btnX, btnY2, btnW, btnH, cfg.wifi_defaultLockChannel ? "ON" : "OFF"};
+  drawButton(btnStartupDefaultLockToggle,
              cfg.wifi_defaultLockChannel ? TFT_DARKGREEN : TFT_MAROON,
              TFT_MAGENTA,
              TFT_WHITE);
 
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString("Saved to /config.json", content.x + 4, content.y + 138);
+  if (!compact) {
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.drawString("Saved to /config.json", content.x + 4, content.y + 138);
+  }
 
   uiLogLayout("drawStartupConfig", content, bottom);
   uiLogButtonRect("Startup.Back", btnBack);
@@ -4363,6 +5279,7 @@ static void drawTelemetryConfig() {
   drawHeader("Telemetry");
   drawUniversalBackground();
 
+  const bool compact = (tft.height() <= 180);
   const UiRect content = computeContentRect();
   const UiRect bottom = computeBottomBarRect();
   const int w = tft.width();
@@ -4370,24 +5287,33 @@ static void drawTelemetryConfig() {
   btnBack = {bottom.x, bottom.y, 92, UI_BUTTON_H, "Back"};
   drawButton(btnBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
 
+  const int label1Y = compact ? (content.y + 2) : (content.y + 24);
+  const int valueY = compact ? (content.y + 14) : (content.y + 40);
+  const int btnRowY = compact ? (content.y + 24) : (content.y + 60);
+  const int verbLabelY = compact ? (content.y + 54) : (content.y + 114);
+  const int verbBtnY = compact ? (content.y + 50) : (content.y + 104);
+  const int toggleW = compact ? 90 : 114;
+  const int toggleH = compact ? 26 : 34;
+  const int toggleX = w - (toggleW + 12);
+
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Monitor refresh interval", content.x + 4, content.y + 24);
+  tft.drawString("Monitor refresh interval", content.x + 4, label1Y);
 
   char v[24];
   snprintf(v, sizeof(v), "%d ms", cfg.telemetry_monitorIntervalMs);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString(v, content.x + 4, content.y + 40);
+  tft.drawString(v, content.x + 4, valueY);
 
-  Button btnTelemetryMinus = {content.x + 4, content.y + 60, 56, 34, "-"};
-  Button btnTelemetryPlus  = {content.x + 66, content.y + 60, 56, 34, "+"};
+  btnTelemetryMinus = {content.x + 4, btnRowY, 56, compact ? 26 : 34, "-"};
+  btnTelemetryPlus  = {content.x + 66, btnRowY, 56, compact ? 26 : 34, "+"};
   drawButton(btnTelemetryMinus, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
   drawButton(btnTelemetryPlus,  TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Verbose serial logs", content.x + 4, content.y + 114);
-  Button btnTelemetryVerboseToggle = {w - 126, content.y + 104, 114, 34, cfg.telemetry_verboseSerial ? "ON" : "OFF"};
+  tft.drawString("Verbose serial logs", content.x + 4, verbLabelY);
+  btnTelemetryVerboseToggle = {toggleX, verbBtnY, toggleW, toggleH, cfg.telemetry_verboseSerial ? "ON" : "OFF"};
   drawButton(btnTelemetryVerboseToggle,
              cfg.telemetry_verboseSerial ? TFT_DARKGREEN : TFT_MAROON,
              TFT_CYAN,
@@ -4428,9 +5354,9 @@ static void drawWifiConfig() {
   drawHeader("Adapter Config");
   drawUniversalBackground();
 
+  const bool compact = (tft.height() <= 180);
   const UiRect content = computeContentRect();
   const UiRect bottom = computeBottomBarRect();
-  const int w = tft.width();
   const int h = tft.height();
 
   btnBack = {bottom.x, bottom.y, 92, UI_BUTTON_H, "Back"};
@@ -4438,53 +5364,59 @@ static void drawWifiConfig() {
   drawButton(btnBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
   drawButton(btnSave, configDirty ? TFT_ORANGE : TFT_DARKGREY, TFT_WHITE, TFT_BLACK);
 
-  int y = content.y + 8;
+  int y = content.y + (compact ? 2 : 8);
+  const int rowGap = compact ? 34 : 56;
+  const int adjustBtnH = compact ? 24 : 30;
 
-  {
-    char val[32]; snprintf(val, sizeof(val), "%d ms", cfg.wifi_channelHopInterval);
-    drawConfigRow("WiFi: hop interval", y, val);
+  char hopVal[24];
+  snprintf(hopVal, sizeof(hopVal), "%d ms", cfg.wifi_channelHopInterval);
+  drawConfigRow("Hop interval", y, hopVal);
+  btnHopMinus = {10, y + (compact ? 14 : 18), 52, adjustBtnH, "-"};
+  btnHopPlus  = {70, y + (compact ? 14 : 18), 52, adjustBtnH, "+"};
+  drawButton(btnHopMinus, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+  drawButton(btnHopPlus,  TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+  y += rowGap;
 
-    btnHopMinus = {10, y + 18, 52, 30, "-"};
-    btnHopPlus  = {70, y + 18, 52, 30, "+"};
-    drawButton(btnHopMinus, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
-    drawButton(btnHopPlus,  TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
-  }
-  y += 56;
+  char scanVal[24];
+  snprintf(scanVal, sizeof(scanVal), "%d ms", cfg.wifi_scanDuration);
+  drawConfigRow("Scan duration", y, scanVal);
+  btnScanMinus = {10, y + (compact ? 14 : 18), 52, adjustBtnH, "-"};
+  btnScanPlus  = {70, y + (compact ? 14 : 18), 52, adjustBtnH, "+"};
+  drawButton(btnScanMinus, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+  drawButton(btnScanPlus,  TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+  y += rowGap;
 
-  {
-    char val[32]; snprintf(val, sizeof(val), "%d ms", cfg.wifi_scanDuration);
-    drawConfigRow("WiFi: scan duration", y, val);
-
-    btnScanMinus = {10, y + 18, 52, 30, "-"};
-    btnScanPlus  = {70, y + 18, 52, 30, "+"};
-    drawButton(btnScanMinus, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
-    drawButton(btnScanPlus,  TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
-  }
-  y += 56;
-
-  {
+  if (compact) {
+    btnDeauthToggle = {10, y + 6, 96, 24, cfg.wifi_enableDeauth ? "Deauth ON" : "Deauth OFF"};
+    btnWifiDefaultLockToggle = {112, y + 6, 96, 24, cfg.wifi_defaultLockChannel ? "Lock ON" : "Lock OFF"};
+    drawButton(btnDeauthToggle, cfg.wifi_enableDeauth ? TFT_DARKGREEN : TFT_MAROON, TFT_WHITE, TFT_WHITE);
+    drawButton(btnWifiDefaultLockToggle, cfg.wifi_defaultLockChannel ? TFT_DARKGREEN : TFT_MAROON, TFT_WHITE, TFT_WHITE);
+  } else {
     drawConfigRow("WiFi: enable deauth", y, cfg.wifi_enableDeauth ? "ON" : "OFF");
     btnDeauthToggle = {10, y + 18, 110, 30, cfg.wifi_enableDeauth ? "ON" : "OFF"};
     drawButton(btnDeauthToggle, cfg.wifi_enableDeauth ? TFT_DARKGREEN : TFT_MAROON, TFT_WHITE, TFT_WHITE);
-  }
-  y += 56;
+    y += rowGap;
 
-  {
     drawConfigRow("WiFi: default lock", y, cfg.wifi_defaultLockChannel ? "ON" : "OFF");
-    Button btnDefaultLockToggle = {10, y + 18, 110, 30, cfg.wifi_defaultLockChannel ? "ON" : "OFF"};
-    drawButton(btnDefaultLockToggle, cfg.wifi_defaultLockChannel ? TFT_DARKGREEN : TFT_MAROON, TFT_WHITE, TFT_WHITE);
-  }
-  y += 56;
+    btnWifiDefaultLockToggle = {10, y + 18, 110, 30, cfg.wifi_defaultLockChannel ? "ON" : "OFF"};
+    drawButton(btnWifiDefaultLockToggle, cfg.wifi_defaultLockChannel ? TFT_DARKGREEN : TFT_MAROON, TFT_WHITE, TFT_WHITE);
 
-  {
+    y += rowGap;
     const char* savedSsid = cfg.wifi_ssid.isEmpty() ? "(not set)" : cfg.wifi_ssid.c_str();
     drawConfigRow("WiFi: saved network", y, savedSsid);
   }
 
-  tft.setTextDatum(BL_DATUM);
-  tft.setTextSize(1);
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.drawString("Config stored in /config.json (LittleFS). Run: pio run -t uploadfs", 6, h - 6);
+  if (compact) {
+    tft.setTextDatum(BL_DATUM);
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString("BTN1=Next  BTN2=Select", 6, h - 6);
+  } else {
+    tft.setTextDatum(BL_DATUM);
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString("Config stored in /config.json (LittleFS). Run: pio run -t uploadfs", 6, h - 6);
+  }
 
   uiLogLayout("drawWifiConfig", content, bottom);
   uiLogButtonRect("WifiCfg.Back", btnBack);
@@ -6176,96 +7108,117 @@ static void drawWebserver() {
 
   const UiRect content = computeContentRect();
   const UiRect bottom = computeBottomBarRect();
-  const int w = tft.width();
-  const int pad = 12;
-  const int bw = 140;
-  const int bh = 30;
-  const int gap = 8;
-  const int webBtnW = (w - (pad * 2) - gap) / 2;
-
-  btnWebserverBack = {bottom.x, bottom.y, 92, UI_BUTTON_H, "Back"};
-  drawButton(btnWebserverBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
-
-  int y = content.y + 40;
   int wifiStatus = WiFi.status();
   uint8_t apClients = WiFi.softAPgetStationNum();
+  const int gap = 6;
+  const int leftX = content.x;
+  const int leftW = max(120, hypercubeBoxX - content.x - 6);
 
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  // Hard bands: top status, middle detail, service row, bottom control row.
+  // This prevents text from ever drawing over buttons.
+  const int bottomBtnW = (bottom.w - (gap * 2)) / 3;
+  const int serviceH = UI_BUTTON_H;
+  const int serviceY = bottom.y - serviceH - 6;
+  // Title text is drawn near y=8; keep status box top border ~10px below that title band.
+  const int topStatusY = 34;
+  const int topStatusH = 60;  // Uses the empty area under "Webserver & AP".
+  const int detailsY = topStatusY + topStatusH + 4;
+  const int detailsH = max(24, serviceY - detailsY - 4);
 
-  if (wifiStatus == WL_CONNECTED) {
-    tft.drawString(("STA: CONNECTED  SSID: " + WiFi.SSID()).c_str(), 10, y);
-    tft.drawString(("STA IP: " + WiFi.localIP().toString()).c_str(), 10, y + 12);
-  } else {
-    tft.drawString("STA: NOT CONNECTED", 10, y);
-    tft.drawString("STA IP: -", 10, y + 12);
-  }
-  y += 28;
+  btnWebserverBack = {bottom.x, bottom.y, bottomBtnW, UI_BUTTON_H, "Back"};
+  btnWebserverStartAP = {bottom.x + bottomBtnW + gap, bottom.y, bottomBtnW, UI_BUTTON_H, apMode ? "Stop AP" : "Start AP"};
+  btnWebserverStartServer = {bottom.x + (bottomBtnW + gap) * 2, bottom.y, bottomBtnW, UI_BUTTON_H,
+                             webServerRunning ? "Stop Web" : "Start Web"};
 
-  tft.drawString(apMode ? "AP: ACTIVE" : "AP: INACTIVE", 10, y);
-  tft.drawString(("AP Clients: " + String(apClients)).c_str(), 110, y);
-  if (apMode) {
-    tft.drawString(("AP SSID: " + apSsid).c_str(), 10, y + 12);
-    tft.drawString(("AP IP: " + WiFi.softAPIP().toString()).c_str(), 10, y + 24);
-  } else {
-    tft.drawString("AP SSID: -", 10, y + 12);
-    tft.drawString("AP IP: -", 10, y + 24);
-  }
-  y += 36;
+  const int serviceW = (leftW - gap) / 2;
+  btnWebserverWpaSecSync = {leftX, serviceY, serviceW, serviceH, "Sync WPA-SEC"};
+  btnWebserverDownloadResults = {leftX + serviceW + gap, serviceY, serviceW, serviceH, "Get Results"};
 
-  btnWebserverStartAP = {pad, y, bw, bh, apMode ? "Stop AP" : "Start AP"};
+  drawButton(btnWebserverBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
   drawButton(btnWebserverStartAP, apMode ? TFT_MAROON : TFT_DARKGREEN, TFT_WHITE, TFT_WHITE);
+  drawButton(btnWebserverStartServer, webServerRunning ? TFT_MAROON : TFT_DARKGREEN, TFT_WHITE, TFT_WHITE);
+  drawButton(btnWebserverWpaSecSync, wpasecSyncInProgress ? TFT_DARKGREY : TFT_BLUE, TFT_WHITE, TFT_WHITE);
+  drawButton(btnWebserverDownloadResults, TFT_DARKCYAN, TFT_WHITE, TFT_WHITE);
 
-  y += bh + 6;
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString(webServerRunning ? "WebServer: ACTIVE (8080)" : "WebServer: INACTIVE", 10, y);
-  y += 12;
-
-  if (webServerRunning) {
-    if (wifiStatus == WL_CONNECTED) {
-      String accessUrl = "http://" + WiFi.localIP().toString() + ":8080";
-      tft.drawString(accessUrl.c_str(), 10, y);
-    } else if (apMode) {
-      tft.drawString("http://192.168.4.1:8080", 10, y);
-    }
-  }
-  y += 14;
-
-  btnWebserverStartServer = {pad, y, webBtnW, bh, "Start Webserver"};
-  btnWebserverStopServer = {pad + webBtnW + gap, y, webBtnW, bh, "Stop Webserver"};
-  drawButton(btnWebserverStartServer, webServerRunning ? TFT_DARKGREY : TFT_DARKGREEN, TFT_WHITE, TFT_WHITE);
-  drawButton(btnWebserverStopServer, webServerRunning ? TFT_MAROON : TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
-
-  // WPA-SEC Sync button
-  y += bh + 2;
-  btnWebserverWpaSecSync = {pad, y, w - (pad * 2), bh, "Sync with WPA-SEC"};
-  drawButton(btnWebserverWpaSecSync, TFT_BLUE, TFT_WHITE, TFT_WHITE);
-
-  // AP client list (up to 2 MACs to fit this screen)
-  y += bh + 2;
-  tft.setTextSize(1);
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString(("Clients connected: " + String(apClients)).c_str(), 10, y);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
 
-  if (apMode && apClients > 0) {
-    wifi_sta_list_t staList;
-    if (esp_wifi_ap_get_sta_list(&staList) == ESP_OK) {
-      int shown = (staList.num > 2) ? 2 : staList.num;
-      for (int i = 0; i < shown; i++) {
+  // Top status window (requested position under title text).
+  tft.drawRoundRect(leftX, topStatusY, leftW, topStatusH, 5, TFT_DARKGREY);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.drawString("STATUS", leftX + 4, topStatusY + 3);
+
+  auto trimToWidth = [&](String s, int maxW) -> String {
+    while (s.length() > 4 && tft.textWidth(s) > maxW) s.remove(s.length() - 1);
+    return s;
+  };
+
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  String staLine = (wifiStatus == WL_CONNECTED) ? ("STA: Connected  " + WiFi.SSID()) : String("STA: Not connected");
+  staLine = trimToWidth(staLine, leftW - 10);
+  tft.drawString(staLine, leftX + 4, topStatusY + 17);
+
+  String apLine = String("AP: ") + (apMode ? "Active" : "Inactive") + "  Clients:" + String(apClients);
+  apLine = trimToWidth(apLine, leftW - 10);
+  tft.drawString(apLine, leftX + 4, topStatusY + 29);
+
+  String staIpLine = String("STA IP: ") + ((wifiStatus == WL_CONNECTED) ? WiFi.localIP().toString() : String("-"));
+  staIpLine = trimToWidth(staIpLine, leftW - 10);
+  tft.drawString(staIpLine, leftX + 4, topStatusY + 41);
+
+  // Middle left details panel.
+  tft.drawRect(leftX, detailsY, leftW, detailsH, TFT_DARKGREY);
+  int rowY = detailsY + 4;
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.drawString(webServerRunning ? "Web: ONLINE" : "Web: OFFLINE", leftX + 4, rowY);
+  rowY += 11;
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  String accessUrl = "-";
+  if (webServerRunning) {
+    if (wifiStatus == WL_CONNECTED) accessUrl = "http://" + WiFi.localIP().toString() + ":8080";
+    else if (apMode) accessUrl = "http://192.168.4.1:8080";
+  }
+  accessUrl = trimToWidth(accessUrl, leftW - 10);
+  tft.drawString(accessUrl, leftX + 4, rowY);
+  rowY += 11;
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  String syncState = wpasecSyncInProgress ? "WPA-SEC: Syncing..." : ("WPA-SEC: " + (wpasecSyncStatus.isEmpty() ? String("Idle") : wpasecSyncStatus));
+  syncState = trimToWidth(syncState, leftW - 10);
+  tft.drawString(syncState, leftX + 4, rowY);
+
+  // Right-side utility panel (uses free space marked in photo).
+  const int rightX = hypercubeBoxX + 2;
+  const int rightW = max(48, (content.x + content.w) - rightX);
+  const int rightY = topStatusY + topStatusH + 4;
+  const int rightH = max(20, serviceY - rightY - 4);
+  if (rightW > 40 && rightH > 16) {
+    tft.drawRect(rightX, rightY, rightW, rightH, TFT_DARKGREY);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString("AP", rightX + 3, rightY + 3);
+    if (apMode && apClients > 0) {
+      wifi_sta_list_t staList;
+      if (esp_wifi_ap_get_sta_list(&staList) == ESP_OK && staList.num > 0) {
         char mac[24];
         snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
-                 staList.sta[i].mac[0], staList.sta[i].mac[1], staList.sta[i].mac[2],
-                 staList.sta[i].mac[3], staList.sta[i].mac[4], staList.sta[i].mac[5]);
-        tft.drawString(mac, 10, y + 12 + (i * 12));
+                 staList.sta[0].mac[0], staList.sta[0].mac[1], staList.sta[0].mac[2],
+                 staList.sta[0].mac[3], staList.sta[0].mac[4], staList.sta[0].mac[5]);
+        String macLine = trimToWidth(String(mac), rightW - 6);
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        tft.drawString(macLine, rightX + 3, rightY + 14);
       }
-      if (staList.num > shown) tft.drawString("...", 10, y + 12 + (shown * 12));
+    } else {
+      tft.setTextColor(TFT_CYAN, TFT_BLACK);
+      tft.drawString("No clients", rightX + 3, rightY + 14);
     }
   }
 
   uiLogLayout("drawWebserver", content, bottom);
   uiLogButtonRect("Web.Back", btnWebserverBack);
+  uiLogButtonRect("Web.AP", btnWebserverStartAP);
+  uiLogButtonRect("Web.Toggle", btnWebserverStartServer);
+  uiLogButtonRect("Web.Sync", btnWebserverWpaSecSync);
+  uiLogButtonRect("Web.Results", btnWebserverDownloadResults);
   drawBorder();
 }
 
@@ -6387,6 +7340,127 @@ static const char* monitorPktTypeStr(uint8_t t) {
   return "UNK";
 }
 
+static bool monitorNameEndsWithIgnoreCase(const char* name, const char* suffix) {
+  if (!name || !suffix) return false;
+  size_t nLen = strlen(name);
+  size_t sLen = strlen(suffix);
+  if (nLen < sLen) return false;
+  for (size_t i = 0; i < sLen; i++) {
+    char a = name[nLen - sLen + i];
+    char b = suffix[i];
+    if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+    if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+    if (a != b) return false;
+  }
+  return true;
+}
+
+static bool monitorAllowFileName(const char* name) {
+  return monitorNameEndsWithIgnoreCase(name, ".pcap") ||
+         monitorNameEndsWithIgnoreCase(name, ".pcapng") ||
+         monitorNameEndsWithIgnoreCase(name, ".log") ||
+         monitorNameEndsWithIgnoreCase(name, ".txt");
+}
+
+static void monitorSetFileInfo(const char* txt) {
+  strncpy(monitorFileInfo, txt ? txt : "", sizeof(monitorFileInfo) - 1);
+  monitorFileInfo[sizeof(monitorFileInfo) - 1] = '\0';
+}
+
+static void monitorLoadFileDir(const char* path) {
+  monitorFileCount = 0;
+  if (!path || !path[0]) path = "/";
+  if (!sdReady && !mountSdCard(false)) {
+    monitorSetFileInfo("SD not ready");
+    return;
+  }
+
+  strncpy(monitorFilePath, path, sizeof(monitorFilePath) - 1);
+  monitorFilePath[sizeof(monitorFilePath) - 1] = '\0';
+
+  File dir = SD.open(monitorFilePath);
+  if (!dir || !dir.isDirectory()) {
+    if (dir) dir.close();
+    monitorSetFileInfo("Path unavailable");
+    strncpy(monitorFilePath, "/", sizeof(monitorFilePath) - 1);
+    monitorFilePath[sizeof(monitorFilePath) - 1] = '\0';
+    return;
+  }
+
+  while (true) {
+    File entry = dir.openNextFile();
+    if (!entry) break;
+    if (monitorFileCount >= MONITOR_FILE_MAX) {
+      entry.close();
+      continue;
+    }
+
+    String nm = entry.name();
+    int slash = nm.lastIndexOf('/');
+    if (slash >= 0 && slash + 1 < (int)nm.length()) nm = nm.substring(slash + 1);
+    if (nm.length() == 0) {
+      entry.close();
+      continue;
+    }
+
+    const bool isDir = entry.isDirectory();
+    if (!isDir && !monitorAllowFileName(nm.c_str())) {
+      entry.close();
+      continue;
+    }
+
+    MonitorFileEntry& out = monitorFiles[monitorFileCount++];
+    strncpy(out.name, nm.c_str(), sizeof(out.name) - 1);
+    out.name[sizeof(out.name) - 1] = '\0';
+    out.isDir = isDir;
+    out.size = isDir ? 0U : (uint32_t)entry.size();
+    entry.close();
+  }
+  dir.close();
+
+  if (monitorFileScroll < 0) monitorFileScroll = 0;
+  if (monitorFileVisibleRows > 0) {
+    int maxScroll = monitorFileCount - monitorFileVisibleRows;
+    if (maxScroll < 0) maxScroll = 0;
+    if (monitorFileScroll > maxScroll) monitorFileScroll = maxScroll;
+  }
+  monitorFileLastRefreshMs = millis();
+  monitorSetFileInfo((monitorFileCount > 0) ? "Tap folder to open" : "No matching files");
+}
+
+static void monitorGoParentDir() {
+  if (strcmp(monitorFilePath, "/") == 0) return;
+  char nextPath[96];
+  strncpy(nextPath, monitorFilePath, sizeof(nextPath) - 1);
+  nextPath[sizeof(nextPath) - 1] = '\0';
+  int len = (int)strlen(nextPath);
+  while (len > 1 && nextPath[len - 1] == '/') {
+    nextPath[len - 1] = '\0';
+    len--;
+  }
+  while (len > 1 && nextPath[len - 1] != '/') {
+    nextPath[len - 1] = '\0';
+    len--;
+  }
+  if (len <= 1) {
+    strcpy(nextPath, "/");
+  }
+  monitorFileScroll = 0;
+  monitorLoadFileDir(nextPath);
+}
+
+static void monitorEnterDir(const char* name) {
+  if (!name || !name[0]) return;
+  char nextPath[96];
+  if (strcmp(monitorFilePath, "/") == 0) {
+    snprintf(nextPath, sizeof(nextPath), "/%s", name);
+  } else {
+    snprintf(nextPath, sizeof(nextPath), "%s/%s", monitorFilePath, name);
+  }
+  monitorFileScroll = 0;
+  monitorLoadFileDir(nextPath);
+}
+
 // Track which yoink log seq we've already pushed to monitor
 static uint32_t monitorYoinkLastSeq = 0;
 
@@ -6403,6 +7477,10 @@ static void monitorReset() {
   monitorLastBeacon = monBeaconHits;
   monitorLastHs = monHandshakeHits;
   monitorYoinkLastSeq = 0;
+  monitorFileLastRefreshMs = 0;
+  monitorFileScroll = 0;
+  monitorFileCount = 0;
+  monitorSetFileInfo("");
   // Reset Raw mode tracking
   rawMonLastPkts = 0;
   rawMonLastMgmt = 0;
@@ -6440,7 +7518,7 @@ static void drawMonitor() {
     drawHeader("Monitor");
     drawUniversalBackground();
 
-    btnMonitorBack = {bottom.x, bottom.y, 92, UI_BUTTON_H, "Back"};
+    btnMonitorBack = {bottom.x, bottom.y, 74, UI_BUTTON_H, "Back"};
     drawButton(btnMonitorBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
 
     tft.drawRect(boxX, boxY, boxW, boxH, TFT_DARKGREY);
@@ -6492,37 +7570,97 @@ static void drawMonitor() {
   drawButton(btnMonitorTab1, liveColor, TFT_WHITE, TFT_WHITE);
   drawButton(btnMonitorTab2, filesColor, TFT_WHITE, TFT_WHITE);
 
-  // Redraw only changed monitor lines.
-  const int lineH = 12;
-  const int textX = boxX + 16;
-  tft.setTextDatum(TL_DATUM);
-  for (int i = 0; i < MONITOR_MAX_LINES; i++) {
-    const bool hasLine = (i < monitorLineCount);
-    const char* txt = hasLine ? monitorLines[i].text : "";
-    const uint16_t col = hasLine ? monitorLines[i].color : TFT_WHITE;
-    const uint32_t sig = hashText(txt);
-    if (monitorDrawnSig[i] == sig && monitorDrawnColor[i] == col && monitorDrawnCount == monitorLineCount) {
-      continue;
-    }
-    int y = boxY + 8 + (i * lineH);
-    tft.fillRect(textX - 2, y, boxW - 22, lineH - 1, TFT_BLACK);
-    if (hasLine) {
-      tft.setTextColor(col, TFT_BLACK);
-      tft.drawString(txt, textX, y);
-    }
-    monitorDrawnSig[i] = sig;
-    monitorDrawnColor[i] = col;
-  }
-  monitorDrawnCount = monitorLineCount;
+  if (monitorMode == MonitorMode::FILES) {
+    const int ctlGap = 6;
+    btnMonitorUpDir = {btnMonitorBack.x + btnMonitorBack.w + ctlGap, bottom.y, 44, UI_BUTTON_H, ".."};
+    btnMonitorUp = {btnMonitorUpDir.x + btnMonitorUpDir.w + ctlGap, bottom.y, 36, UI_BUTTON_H, "^"};
+    btnMonitorDown = {btnMonitorUp.x + btnMonitorUp.w + ctlGap, bottom.y, 36, UI_BUTTON_H, "v"};
+    drawButton(btnMonitorUpDir, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+    drawButton(btnMonitorUp, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+    drawButton(btnMonitorDown, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
 
-  // Simple cursor animation
-  uint8_t spin = (uint8_t)((millis() / 200) & 0x03);
-  const char spinner[4] = {'|', '/', '-', '\\'};
-  char cur[8];
-  snprintf(cur, sizeof(cur), "%c", spinner[spin]);
-  tft.fillRect(boxX + boxW - 16, boxY + boxH - 15, 10, 12, TFT_BLACK);
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.drawString(cur, boxX + boxW - 14, boxY + boxH - 14);
+    if (monitorFileLastRefreshMs == 0) {
+      monitorLoadFileDir(monitorFilePath);
+    }
+
+    tft.fillRect(boxX + 1, boxY + 1, boxW - 2, boxH - 2, TFT_BLACK);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    String pathLine = String("SD: ") + monitorFilePath;
+    while (pathLine.length() > 4 && tft.textWidth(pathLine) > (boxW - 10)) {
+      pathLine.remove(pathLine.length() - 1);
+    }
+    tft.drawString(pathLine, boxX + 4, boxY + 4);
+
+    monitorFileListX = boxX + 4;
+    monitorFileListY = boxY + 20;
+    monitorFileListW = boxW - 8;
+    monitorFileListH = boxH - 40;
+    monitorFileRowH = 14;
+    monitorFileVisibleRows = monitorFileListH / monitorFileRowH;
+    if (monitorFileVisibleRows < 1) monitorFileVisibleRows = 1;
+
+    int maxScroll = monitorFileCount - monitorFileVisibleRows;
+    if (maxScroll < 0) maxScroll = 0;
+    monitorFileScroll = clampi(monitorFileScroll, 0, maxScroll);
+
+    for (int r = 0; r < monitorFileVisibleRows; r++) {
+      const int idx = monitorFileScroll + r;
+      const int y = monitorFileListY + (r * monitorFileRowH);
+      tft.fillRect(monitorFileListX, y, monitorFileListW, monitorFileRowH - 1, TFT_BLACK);
+      if (idx >= monitorFileCount) continue;
+      const MonitorFileEntry& e = monitorFiles[idx];
+      tft.setTextColor(e.isDir ? TFT_YELLOW : TFT_WHITE, TFT_BLACK);
+      String line = String(e.isDir ? "[D] " : "    ") + e.name;
+      while (line.length() > 4 && tft.textWidth(line) > (monitorFileListW - 64)) {
+        line.remove(line.length() - 1);
+      }
+      tft.drawString(line, monitorFileListX + 2, y + 2);
+      if (!e.isDir) {
+        char sz[16];
+        snprintf(sz, sizeof(sz), "%lu", (unsigned long)e.size);
+        tft.setTextDatum(TR_DATUM);
+        tft.setTextColor(0x7BCF, TFT_BLACK);
+        tft.drawString(sz, monitorFileListX + monitorFileListW - 4, y + 2);
+        tft.setTextDatum(TL_DATUM);
+      }
+    }
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString(monitorFileInfo, boxX + 4, boxY + boxH - 14);
+  } else {
+    // Redraw only changed monitor lines.
+    const int lineH = 12;
+    const int textX = boxX + 16;
+    tft.setTextDatum(TL_DATUM);
+    for (int i = 0; i < MONITOR_MAX_LINES; i++) {
+      const bool hasLine = (i < monitorLineCount);
+      const char* txt = hasLine ? monitorLines[i].text : "";
+      const uint16_t col = hasLine ? monitorLines[i].color : TFT_WHITE;
+      const uint32_t sig = hashText(txt);
+      if (monitorDrawnSig[i] == sig && monitorDrawnColor[i] == col && monitorDrawnCount == monitorLineCount) {
+        continue;
+      }
+      int y = boxY + 8 + (i * lineH);
+      tft.fillRect(textX - 2, y, boxW - 22, lineH - 1, TFT_BLACK);
+      if (hasLine) {
+        tft.setTextColor(col, TFT_BLACK);
+        tft.drawString(txt, textX, y);
+      }
+      monitorDrawnSig[i] = sig;
+      monitorDrawnColor[i] = col;
+    }
+    monitorDrawnCount = monitorLineCount;
+
+    // Simple cursor animation
+    uint8_t spin = (uint8_t)((millis() / 200) & 0x03);
+    const char spinner[4] = {'|', '/', '-', '\\'};
+    char cur[8];
+    snprintf(cur, sizeof(cur), "%c", spinner[spin]);
+    tft.fillRect(boxX + boxW - 16, boxY + boxH - 15, 10, 12, TFT_BLACK);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString(cur, boxX + boxW - 14, boxY + boxH - 14);
+  }
   uiLogLayout("drawMonitor", content, bottom);
   uiLogButtonRect("Monitor.Back", btnMonitorBack);
 }
@@ -6533,6 +7671,14 @@ static void monitorTick() {
   uint32_t now = millis();
   if (now - monitorLastUpdateMs < (uint32_t)cfg.telemetry_monitorIntervalMs) return;
   monitorLastUpdateMs = now;
+
+  if (monitorMode == MonitorMode::FILES) {
+    if ((now - monitorFileLastRefreshMs) > 1500U) {
+      monitorLoadFileDir(monitorFilePath);
+      drawMonitor();
+    }
+    return;
+  }
 
   const bool isYoink  = (autoMode == AutoMode::Y0INK  && YoinkEngine::isRunning());
   const bool isJammit = (autoMode == AutoMode::JAMMIT);
@@ -6838,9 +7984,15 @@ static void drawRecon() {
   tft.drawString("Attackers:", statsX + 4, statsY + 20);
   tft.drawString("Ch:", statsX + (statsW / 2), statsY + 20);
   tft.setTextColor(TFT_WHITE, 0x0841);
-  tft.drawString(String(stats.total_deauths), statsX + 46, statsY + 4);
-  tft.drawString(String(stats.total_disassocs), statsX + (statsW / 2) + 50, statsY + 4);
-  tft.drawString(String(stats.unique_sources), statsX + 58, statsY + 20);
+  char deauthStr[12];
+  char disassocStr[12];
+  char attackersStr[12];
+  snprintf(deauthStr, sizeof(deauthStr), "%lu", (unsigned long)stats.total_deauths);
+  snprintf(disassocStr, sizeof(disassocStr), "%lu", (unsigned long)stats.total_disassocs);
+  snprintf(attackersStr, sizeof(attackersStr), "%u", (unsigned)stats.unique_sources);
+  tft.drawString(deauthStr, statsX + 46, statsY + 4);
+  tft.drawString(disassocStr, statsX + (statsW / 2) + 50, statsY + 4);
+  tft.drawString(attackersStr, statsX + 58, statsY + 20);
   char chStr[16];
   snprintf(chStr, sizeof(chStr), "%d/%d", DeauthHunter::getCurrentChannel(), stats.most_active_channel ? stats.most_active_channel : 1);
   tft.drawString(chStr, statsX + (statsW / 2) + 22, statsY + 20);
@@ -6963,9 +8115,15 @@ static void reconTick() {
     tft.drawString("Attackers:", statsX + 4, statsY + 20);
     tft.drawString("Ch:", statsX + (statsW / 2), statsY + 20);
     tft.setTextColor(TFT_WHITE, 0x0841);
-    tft.drawString(String(stats.total_deauths), statsX + 46, statsY + 4);
-    tft.drawString(String(stats.total_disassocs), statsX + (statsW / 2) + 50, statsY + 4);
-    tft.drawString(String(stats.unique_sources), statsX + 58, statsY + 20);
+    char deauthStr[12];
+    char disassocStr[12];
+    char attackersStr[12];
+    snprintf(deauthStr, sizeof(deauthStr), "%lu", (unsigned long)stats.total_deauths);
+    snprintf(disassocStr, sizeof(disassocStr), "%lu", (unsigned long)stats.total_disassocs);
+    snprintf(attackersStr, sizeof(attackersStr), "%u", (unsigned)stats.unique_sources);
+    tft.drawString(deauthStr, statsX + 46, statsY + 4);
+    tft.drawString(disassocStr, statsX + (statsW / 2) + 50, statsY + 4);
+    tft.drawString(attackersStr, statsX + 58, statsY + 20);
 
     char chStr[16];
     snprintf(chStr, sizeof(chStr), "%d/%d", currentCh, stats.most_active_channel ? stats.most_active_channel : 1);
@@ -7290,60 +8448,160 @@ static void jammitModeTick() {
 }
 
 // ---------- BRUCE WiFi Attack Menu ----------
-static Button bruceMenuBtns[6];
 static bool bruceMenuShowStats = false;
 static int bruceTargetScroll = 0;
-static Button btnBruceSetTargetBack;
+static int bruceTargetListTopY = 100;
+static int bruceTargetListItemH = 28;
+static int bruceTargetListItemsPerScreen = 4;
+static int bruceTargetListX = 10;
+static int bruceTargetListW = 300;
 
 // Draw the Bruce Set Target selection screen
 void drawBruceSetTarget() {
   tft.fillScreen(TFT_BLACK);
   drawHeader("SELECT ATTACK TARGET");
-  
-  const int w = tft.width();
+
+  drawUniversalBackground();
   const int h = tft.height();
-  const int itemH = 28;
-  const int topY = 100;
-  const int itemsPerScreen = 4;
-  
-  // Column for AP networks
+  const bool compact = (h <= 180);
+  const UiRect content = computeContentRect();
+  const UiRect bottom = computeBottomBarRect();
+
+  static const char* rowLabels[8] = {"AP1", "AP2", "AP3", "AP4", "AP5", "AP6", "AP7", "AP8"};
+  for (int i = 0; i < 8; i++) {
+    btnBruceSetTargetRows[i] = {0, 0, 0, 0, rowLabels[i]};
+  }
+  btnBruceSetTargetAll = {0, 0, 0, 0, "ALL"};
+  btnBruceSetTargetUp = {0, 0, 0, 0, "^"};
+  btnBruceSetTargetDown = {0, 0, 0, 0, "v"};
+
+  const int controlGap = compact ? 3 : 6;
+  int controlW = compact ? 24 : 30;
+
+  bruceTargetListX = content.x;
+  int listPanelRight = hypercubeBoxX - 4;
+  if (listPanelRight < (content.x + 100)) listPanelRight = content.x + content.w;
+  int listPanelW = listPanelRight - bruceTargetListX;
+  if (listPanelW < 100) listPanelW = 100;
+  if (listPanelW < (controlW + 40)) controlW = 0;
+
+  bruceTargetListW = listPanelW - (controlW > 0 ? (controlW + controlGap) : 0);
+  if (bruceTargetListW < 80) bruceTargetListW = 80;
+
+  const int metaY = content.y + 1;
+  bruceTargetListTopY = metaY + 12;
+  const int listBottom = bottom.y - 14;
+  const int listH = max(compact ? 54 : 88, listBottom - bruceTargetListTopY);
+
+  const int desiredRows = compact ? 6 : 5;
+  bruceTargetListItemH = clampi((listH - 2) / desiredRows, compact ? 14 : 20, compact ? 20 : 30);
+  bruceTargetListItemsPerScreen = clampi(listH / bruceTargetListItemH, 3, 8);
+
+  const int visibleNetworks = max(1, bruceTargetListItemsPerScreen - 1);
+  int maxScroll = apCount - visibleNetworks;
+  if (maxScroll < 0) maxScroll = 0;
+  bruceTargetScroll = clampi(bruceTargetScroll, 0, maxScroll);
+
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.setTextSize(1);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("WiFi Networks:", 10, topY - 20);
-  
-  // Show "Attack All" option first
-  tft.drawRect(10, topY, w - 20, itemH, TFT_GREEN);
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.drawString(">> ATTACK ALL APs in Area", 15, topY + 6);
-  
-  // Draw available networks
-  int displayIdx = 0;
-  for (int i = bruceTargetScroll; i < apCount && displayIdx < itemsPerScreen - 1; i++) {
-    int y = topY + itemH + (displayIdx * itemH);
-    uint16_t color = TFT_YELLOW;
-    if (i == apSelected) color = TFT_CYAN;
-    
-    tft.drawRect(10, y, w - 20, itemH, color);
-    tft.setTextColor(color, TFT_BLACK);
-    
-    char buf[40];
-    snprintf(buf, sizeof(buf), "%-16s [CH%d]", 
-             aps[i].ssid.c_str(),
-             aps[i].channel);
-    tft.drawString(buf, 15, y + 6);
-    displayIdx++;
+  char meta[72];
+  if (apCount > 0) {
+    const int first = bruceTargetScroll + 1;
+    const int last = min(apCount, bruceTargetScroll + visibleNetworks);
+    snprintf(meta, sizeof(meta), "WiFi Networks: %d  showing %d-%d", apCount, first, last);
+  } else {
+    snprintf(meta, sizeof(meta), "WiFi Networks: 0  (run scan first)");
   }
-  
-  // Back button
-  btnBruceSetTargetBack = {10, h - 50, w - 20, 40, "Back"};
+  tft.drawString(meta, bruceTargetListX, metaY);
+
+  // "Attack All" row
+  const bool allSelected = (bruceHasSelectedTarget && bruceTargetSsid[0] == '\0');
+  btnBruceSetTargetAll = {bruceTargetListX, bruceTargetListTopY, bruceTargetListW, bruceTargetListItemH, "ALL"};
+  tft.fillRect(btnBruceSetTargetAll.x, btnBruceSetTargetAll.y, btnBruceSetTargetAll.w, btnBruceSetTargetAll.h,
+               allSelected ? 0x03A0 : TFT_BLACK);
+  tft.drawRect(btnBruceSetTargetAll.x, btnBruceSetTargetAll.y, btnBruceSetTargetAll.w, btnBruceSetTargetAll.h,
+               allSelected ? TFT_CYAN : TFT_GREEN);
+  tft.setTextColor(allSelected ? TFT_WHITE : TFT_GREEN, allSelected ? 0x03A0 : TFT_BLACK);
+  tft.drawString(">> ATTACK ALL APs IN AREA", bruceTargetListX + 4, bruceTargetListTopY + (compact ? 3 : 6));
+
+  // Per-AP rows
+  const int rowTextInsetY = compact ? 3 : 6;
+  for (int row = 0; row < visibleNetworks; row++) {
+    const int apIdx = bruceTargetScroll + row;
+    const int rowY = bruceTargetListTopY + bruceTargetListItemH + (row * bruceTargetListItemH);
+    if (apIdx < 0 || apIdx >= apCount) {
+      tft.fillRect(bruceTargetListX, rowY, bruceTargetListW, bruceTargetListItemH, TFT_BLACK);
+      tft.drawRect(bruceTargetListX, rowY, bruceTargetListW, bruceTargetListItemH, TFT_DARKGREY);
+      continue;
+    }
+
+    btnBruceSetTargetRows[row] = {bruceTargetListX, rowY, bruceTargetListW, bruceTargetListItemH, rowLabels[row]};
+
+    const bool isSelected = (apIdx == apSelected);
+    const uint16_t fill = isSelected ? 0x03A0 : TFT_BLACK;
+    const uint16_t border = isSelected ? TFT_CYAN : TFT_DARKGREY;
+    const uint16_t fg = isSelected ? TFT_WHITE : TFT_YELLOW;
+
+    tft.fillRect(bruceTargetListX, rowY, bruceTargetListW, bruceTargetListItemH, fill);
+    tft.drawRect(bruceTargetListX, rowY, bruceTargetListW, bruceTargetListItemH, border);
+    tft.setTextColor(fg, fill);
+
+    String ssid = aps[apIdx].ssid.isEmpty() ? String("(hidden)") : aps[apIdx].ssid;
+    String rowLine = ssid + " | CH " + String(aps[apIdx].channel) + " | " + String(aps[apIdx].rssi) + "dBm";
+    const int rowTextMaxW = bruceTargetListW - 8;
+    bool trimmed = false;
+    while (rowLine.length() > 4 && tft.textWidth(rowLine) > rowTextMaxW) {
+      rowLine.remove(rowLine.length() - 1);
+      trimmed = true;
+    }
+    if (trimmed && rowLine.length() > 3) {
+      while (rowLine.length() > 3 && tft.textWidth(rowLine + "...") > rowTextMaxW) {
+        rowLine.remove(rowLine.length() - 1);
+      }
+      rowLine += "...";
+    }
+    tft.drawString(rowLine, bruceTargetListX + 4, rowY + rowTextInsetY);
+  }
+
+  // Scroll controls use the right-side gutter on compact displays.
+  if (controlW > 0) {
+    const int controlX = bruceTargetListX + bruceTargetListW + controlGap;
+    const int controlH = max(bruceTargetListItemH, compact ? 18 : 24);
+    const bool canScrollUp = (bruceTargetScroll > 0);
+    const bool canScrollDown = (bruceTargetScroll < maxScroll);
+
+    btnBruceSetTargetUp = {controlX, bruceTargetListTopY, controlW, controlH, "^"};
+    btnBruceSetTargetDown = {controlX, bruceTargetListTopY + listH - controlH, controlW, controlH, "v"};
+
+    drawButton(btnBruceSetTargetUp,
+               canScrollUp ? TFT_DARKGREY : TFT_BLACK,
+               canScrollUp ? TFT_CYAN : TFT_DARKGREY,
+               canScrollUp ? TFT_WHITE : TFT_DARKGREY);
+    drawButton(btnBruceSetTargetDown,
+               canScrollDown ? TFT_DARKGREY : TFT_BLACK,
+               canScrollDown ? TFT_CYAN : TFT_DARKGREY,
+               canScrollDown ? TFT_WHITE : TFT_DARKGREY);
+
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    char scrollInfo[18];
+    snprintf(scrollInfo, sizeof(scrollInfo), "%d/%d", bruceTargetScroll + 1, maxScroll + 1);
+    tft.drawString(scrollInfo, controlX + (controlW / 2), bruceTargetListTopY + (listH / 2) - 2);
+    tft.setTextDatum(TL_DATUM);
+  }
+
+  // Bottom bar
+  btnBruceSetTargetBack = {bottom.x, bottom.y, bottom.w, UI_BUTTON_H, "Back"};
   drawButton(btnBruceSetTargetBack, TFT_BLACK, TFT_NAVY, TFT_WHITE);
-  
-  // Info text
+
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextSize(1);
-  tft.drawString("Tap network to select", 10, h - 70);
-  
+  String hint = "Tap row to select  |  BTN1 Next  BTN2 Select";
+  while (hint.length() > 4 && tft.textWidth(hint) > (content.w - 2)) {
+    hint.remove(hint.length() - 1);
+  }
+  tft.drawString(hint, content.x, bottom.y - 12);
+
   drawBorder();
 }
 
@@ -7356,21 +8614,51 @@ void drawBruceMenu() {
 
   const int w = tft.width();
   const int h = tft.height();
+  const bool compact = (h <= 180);
+  const UiRect content = computeContentRect();
+  const UiRect bottom = computeBottomBarRect();
+
+  // Status text block
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  int statusY = content.y + 2;
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  if (bruceHasSelectedTarget) {
+    if (bruceTargetSsid[0] == '\0') {
+      tft.drawString("Target: ALL APs", 8, statusY);
+    } else {
+      char buf[56];
+      snprintf(buf, sizeof(buf), "Target: %.20s [CH%d]", bruceTargetSsid, bruceTargetChannel);
+      tft.drawString(buf, 8, statusY);
+    }
+  } else {
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("NO TARGET - Press Set Target", 8, statusY);
+  }
+
+  if (bruceIsAttacking()) {
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.drawString(bruceGetAttackName(), 8, statusY + 12);
+  }
+
   const int pad = 8;
-  const int gap = 8;
+  const int gap = compact ? 4 : 8;
   const int btnW = (w - pad * 2 - gap) / 2;
-  const int btnH = 36;
-  const int topY = 100;
+  const int gridTop = statusY + (bruceIsAttacking() ? 24 : 14);
+  const int rows = 3;
+  const int availH = bottom.y - gridTop - 4;
+  const int btnH = clampi((availH - (gap * (rows - 1))) / rows,
+                          compact ? 20 : 30,
+                          compact ? 28 : 40);
 
   // Attack buttons (top 4)
-  bruceMenuBtns[0] = {pad,            topY,              btnW, btnH, "Deauth Flood"};
-  bruceMenuBtns[1] = {pad + btnW + gap, topY,             btnW, btnH, "Beacon Spam"};
-  bruceMenuBtns[2] = {pad,            topY + btnH + gap,  btnW, btnH, "Probe Flood"};
-  bruceMenuBtns[3] = {pad + btnW + gap, topY + btnH + gap, btnW, btnH, "Deauth All"};
-  // Set Target and Back buttons (bottom)
-  bruceMenuBtns[4] = {pad, topY + (btnH + gap) * 2, btnW, btnH,
-                      "Set Target"};
-  bruceMenuBtns[5] = {pad + btnW + gap, topY + (btnH + gap) * 2, btnW, btnH,
+  bruceMenuBtns[0] = {pad,                gridTop,                    btnW, btnH, "Deauth Flood"};
+  bruceMenuBtns[1] = {pad + btnW + gap,   gridTop,                    btnW, btnH, "Beacon Spam"};
+  bruceMenuBtns[2] = {pad,                gridTop + btnH + gap,       btnW, btnH, "Probe Flood"};
+  bruceMenuBtns[3] = {pad + btnW + gap,   gridTop + btnH + gap,       btnW, btnH, "Deauth All"};
+  // Set Target and Back/Stop buttons (bottom row)
+  bruceMenuBtns[4] = {pad,                gridTop + ((btnH + gap) * 2), btnW, btnH, "Set Target"};
+  bruceMenuBtns[5] = {pad + btnW + gap,   gridTop + ((btnH + gap) * 2), btnW, btnH,
                       bruceIsAttacking() ? "STOP" : "Back"};
 
   drawButton(bruceMenuBtns[0], TFT_BLACK, 0xFF07, TFT_WHITE);
@@ -7381,34 +8669,6 @@ void drawBruceMenu() {
   drawButton(bruceMenuBtns[5], TFT_BLACK,
              bruceIsAttacking() ? 0xFC00 : 0x07E0, TFT_WHITE);
 
-  // Status display
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
-  
-  // Display current target
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  if (bruceHasSelectedTarget) {
-    if (bruceTargetSsid[0] == '\0') {
-      tft.drawString("Target: ALL APs", 10, 240);
-    } else {
-      char buf[40];
-      snprintf(buf, sizeof(buf), "Target: %.15s", bruceTargetSsid);
-      tft.drawString(buf, 10, 240);
-    }
-  } else {
-    tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.drawString("NO TARGET - Press Set Target", 10, 240);
-  }
-  
-  // Show if attack is active
-  if (bruceIsAttacking()) {
-    BruceStats stats = bruceGetStats();
-    tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.drawString("ATTACK ACTIVE:", 10, 256);
-    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    tft.drawString(bruceGetAttackName(), 10, 272);
-  }
-  
   drawBorder();
 }
 
@@ -7483,6 +8743,7 @@ static void bruceOpenCaptures() {
   bruceSetFrameCallback(brucePcapFrameCb);
 
   Serial.printf("[BRUCE] Capture open: %s\n", dir);
+  uiMemLog("after_start_capture");
 }
 
 // Drain the RAM ring buffer to the PCAP file (call from the monitor tick).
@@ -7526,6 +8787,7 @@ static void bruceCloseCaptures() {
 
   Serial.printf("[BRUCE] Capture closed – %lu frames, %lu pcap frames\n",
                 (unsigned long)stats.framesSent, (unsigned long)brucePcapFrameCount);
+  uiMemLog("after_stop_capture");
 }
 
 // ============================================================
@@ -7853,27 +9115,70 @@ static void setScreen(ScreenId next);
 static void bruceSetTargetTick_UI(int tx, int ty) {
   if (screen != ScreenId::BRUCE_SET_TARGET) return;
 
-  const int w = tft.width();
-  const int itemH = 28;
-  const int topY = 100;
-  const int itemsPerScreen = 4;
+  const int visibleNetworks = max(1, bruceTargetListItemsPerScreen - 1);
+  int maxScroll = apCount - visibleNetworks;
+  if (maxScroll < 0) maxScroll = 0;
+  bruceTargetScroll = clampi(bruceTargetScroll, 0, maxScroll);
+
+  if (hit(btnBruceSetTargetUp, tx, ty)) {
+    if (bruceTargetScroll > 0) {
+      bruceTargetScroll--;
+      drawBruceSetTarget();
+    }
+    waitTouchRelease();
+    return;
+  }
+
+  if (hit(btnBruceSetTargetDown, tx, ty)) {
+    if (bruceTargetScroll < maxScroll) {
+      bruceTargetScroll++;
+      drawBruceSetTarget();
+    }
+    waitTouchRelease();
+    return;
+  }
 
   // Check "Attack All" option
-  if (ty >= topY && ty < topY + itemH) {
+  if (hit(btnBruceSetTargetAll, tx, ty)) {
     Serial.println("[BRUCE] Attack All APs selected");
     bruceTargetSsid[0] = '\0';  // Mark as all APs
+    apSelected = -1;
     bruceHasSelectedTarget = true;
     setScreen(ScreenId::BRUCE_MENU);
     waitTouchRelease();
     return;
   }
 
-  // Check network selection
-  int displayIdx = 0;
-  for (int i = bruceTargetScroll; i < apCount && displayIdx < itemsPerScreen - 1; i++) {
-    int y = topY + itemH + (displayIdx * itemH);
-    if (ty >= y && ty < y + itemH) {
-      // Selected this network
+  // Check network rows
+  for (int row = 0; row < visibleNetworks; row++) {
+    const int i = bruceTargetScroll + row;
+    if (i < 0 || i >= apCount) continue;
+    if (!hit(btnBruceSetTargetRows[row], tx, ty)) continue;
+
+    // Selected this network
+    apSelected = i;
+    bruceTargetChannel = aps[i].channel;
+    strncpy(bruceTargetSsid, aps[i].ssid.c_str(), 19);
+    bruceTargetSsid[19] = '\0';
+    // Convert BSSID string to bytes
+    String bssidStr = aps[i].bssid;
+    if (macFromString(bssidStr.c_str(), bruceTargetBssid)) {
+      bruceHasSelectedTarget = true;
+      Serial.printf("[BRUCE] Selected target: %s [CH%d]\n",
+                    bruceTargetSsid, bruceTargetChannel);
+    }
+    setScreen(ScreenId::BRUCE_MENU);
+    waitTouchRelease();
+    return;
+  }
+
+  // Legacy rectangular hit fallback for full row area.
+  if (tx >= bruceTargetListX && tx < (bruceTargetListX + bruceTargetListW) &&
+      ty >= bruceTargetListTopY + bruceTargetListItemH) {
+    int row = (ty - (bruceTargetListTopY + bruceTargetListItemH)) / bruceTargetListItemH;
+    const int i = bruceTargetScroll + row;
+    if (row >= 0 && row < visibleNetworks && i >= 0 && i < apCount) {
+      apSelected = i;
       bruceTargetChannel = aps[i].channel;
       strncpy(bruceTargetSsid, aps[i].ssid.c_str(), 19);
       bruceTargetSsid[19] = '\0';
@@ -7888,7 +9193,6 @@ static void bruceSetTargetTick_UI(int tx, int ty) {
       waitTouchRelease();
       return;
     }
-    displayIdx++;
   }
 
   // Check Back button
@@ -7938,11 +9242,12 @@ static void bruceMenuTick_UI(int tx, int ty) {
   if (!bruceHasSelectedTarget) {
     tft.fillScreen(TFT_BLACK);
     drawHeader("Error");
+    const bool compact = (tft.height() <= 180);
     tft.setTextDatum(TL_DATUM);
     tft.setTextSize(1);
     tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.drawString("No target selected!", 10, 100);
-    tft.drawString("Press 'Set Target' first", 10, 120);
+    tft.drawString("No target selected!", 10, compact ? 72 : 100);
+    tft.drawString("Press 'Set Target' first", 10, compact ? 88 : 120);
     delay(2000);
     drawBruceMenu();
     waitTouchRelease();
@@ -8016,23 +9321,33 @@ static void drawAbout() {
   drawUniversalBackground();
   const UiRect content = computeContentRect();
   const UiRect bottom = computeBottomBarRect();
+  const bool compact = (tft.height() <= 180);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(2);
+  tft.setTextSize(compact ? 1 : 2);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  #if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+  tft.drawString("NEONdrive T-Display-S3", content.x + 2, content.y + 8);
+  #else
   tft.drawString("NEONdrive CYD", content.x + 2, content.y + 8);
+  #endif
 
   tft.setTextSize(1);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Landscape USB-right | Touch PRESET #5 baked", content.x + 2, content.y + 40);
-  tft.drawString("Config: LittleFS /config.json", content.x + 2, content.y + 56);
+  #if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+  tft.drawString("ESP32-S3 | 320x170 landscape UI", content.x + 2, content.y + (compact ? 24 : 40));
+  tft.drawString("Touch:auto-detect + BTN1/BTN2 nav", content.x + 2, content.y + (compact ? 36 : 56));
+  #else
+  tft.drawString("Landscape USB-right | Touch PRESET #5 baked", content.x + 2, content.y + (compact ? 24 : 40));
+  tft.drawString("Config: LittleFS /config.json", content.x + 2, content.y + (compact ? 36 : 56));
+  #endif
 
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   char dims[48];
   snprintf(dims, sizeof(dims), "tft: %dx%d", tft.width(), tft.height());
-  tft.drawString(dims, content.x + 2, content.y + 74);
+  tft.drawString(dims, content.x + 2, content.y + (compact ? 48 : 74));
 
-  btnBack = {bottom.x, bottom.y, 120, UI_BUTTON_H, "Back"};
+  btnBack = {bottom.x, bottom.y, compact ? 92 : 120, UI_BUTTON_H, "Back"};
   drawButton(btnBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
 
   printConfigSerial(cfg);
@@ -8098,7 +9413,40 @@ static void setScreen(ScreenId next) {
     }
     case ScreenId::TARGETS_PLACEHOLDER: drawPlaceholder("Targets", "Coming soon"); break;
   }
+#if UI_DEBUG_MEM
+  char memTag[48];
+  snprintf(memTag, sizeof(memTag), "screen:%s", screenToStr(screen));
+  uiMemLog(memTag);
+#endif
 }
+
+#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+static void tdisplayRedrawCurrentScreen() {
+  switch (screen) {
+    case ScreenId::HOME:                drawHome(); break;
+    case ScreenId::JUST_GO:             drawJustGo(); break;
+    case ScreenId::WIFI_SCAN:           drawWifiScan(); break;
+    case ScreenId::CONFIRM_TARGET:      drawConfirmTarget(); break;
+    case ScreenId::TARGET_DETAILS:      drawTargetDetails(); break;
+    case ScreenId::AUTOMATE_MENU:       drawAutomateMenu(); break;
+    case ScreenId::MONITOR:             drawMonitor(); break;
+    case ScreenId::TARGETS_PLACEHOLDER: drawPlaceholder("Targets", "Coming soon"); break;
+    case ScreenId::CONFIG:              drawConfig(); break;
+    case ScreenId::WIFI_CONFIG:         drawWifiConfig(); break;
+    case ScreenId::STARTUP_CONFIG:      drawStartupConfig(); break;
+    case ScreenId::TELEMETRY_CONFIG:    drawTelemetryConfig(); break;
+    case ScreenId::WIFI_CONNECT:        drawWifiConnect(); break;
+    case ScreenId::WEBSERVER:           drawWebserver(); break;
+    case ScreenId::RECON:               drawRecon(); break;
+    case ScreenId::ABOUT:               drawAbout(); break;
+    case ScreenId::BRUCE_MENU:          drawBruceMenu(); break;
+    case ScreenId::BRUCE_MONITOR:       drawBruceMonitor(); break;
+    case ScreenId::BRUCE_SET_TARGET:    drawBruceSetTarget(); break;
+    case ScreenId::SCOPE_GRAPH:         drawScopeGraph(); break;
+    case ScreenId::LED_CONTROL:         drawLedControl(); break;
+  }
+}
+#endif
 
 // ---------- Setup / Loop ----------
 static void bumpInt(int& v, int delta, int lo, int hi) { v = clampi(v + delta, lo, hi); }
@@ -8107,12 +9455,23 @@ void setup() {
   Serial.begin(115200);
   delay(100);
   Serial.println();
+  #if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+  Serial.println("=== NEONDRIVE // T-Display-S3 | Milestone D ===");
+  #else
   Serial.println("=== NEONDRIVE // CYD | Milestone D ===");
+  #endif
+
+#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+  pinMode(BUTTON_1, INPUT_PULLUP);
+  pinMode(BUTTON_2, INPUT_PULLUP);
+#endif
 
   backlightBringup();
 
-  // 1) SPI begin (LOCKED)
-  SPI.begin(PIN_TFT_SCLK, PIN_TFT_MISO, PIN_TFT_MOSI, PIN_TFT_CS);
+  // 1) SPI begin (CYD uses SPI TFT, T-Display-S3 uses 8-bit parallel TFT)
+  if (TFT_USES_SPI_BUS) {
+    SPI.begin(PIN_TFT_SCLK, PIN_TFT_MISO, PIN_TFT_MOSI, PIN_TFT_CS);
+  }
 
   // 2) TFT init (LOCKED)
   tft.init();
@@ -8130,9 +9489,17 @@ void setup() {
   Serial.print("tft.width()=");  Serial.print(tft.width());
   Serial.print(" tft.height()="); Serial.println(tft.height());
 
-  // Touch init (assume begin() supports no-arg only)
+  // Touch init (CYD only)
+#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+  if (!tdisplayTouchInit()) {
+    Serial.println("[touch] no supported touch controller detected; BUTTON_1/BUTTON_2 only");
+  } else {
+    Serial.println("[touch] touch enabled + BUTTON_1/BUTTON_2 fallback enabled");
+  }
+#else
   ts.begin();
   ts.setRotation(0);
+#endif
 
   // LittleFS
   if (!LittleFS.begin(true)) {
@@ -8169,11 +9536,14 @@ void setup() {
   // Initialize Deauth Hunter
   DeauthHunter::init();
   Serial.println("[hunter] Deauth Hunter initialized");
+  uiMemLog("boot_after_init");
+  uiMemBudgetBoot();
 
   if (cfg.startup_autoReconnectPrompt && !cfg.wifi_ssid.isEmpty()) {
     homeReconnectPromptActive = true;
   }
   setScreen(ScreenId::HOME);
+  uiMemLog("after_ui_init");
   pushConsoleEvent("INFO", "SYS", "Firmware boot complete");
 }
 
@@ -8218,6 +9588,12 @@ void loop() {
   if (webServerRunning) {
     webServer.handleClient();
   }
+
+#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+  if (tdisplayNavConsumeRefreshRequest()) {
+    tdisplayRedrawCurrentScreen();
+  }
+#endif
 
   int tx, ty;
   if (!touchEdgeTriggered(tx, ty)) { delay(5); return; }
@@ -8289,15 +9665,14 @@ void loop() {
           break;
         case 2:
           monitorMode = MonitorMode::FILES;
+          monitorReturnScreen = ScreenId::HOME;
+          monitorLoadFileDir("/");
           setScreen(ScreenId::MONITOR);
           break;
         case 3:
-          if (hasTarget) {
-            setScreen(ScreenId::TARGET_DETAILS);
-          } else {
-            homeTargetsPromptActive = true;
-            drawHome();
-          }
+          homeTargetsPromptActive = false;
+          lockChannel = cfg.wifi_defaultLockChannel;
+          setScreen(ScreenId::TARGET_DETAILS);
           break;
         case 4:
           setScreen(ScreenId::RECON);
@@ -8497,6 +9872,7 @@ void loop() {
     }
 
     if (hit(btnTargetMonitor, tx, ty)) {
+      monitorReturnScreen = ScreenId::TARGET_DETAILS;
       setScreen(ScreenId::MONITOR);
       resetTouchLatch();
       return;
@@ -8596,7 +9972,7 @@ void loop() {
   // MONITOR
   if (screen == ScreenId::MONITOR) {
     if (hit(btnMonitorBack, tx, ty)) {
-      setScreen(ScreenId::TARGET_DETAILS);
+      setScreen(monitorReturnScreen);
       waitTouchRelease();
       return;
     }
@@ -8609,10 +9985,64 @@ void loop() {
     }
     if (hit(btnMonitorTab2, tx, ty)) {
       monitorMode = MonitorMode::FILES;
+      if (monitorFilePath[0] == '\0') strcpy(monitorFilePath, "/");
+      monitorLoadFileDir(monitorFilePath);
       monitorLastUpdateMs = 0;
       drawMonitor();
       waitTouchRelease();
       return;
+    }
+
+    if (monitorMode == MonitorMode::FILES) {
+      if (hit(btnMonitorUpDir, tx, ty)) {
+        monitorGoParentDir();
+        drawMonitor();
+        waitTouchRelease();
+        return;
+      }
+      if (hit(btnMonitorUp, tx, ty)) {
+        int maxScroll = monitorFileCount - monitorFileVisibleRows;
+        if (maxScroll < 0) maxScroll = 0;
+        monitorFileScroll = clampi(monitorFileScroll - 1, 0, maxScroll);
+        drawMonitor();
+        waitTouchRelease();
+        return;
+      }
+      if (hit(btnMonitorDown, tx, ty)) {
+        int maxScroll = monitorFileCount - monitorFileVisibleRows;
+        if (maxScroll < 0) maxScroll = 0;
+        monitorFileScroll = clampi(monitorFileScroll + 1, 0, maxScroll);
+        drawMonitor();
+        waitTouchRelease();
+        return;
+      }
+
+      if (tx >= monitorFileListX && tx < (monitorFileListX + monitorFileListW) &&
+          ty >= monitorFileListY && ty < (monitorFileListY + monitorFileListH)) {
+        const int row = (ty - monitorFileListY) / monitorFileRowH;
+        const int idx = monitorFileScroll + row;
+        if (idx >= 0 && idx < monitorFileCount) {
+          const MonitorFileEntry& e = monitorFiles[idx];
+          if (e.isDir) {
+            monitorEnterDir(e.name);
+            drawMonitor();
+          } else {
+            char fullPath[128];
+            if (strcmp(monitorFilePath, "/") == 0) {
+              snprintf(fullPath, sizeof(fullPath), "/%s", e.name);
+            } else {
+              snprintf(fullPath, sizeof(fullPath), "%s/%s", monitorFilePath, e.name);
+            }
+            char info[80];
+            snprintf(info, sizeof(info), "%s (%lu B)", e.name, (unsigned long)e.size);
+            monitorSetFileInfo(info);
+            Serial.printf("[logs] selected file: %s\n", fullPath);
+            drawMonitor();
+          }
+          waitTouchRelease();
+          return;
+        }
+      }
     }
     waitTouchRelease();
     return;
@@ -8687,16 +10117,6 @@ void loop() {
 
 // CONFIG menu
   if (screen == ScreenId::CONFIG) {
-    const UiRect content = computeContentRect();
-    const int w = tft.width();
-    const int pad = content.x + 4;
-    const int gap = 10;
-    const int bh = 32;
-    const int bw = (content.w - 8 - gap) / 2;
-    const int top = content.y + 8;
-    Button btnCfgStartup = {pad + bw + gap, top + bh + gap, bw, bh, "Startup"};
-    Button btnCfgTelemetry = {pad, top + ((bh + gap) * 2), bw, bh, "Telemetry"};
-
     if (hit(btnBack, tx, ty)) { setScreen(ScreenId::HOME); waitTouchRelease(); return; }
     if (hit(btnCfgWifi, tx, ty)) { setScreen(ScreenId::WIFI_CONFIG); waitTouchRelease(); return; }
     if (hit(btnCfgWifiConnect, tx, ty)) { 
@@ -8740,10 +10160,6 @@ void loop() {
   // WIFI_CONFIG
   if (screen == ScreenId::WIFI_CONFIG) {
     bool changed = false;
-    const UiRect content = computeContentRect();
-    const int rowStartY = content.y + 8;
-    const int rowGap = 56;
-    Button btnDefaultLockToggle = {10, rowStartY + (rowGap * 3) + 18, 110, 30, ""};
 
     if (hit(btnBack, tx, ty)) { setScreen(ScreenId::CONFIG); waitTouchRelease(); return; }
 
@@ -8765,7 +10181,7 @@ void loop() {
     if (hit(btnScanPlus,  tx, ty)) { bumpInt(cfg.wifi_scanDuration, +250, 250, 15000); changed = true; }
 
     if (hit(btnDeauthToggle, tx, ty)) { cfg.wifi_enableDeauth = !cfg.wifi_enableDeauth; changed = true; }
-    if (hit(btnDefaultLockToggle, tx, ty)) { cfg.wifi_defaultLockChannel = !cfg.wifi_defaultLockChannel; changed = true; }
+    if (hit(btnWifiDefaultLockToggle, tx, ty)) { cfg.wifi_defaultLockChannel = !cfg.wifi_defaultLockChannel; changed = true; }
 
     if (changed) {
       configDirty = true;
@@ -8779,11 +10195,6 @@ void loop() {
 
   // STARTUP_CONFIG
   if (screen == ScreenId::STARTUP_CONFIG) {
-    const UiRect content = computeContentRect();
-    const int w = tft.width();
-    Button btnStartupAutoReconnect = {w - 126, content.y + 20, 114, 34, ""};
-    Button btnDefaultLockToggle = {w - 126, content.y + 74, 114, 34, ""};
-
     if (hit(btnBack, tx, ty)) { setScreen(ScreenId::CONFIG); waitTouchRelease(); return; }
 
     if (hit(btnStartupAutoReconnect, tx, ty)) {
@@ -8794,7 +10205,7 @@ void loop() {
       return;
     }
 
-    if (hit(btnDefaultLockToggle, tx, ty)) {
+    if (hit(btnStartupDefaultLockToggle, tx, ty)) {
       cfg.wifi_defaultLockChannel = !cfg.wifi_defaultLockChannel;
       saveConfig(cfg);
       drawStartupConfig();
@@ -8808,12 +10219,6 @@ void loop() {
 
   // TELEMETRY_CONFIG
   if (screen == ScreenId::TELEMETRY_CONFIG) {
-    const UiRect content = computeContentRect();
-    const int w = tft.width();
-    Button btnTelemetryMinus = {content.x + 4, content.y + 60, 56, 34, ""};
-    Button btnTelemetryPlus = {content.x + 66, content.y + 60, 56, 34, ""};
-    Button btnTelemetryVerboseToggle = {w - 126, content.y + 104, 114, 34, ""};
-
     if (hit(btnBack, tx, ty)) { setScreen(ScreenId::CONFIG); waitTouchRelease(); return; }
 
     bool changed = false;
@@ -9112,18 +10517,10 @@ void loop() {
       return;
     }
 
-    // Start WebServer button
+    // WebServer toggle button
     if (hit(btnWebserverStartServer, tx, ty)) {
-      startWebServer();
-      Serial.printf("[web] WebServer state: %s\n", webServerRunning ? "ON" : "OFF");
-      drawWebserver();
-      waitTouchRelease();
-      return;
-    }
-
-    // Stop WebServer button
-    if (hit(btnWebserverStopServer, tx, ty)) {
-      stopWebServer();
+      if (webServerRunning) stopWebServer();
+      else startWebServer();
       Serial.printf("[web] WebServer state: %s\n", webServerRunning ? "ON" : "OFF");
       drawWebserver();
       waitTouchRelease();

@@ -33,6 +33,9 @@ void DeauthHunter::init() {
   // Allocate topAttackers vector on heap
   if (!topAttackers) {
     topAttackers = new std::vector<AttackerInfo>();
+    if (topAttackers) {
+      topAttackers->reserve(MAX_TRACKED_ATTACKERS);
+    }
   }
   
   // Allocate stats on heap
@@ -71,8 +74,8 @@ void DeauthHunter::start() {
   
   if (stats) stats->session_start_time = millis();
   active = true;
-  
-  Serial.println("[DeauthHunter] Active on channel " + String(currentChannel));
+
+  Serial.printf("[DeauthHunter] Active on channel %u\n", (unsigned)currentChannel);
 }
 
 void DeauthHunter::stop() {
@@ -135,8 +138,13 @@ const DeauthEvent* DeauthHunter::getLogEntry(uint16_t index) {
 
 void DeauthHunter::setChannelFilter(uint8_t channel) {
   channelFilter = (channel >= 1 && channel <= 13) ? channel : 0;
-  Serial.printf("[DeauthHunter] Channel filter: %s\n",
-                channelFilter ? String(channelFilter).c_str() : "ALL");
+  if (channelFilter) {
+    char chBuf[4];
+    snprintf(chBuf, sizeof(chBuf), "%u", (unsigned)channelFilter);
+    Serial.printf("[DeauthHunter] Channel filter: %s\n", chBuf);
+  } else {
+    Serial.println("[DeauthHunter] Channel filter: ALL");
+  }
 }
 
 void DeauthHunter::clearFilters() {
