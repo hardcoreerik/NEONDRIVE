@@ -1,5 +1,0 @@
-rg: *.ino: The filename, directory name, or volume label syntax is incorrect. (os error 123)
-rg: *.h: The filename, directory name, or volume label syntax is incorrect. (os error 123)
-rg: *.hpp: The filename, directory name, or volume label syntax is incorrect. (os error 123)
-rg: *.c: The filename, directory name, or volume label syntax is incorrect. (os error 123)
-rg: *.cpp: The filename, directory name, or volume label syntax is incorrect. (os error 123)

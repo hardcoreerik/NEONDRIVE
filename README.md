@@ -1,171 +1,89 @@
-# NEONdrive // CYD
+# NEONdrive Firmware (CYD + T-Display-S3)
 
-![Platform](https://img.shields.io/badge/platform-ESP32--CYD-00c2ff)
-![Framework](https://img.shields.io/badge/framework-Arduino%20%2F%20PlatformIO-ffb300)
-![UI](https://img.shields.io/badge/UI-touch%20first-neon)
-![Status](https://img.shields.io/badge/status-active%20development-00c853)
+NEONdrive maintains separate firmware targets per device so users can flash the correct build without guessing.
 
-NEONdrive is a two-part system:
+## Supported Hardware
 
-1. CYD firmware (on-device recon + control surface)
-2. Android companion app (operator workflow + data movement)
+| Device | PlatformIO Env | Input Mode |
+| --- | --- | --- |
+| CYD 2.4 (ESP32-2432S024 family) | `firmware_cyd_2_4` | Touch |
+| LilyGO T-Display-S3 | `firmware_t_display_s3` | Touch (if present) + hardware buttons fallback |
+| M5Cardputer Advanced | planned | planned |
 
-The firmware and Android app are both core product surfaces. This project is not firmware-only in intent.
+T-Display-S3 fallback controls:
+- `BUTTON_1` = Next focus
+- `BUTTON_2` = Select focused item
 
-## Why NEONdrive
+## Quick Install (Prebuilt `.bin` Files)
 
-NEONdrive is focused on:
+For public users, this is the easiest flow:
 
-- fast, touch-native field workflow on CYD
-- clear visual telemetry under constrained screen space
-- reliable handoff between embedded capture and mobile operations
-- iterative, operator-driven UI tuning
+1. Open GitHub Releases.
+2. Download the two files for your target:
+   - `neondrive_<version>_<target>_app.bin`
+   - `neondrive_<version>_<target>_fullflash.bin`
+3. Flash one of these:
+   - `fullflash.bin` for first install / clean install.
+   - `app.bin` for upgrade at `0x10000`.
 
-## System Architecture
+Detailed commands are in [docs/INSTALL.md](docs/INSTALL.md).
 
-### Firmware (this repo)
+## Build and Flash From Source
 
-- Device UI and workflow engine
-- WiFi scanning, target operations, recon, monitor, and automation screens
-- SD-backed capture/log handling
-- Web/APK endpoints and companion sync indicators
+Build:
 
-### Android Companion (first-class component)
+```bash
+python -m platformio run -e firmware_cyd_2_4
+python -m platformio run -e firmware_t_display_s3
+```
 
-- Operator mobile interface
-- File import/sync flow from CYD
-- Capture management and downstream workflow support
+Flash:
 
-Note: this repo currently contains firmware and Android integration hooks. The full Android production project may be maintained in a sibling workspace repo (for example `C:\ESP32\CYDCompanion`) depending on your local setup.
+```bash
+python -m platformio run -e firmware_cyd_2_4 -t upload --upload-port COM10
+python -m platformio run -e firmware_t_display_s3 -t upload --upload-port COM3
+```
 
-## Current Feature Surface
+Helper scripts:
 
-- Home dashboard with multi-screen navigation
-- WiFi Scan + target selection
-- Target Ops
-- Recon / Deauth Hunter
-- Monitor
-- Just Go automation screen
-- Config + submenus
-- Hypercube visual anchor and shared neon UI language
-- Android companion install/download endpoint flow from SD APK path (`/CYDCompanion.apk`)
+```bat
+scripts\flash_cyd.cmd COM10
+scripts\flash_tdisplay_s3.cmd COM3
+scripts\monitor_cyd.cmd COM10
+scripts\monitor_tdisplay_s3.cmd COM3
+```
 
-## Hardware Target
+## Release Artifacts (Maintainers)
 
-- ESP32 CYD-class board (ESP32-2432S024 family)
-- 320x240 TFT landscape
-- XPT2046 touch controller
+Build release bins for all supported targets:
 
-## Repository Layout
+```bash
+python scripts/build_release_bins.py --version v0.1.0
+```
+
+Outputs are written to:
 
 ```text
-.
-|- src/                    # firmware source
-|- include/                # headers/config interfaces
-|- data/                   # runtime files (config/assets)
-|- docs/                   # design + architecture notes
-|- scripts/                # helper scripts
-|- app/                    # app tree placeholder/integration staging
-|- android-mini-game/      # optional in-app/game-related module
-|- platformio.ini          # build environments
-`- README.md
+dist/releases/<version>/
 ```
 
-## Build Firmware
+That folder contains per-target `app.bin`, `fullflash.bin`, `release_manifest.json`, and `release_sha256.txt`.
 
-```bash
-python -m platformio run -e cyd
-```
+Full release workflow is documented in [docs/RELEASES.md](docs/RELEASES.md).
 
-## Flash Firmware
+## M5Cardputer Advanced / Launcher Plan
 
-```bash
-python -m platformio run -e cyd -t upload --upload-port COM10
-```
+Planned launcher-compatible packaging approach is documented in:
 
-Replace `COM10` with your device port.
+- [docs/M5CARDPUTER_ADV_LAUNCHER_PLAN.md](docs/M5CARDPUTER_ADV_LAUNCHER_PLAN.md)
 
-## Serial / Runtime Notes
+## Docs Index
 
-Typical serial baud:
+- [docs/INSTALL.md](docs/INSTALL.md) - end-user install and flash commands
+- [docs/HARDWARE_TARGETS.md](docs/HARDWARE_TARGETS.md) - target matrix
+- [docs/RELEASES.md](docs/RELEASES.md) - maintainer release process
+- [docs/memory.md](docs/memory.md) - DRAM/memory notes
 
-```text
-115200
-```
-
-Debug monitor commands currently available in firmware:
-
-- `v` toggle verbose logging
-- `s` status snapshot
-
-## Android Companion Integration Workflow
-
-High-level expected path:
-
-1. Build/install companion APK on Android device
-2. Ensure CYD can expose/download APK path and sync endpoints
-3. Transfer/import captures/logs from CYD into Android app
-4. Continue analysis/export from mobile
-
-Firmware-side Android hooks are implemented around companion/APK flows and sync badge indicators in the UI.
-
-## UI Design Principles
-
-- no dead screen regions
-- no hidden controls under hypercube
-- bottom action rows aligned and touch-safe
-- consistent button hitbox/draw alignment
-- operator feedback first (status + live console clarity)
-
-## Recovery / Safety Utilities
-
-Quick rollback scripts included:
-
-- `quick_revert_ui.cmd`
-- `quick_revert_and_flash.cmd`
-
-Restore source baseline from:
-
-- `.revert/main.cpp.restorepoint`
-
-## Git / Release Workflow
-
-Minimal push cycle:
-
-```bash
-git add .
-git commit -m "your change note"
-git push
-```
-
-Repo name:
-
-- `hardcoreerik/NEONdrive-CYD`
-
-## Naming and Branding
-
-Project identity is now **NEONdrive**.
-Legacy PorkChop naming may still exist in older docs/history/modules and should be treated as migration debt unless explicitly required.
-
-## Legal and Responsible Use
+## Legal
 
 Use only on infrastructure you own or are explicitly authorized to test.
-You are responsible for lawful and ethical operation.
-
-## Contribution Expectations
-
-When changing UI:
-
-- include screen-specific reasoning
-- maintain touch/draw alignment
-- verify no overlap with hypercube and footer bars
-- preserve operator-critical data visibility
-
-When changing workflow:
-
-- avoid regressing Android companion interoperability
-- preserve file/capture integrity paths
-
----
-
-NEONdrive is built as an integrated embedded + mobile workflow, not a standalone firmware demo.
