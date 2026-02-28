@@ -1,4 +1,4 @@
-// YOINK Engine — WPA handshake capture engine ported from M5PORKCHOP OINK mode
+// YOINK Engine — WPA handshake capture engine ported from NEONDRIVE OINK mode
 // Targets CYD ESP32 (classic, not S3)
 #pragma once
 

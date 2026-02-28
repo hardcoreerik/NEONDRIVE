@@ -99,8 +99,8 @@ The firmware was already at DRAM limit before telemetry additions. The 8-byte ov
 
 #### 3. PCAP File Management (FUTURE)
 **Endpoints**: 
-- `GET /api/list?fs=sd&path=/m5porkchop/` - List captures
-- `GET /download?fs=sd&path=/m5porkchop/beacons.pcap` - Download file
+- `GET /api/list?fs=sd&path=/captures/` - List captures
+- `GET /download?fs=sd&path=/captures/beacons.pcap` - Download file
 
 **Status**: **NOT IMPLEMENTED** (removed to avoid DRAM overflow)  
 **Workaround**: User manually retrieves SD card or uses existing web interface

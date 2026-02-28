@@ -1,4 +1,4 @@
-﻿// Main firmware entry point and UI orchestration for the CYD target.
+// Main firmware entry point and UI orchestration for the CYD target.
 #include <Arduino.h>
 #include <SPI.h>
 #include <Wire.h>
@@ -8225,7 +8225,7 @@ static void sendDeauthFrame(const uint8_t* bssid, const uint8_t* station, uint8_
 // (duplicate implementation removed; nothing further required)
 
 // Y0INK mode: Full OINK state machine via YoinkEngine
-// Replaces the old simple periodic-deauth approach with the M5PORKCHOP
+// Replaces the old simple periodic-deauth approach with the NEONDRIVE
 // state machine: SCANNING → PMKID_HUNTING → LOCKING → ATTACKING → WAITING
 static void yoinkModeTick() {
   if (autoMode != AutoMode::Y0INK) return;

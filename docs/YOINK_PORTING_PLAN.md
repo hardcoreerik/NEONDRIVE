@@ -1,9 +1,9 @@
-# YOINK Mode Porting Plan: M5PORKCHOP OINK → CYD NEONDRIVE
+# YOINK Mode Porting Plan: NEONDRIVE OINK → CYD NEONDRIVE
 
 > **Date:** 2026-02-18  
-> **Author:** Expert analysis of M5PORKCHOP repository + CYD NEONDRIVE codebase  
+> **Author:** Expert analysis of NEONDRIVE repository + CYD NEONDRIVE codebase  
 > **Target Hardware:** ESP32-2432S028R (CYD) — classic ESP32, 4MB flash, 320kB SRAM  
-> **Source Hardware:** M5StickC Plus2 (ESP32-S3) — M5PORKCHOP platform
+> **Source Hardware:** M5StickC Plus2 (ESP32-S3) — NEONDRIVE platform
 
 ---
 
@@ -20,7 +20,7 @@
 
 ## 1. Repository Analysis & Core Logic Extraction
 
-### 1.1 Key Source Files in M5PORKCHOP
+### 1.1 Key Source Files in NEONDRIVE
 
 | File | Role |
 |------|------|
@@ -28,7 +28,7 @@
 | `core/network_recon.cpp` / `.h` | Background promiscuous scanning, beacon parsing, channel hopping, PMF detection, network vector management |
 | `core/wsl_bypasser.cpp` / `.h` | **Critical**: overrides `ieee80211_raw_frame_sanity_check()` via `-zmuldefs` linker flag to allow raw frame TX |
 | `core/wifi_utils.cpp` / `.h` | TLS reserve, NTP sync, promiscuous mode teardown helpers |
-| `core/sd_layout.cpp` / `.h` | Directory structure mapping (`/m5porkchop/handshakes/`, etc.), filename builders, layout migration |
+| `core/sd_layout.cpp` / `.h` | Directory structure mapping (`/neondrive/handshakes/`, etc.), filename builders, layout migration |
 | `core/sdlog.cpp` / `.h` | SD card append-logger |
 
 ### 1.2 Core OINK Workflow (State Machine)
@@ -87,7 +87,7 @@
 
 ### 1.3 Thread Safety Model
 
-M5PORKCHOP uses a **deferred event pattern** for callback→main-loop communication:
+NEONDRIVE uses a **deferred event pattern** for callback→main-loop communication:
 
 - The promiscuous callback runs in the WiFi task context (NOT an ISR, but NOT the main loop either)
 - Callback writes to lock-free circular buffers / atomic flags
@@ -101,7 +101,7 @@ M5PORKCHOP uses a **deferred event pattern** for callback→main-loop communicat
 
 ### 2.1 Architectural Comparison
 
-| Aspect | M5PORKCHOP (S3) | CYD NEONDRIVE (classic ESP32) |
+| Aspect | NEONDRIVE (S3) | CYD NEONDRIVE (classic ESP32) |
 |--------|-----------------|-------------------------------|
 | Framework | Arduino + ESP-IDF (via ESP32-S3) | Arduino (classic ESP32) |
 | WiFi init | `WiFi.mode(WIFI_STA)` + promiscuous | `WiFi.softAP("dummy")` + promiscuous |
@@ -122,7 +122,7 @@ partially because `esp_wifi_80211_tx(WIFI_IF_AP, ...)` sometimes succeeds. But:
 2. Your `tryAlternateTx()` workaround (toggling promiscuous on/off, trying AP interface) is
    unreliable because the sanity check runs regardless of interface or mode.
 
-3. M5PORKCHOP solves this definitively with the **WSL Bypasser**: a C function that overrides
+3. NEONDRIVE solves this definitively with the **WSL Bypasser**: a C function that overrides
    the library's `ieee80211_raw_frame_sanity_check()` to always return 0 (success). The
    `-zmuldefs` linker flag allows multiple definitions of the same symbol, with the user's
    definition taking precedence over `libnet80211.a`.
@@ -174,7 +174,7 @@ int ieee80211_raw_frame_sanity_check(int32_t arg, int32_t arg2, int32_t arg3) {
 
 ```cpp
 static void startYoinkWifi(uint8_t channel) {
-    // === CLEAN WiFi INIT (from M5PORKCHOP NetworkRecon::start()) ===
+    // === CLEAN WiFi INIT (from NEONDRIVE NetworkRecon::start()) ===
     
     // 1. Disable any existing promiscuous mode
     esp_wifi_set_promiscuous(false);
@@ -387,11 +387,11 @@ static void yoinkProcessDataFrame(const uint8_t* payload, uint16_t len, int8_t r
 
 ## 3. Data Persistence & File Format
 
-### 3.1 Directory Structure (M5PORKCHOP Layout)
+### 3.1 Directory Structure (NEONDRIVE Layout)
 
 ```
 SD Card Root
-└── m5porkchop/
+└── neondrive/
     ├── handshakes/              ← PCAP + .22000 files go here
     │   ├── MyNetwork_AABBCCDDEEFF.pcap
     │   ├── MyNetwork_AABBCCDDEEFF_hs.22000
@@ -423,10 +423,10 @@ For your CYD YOINK, I recommend using the **same directory structure** so captur
 interchangeable:
 
 ```cpp
-static const char* YOINK_HANDSHAKES_DIR = "/m5porkchop/handshakes";
+static const char* YOINK_HANDSHAKES_DIR = "/neondrive/handshakes";
 
 static void yoinkEnsureDirs() {
-    if (!SD.exists("/m5porkchop")) SD.mkdir("/m5porkchop");
+    if (!SD.exists("/neondrive")) SD.mkdir("/neondrive");
     if (!SD.exists(YOINK_HANDSHAKES_DIR)) SD.mkdir(YOINK_HANDSHAKES_DIR);
 }
 
@@ -451,7 +451,7 @@ static void yoinkBuildFilename(char* out, size_t outLen, const char* ssid,
 
 ### 3.2 PCAP File Format
 
-M5PORKCHOP uses **LINKTYPE_IEEE802_11_RADIOTAP** (link type 127). This embeds a minimal
+NEONDRIVE uses **LINKTYPE_IEEE802_11_RADIOTAP** (link type 127). This embeds a minimal
 8-byte radiotap header before each 802.11 frame, which is required by Wireshark and hashcat.
 
 ```cpp
@@ -991,7 +991,7 @@ Serial.printf("[YOINK] Heap: free=%u largest=%u nets=%d hs=%d\n",
 - [ ] M1+M2 pair captured for a test network
 - [ ] `.pcap` file opens in Wireshark without errors
 - [ ] `.22000` file accepted by `hashcat --show -m 22000 capture.22000`
-- [ ] SD card directory `/m5porkchop/handshakes/` created correctly
+- [ ] SD card directory `/neondrive/handshakes/` created correctly
 - [ ] Heap stays above 30KB after 5 minutes of operation
 - [ ] No WDT resets during SD writes (yield/delay between saves)
 
@@ -1028,6 +1028,6 @@ This is well within the CYD's capabilities. The key reductions vs. OINK:
 4. **Use `WIFI_IF_STA` for all `esp_wifi_80211_tx()` calls**
 5. **Remove `tryAlternateTx()` and all the toggle/retry logic** — it's no longer needed
 
-Everything else (EAPOL parsing, .22000 format, PCAP writing) in M5PORKCHOP's code is already
+Everything else (EAPOL parsing, .22000 format, PCAP writing) in NEONDRIVE's code is already
 correct and can be ported directly. The injection failure was purely the missing `-zmuldefs`
 flag preventing the ESP32 from transmitting management frames.

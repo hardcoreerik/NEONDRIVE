@@ -134,5 +134,5 @@ Possible additions:
 
 **Created:** February 23, 2026  
 **Device:** CYD (M5Stack Core Y with Pen)  
-**Firmware Version:** M5PORKCHOP-CYD_FULL_REPLACEMENT  
+**Firmware Version:** NEONDRIVE // CYD  
 **Status:** ✅ Active and tested

@@ -1,5 +1,5 @@
 // YOINK Engine — Full WPA handshake capture state machine
-// Ported from M5PORKCHOP OINK mode for CYD ESP32
+// Ported from NEONDRIVE OINK mode for CYD ESP32
 // Uses WSL Bypasser for reliable frame injection
 
 #include "yoink_engine.h"

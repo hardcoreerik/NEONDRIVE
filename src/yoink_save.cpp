@@ -1,5 +1,5 @@
 // YOINK Save — PCAP and Hashcat .22000 file writers
-// Ported from M5PORKCHOP OINK mode for CYD ESP32
+// Ported from NEONDRIVE OINK mode for CYD ESP32
 #include "yoink_save.h"
 #include <SD.h>
 

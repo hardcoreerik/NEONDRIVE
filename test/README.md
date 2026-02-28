@@ -27,7 +27,7 @@
 
 --[ 1 - What is this
 
-    You're looking at the unit test suite for PORKCHOP. Every serious
+    You're looking at the unit test suite for NEONDRIVE. Every serious
     project needs tests, even one with an ASCII pig mascot.
 
     Tests run on native platform (Linux) using Unity test framework via
@@ -112,7 +112,7 @@
         3. Generates coverage report with lcov
         4. Enforces 70% coverage threshold (drops below = fail)
         5. Uploads HTML coverage report as artifact
-        6. Builds M5Cardputer firmware (compile check)
+        6. Builds CYD + T-Display-S3 firmware (compile check)
 
     If tests fail, the merge is blocked. Fix your code.
 

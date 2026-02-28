@@ -1,4 +1,4 @@
-# CYDCompanion Bluetooth Protocol (CYD Porkchop Port)
+# CYDCompanion Bluetooth Protocol (CYD NEONDRIVE Port)
 
 This firmware exposes a Bluetooth Classic SPP endpoint:
 
@@ -17,7 +17,7 @@ This firmware exposes a Bluetooth Classic SPP endpoint:
 
 ## Session
 
-- On connect, device sends: `READY|CYD_PORKCHOP|BTCTRL|1`
+- On connect, device sends: `READY|CYD_NEONDRIVE|BTCTRL|1`
 - Basic probe:
   - `HELLO`
   - `PING`
