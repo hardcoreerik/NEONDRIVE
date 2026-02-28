@@ -3,7 +3,17 @@
 #include <SPI.h>
 #include <Wire.h>
 #include <TFT_eSPI.h>
-#if !defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#if defined(ARDUINO_LILYGO_T_DISPLAY_S3) || defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
+#define NEONDRIVE_TARGET_BUTTON_NAV 1
+#endif
+#if defined(ARDUINO_LILYGO_T_DISPLAY_S3) && !defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
+#define NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH 1
+#endif
+#if defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
+#define NEONDRIVE_TARGET_TEMBED 1
+#endif
+
+#if !defined(NEONDRIVE_TARGET_BUTTON_NAV)
 #include <XPT2046_Touchscreen.h>
 #endif
 #include <LittleFS.h>
@@ -41,7 +51,7 @@ using fs::File;
     intentionally disabled until explicit coexistence validation is completed on CYD.
 */
 
-#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#if defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
 static constexpr bool BOARD_HAS_TOUCH = false;
 static constexpr bool BOARD_HAS_SD = false;
 static constexpr bool TFT_USES_SPI_BUS = false;
@@ -64,12 +74,49 @@ static constexpr int PIN_SD_SCLK  = -1;
 static constexpr int PIN_SD_MISO  = -1;
 static constexpr int PIN_SD_MOSI  = -1;
 static constexpr int PIN_SD_CS    = -1;
+static constexpr int PIN_NAV_NEXT = BUTTON_1;
+static constexpr int PIN_NAV_SELECT = BUTTON_2;
+static constexpr int PIN_ENCODER_A = -1;
+static constexpr int PIN_ENCODER_B = -1;
 
 // T-Display-S3 has one TFT backlight pin.
 static constexpr int BL_PINS[] = {38};
 static constexpr uint8_t BL_PWM_CHANNELS[] = {4};
 
 // No discrete RGB status LED on T-Display-S3.
+static constexpr int LED_PINS[] = {-1, -1, -1};
+static constexpr uint8_t LED_PWM_CHANNELS[] = {0, 1, 2};
+#elif defined(NEONDRIVE_TARGET_TEMBED)
+static constexpr bool BOARD_HAS_TOUCH = false;
+static constexpr bool BOARD_HAS_SD = false;
+static constexpr bool TFT_USES_SPI_BUS = true;
+static constexpr int PIN_LCD_POWER_ON = -1;
+
+static constexpr int PIN_TFT_SCLK = 40;
+static constexpr int PIN_TFT_MISO = -1;
+static constexpr int PIN_TFT_MOSI = 42;
+static constexpr int PIN_TFT_CS   = 45;
+
+static constexpr int PIN_TOUCH_CS = -1;
+static constexpr int PIN_TOUCH_SDA = -1;
+static constexpr int PIN_TOUCH_SCL = -1;
+static constexpr int PIN_TOUCH_INT = -1;
+static constexpr int PIN_TOUCH_RST = -1;
+static constexpr uint8_t TOUCH_ADDR_CST_SELF = 0x00;
+static constexpr uint8_t TOUCH_ADDR_CST_MUTUAL = 0x00;
+static constexpr int PIN_SD_SCLK  = -1;
+static constexpr int PIN_SD_MISO  = -1;
+static constexpr int PIN_SD_MOSI  = -1;
+static constexpr int PIN_SD_CS    = -1;
+static constexpr int PIN_NAV_NEXT = 6;    // BOARD_USER_KEY
+static constexpr int PIN_NAV_SELECT = 0;  // ENCODER_KEY
+static constexpr int PIN_ENCODER_A = 1;
+static constexpr int PIN_ENCODER_B = 2;
+
+static constexpr int BL_PINS[] = {21};
+static constexpr uint8_t BL_PWM_CHANNELS[] = {4};
+
+// No discrete RGB status LED on T-Embed.
 static constexpr int LED_PINS[] = {-1, -1, -1};
 static constexpr uint8_t LED_PWM_CHANNELS[] = {0, 1, 2};
 #else
@@ -88,6 +135,10 @@ static constexpr int PIN_SD_SCLK  = 18;
 static constexpr int PIN_SD_MISO  = 19;
 static constexpr int PIN_SD_MOSI  = 23;
 static constexpr int PIN_SD_CS    = 5;
+static constexpr int PIN_NAV_NEXT = -1;
+static constexpr int PIN_NAV_SELECT = -1;
+static constexpr int PIN_ENCODER_A = -1;
+static constexpr int PIN_ENCODER_B = -1;
 
 // CYD TFT backlight (variant-safe pins)
 static constexpr int BL_PINS[] = {21, 27};
@@ -109,7 +160,7 @@ static constexpr int RAW_Y_MIN = 250;
 static constexpr int RAW_Y_MAX = 3850;
 
 TFT_eSPI tft;
-#if !defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#if !defined(NEONDRIVE_TARGET_BUTTON_NAV)
 XPT2046_Touchscreen ts(PIN_TOUCH_CS);
 #endif
 static uint32_t g_touchDebounceUntilMs = 0;
@@ -151,7 +202,7 @@ static void backlightBringup() {
     digitalWrite(pin, HIGH);
   }
 
-#if !defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#if !defined(NEONDRIVE_TARGET_BUTTON_NAV)
   // Quick blink test (2 blinks)
   for (int i = 0; i < 2; i++) {
     for (int pin : BL_PINS) {
@@ -213,7 +264,7 @@ static void applyStatusLedState(uint8_t brightness, uint8_t red, uint8_t green, 
   ledcWrite(LED_PWM_CHANNELS[2], 255 - b);
 }
 
-#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
 static void tdisplayNavBuild();
 static void tdisplayNavDrawHeaderStatus();
 static void tdisplayNavDrawSelectedOutline();
@@ -225,7 +276,7 @@ static void drawBorder() {
   const int w = tft.width();
   const int h = tft.height();
   tft.drawRect(0, 0, w, h, TFT_DARKGREY);
-#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
   tdisplayNavBuild();
   tdisplayNavDrawHeaderStatus();
   tdisplayNavDrawSelectedOutline();
@@ -247,9 +298,11 @@ static int g_lastTouchRawX = -1;
 static int g_lastTouchRawY = -1;
 static int g_lastTouchRawZ = 0;
 
-#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
 static bool tdisplayHandleButtonInput(int& outX, int& outY);
+#endif
 
+#if defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
 enum class TDisplayTouchController : uint8_t {
   NONE = 0,
   CST_SELF = 1,
@@ -401,7 +454,7 @@ static TouchState readTouch() {
   TouchState s{};
   s.down = false;
 
-#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#if defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
   int rx = -1;
   int ry = -1;
   int rz = 0;
@@ -423,6 +476,9 @@ static TouchState readTouch() {
   g_lastTouchRawX = s.rx;
   g_lastTouchRawY = s.ry;
   g_lastTouchRawZ = s.z;
+  return s;
+#elif defined(NEONDRIVE_TARGET_TEMBED)
+  // T-Embed uses encoder/buttons only; no touch controller.
   return s;
 #else
   // NOTE: On some CYD/XPT2046 boards, ts.touched() can get "stuck true" after redraws.
@@ -461,7 +517,7 @@ static bool touchEdgeTriggered(int &outX, int &outY) {
   static bool wasDown = false;
   if (millis() < g_touchDebounceUntilMs) return false;
 
-#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
   TouchState s = readTouch();
 
   if (s.down && !wasDown) {
@@ -754,7 +810,7 @@ static const char* spoofModeNames[] = { "STANDARD", "MAC_POOL", "VENDOR_OUI", "H
 static SpoofMode justGoSpoofMode = SpoofMode::STANDARD;  // Can be switched per run
 
 // LED victory flash system (for handshakes/wins)
-#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
 #define LED_PIN -1
 #else
 #define LED_PIN 21
@@ -2321,14 +2377,14 @@ static void handleSerialDebugCommands() {
 }
 
 struct Button { int x, y, w, h; const char* label; };
-#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
 static constexpr int HYPERCUBE_UI_SCALE = 2;
 #else
 static constexpr int HYPERCUBE_UI_SCALE = 4;
 #endif
 static constexpr int HYPERCUBE_BASE_SIZE_PX = 24;
 static constexpr int HYPERCUBE_TARGET_SIZE_PX = HYPERCUBE_BASE_SIZE_PX * HYPERCUBE_UI_SCALE;
-#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
 static constexpr int UI_TOP_BUTTON_SHIFT_Y = 0;
 static constexpr int UI_TOP_BUTTON_SHIFT_THRESHOLD_Y = 0;
 #else
@@ -2351,7 +2407,7 @@ static bool hit(const Button& b, int px, int py) {
 static constexpr int HOME_BTN_COLS = 3;
 static constexpr int HOME_BTN_ROWS = 3;
 static constexpr int HOME_BTN_COUNT = 8;
-#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
 static constexpr uint8_t UI_BUTTON_TEXT_SIZE = 1;
 #else
 static constexpr uint8_t UI_BUTTON_TEXT_SIZE = 2;
@@ -2480,7 +2536,7 @@ static inline void uiMemLog(const char*) {}
 static inline void uiMemBudgetBoot() {}
 #endif
 
-#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
 static constexpr int UI_SAFE_MARGIN = 4;
 static constexpr int UI_TOP_GAP = 4;
 static constexpr int UI_BOTTOM_BAR_H = 30;
@@ -2996,7 +3052,10 @@ static uint32_t scopeLastDrawMs = 0;
 static bool scopeLayoutDrawn = false;
 static uint32_t scopeMetaDrawnSig = 0;
 static uint32_t scopeApDrawnSig[5] = {0};
-static int16_t scopeChBarDrawn[14];
+static constexpr int SCOPE_CH_COUNT = 13;
+static constexpr int SCOPE_WATERFALL_MAX_ROWS = 72;
+static uint8_t scopeWaterfall[SCOPE_CH_COUNT][SCOPE_WATERFALL_MAX_ROWS];
+static uint8_t scopeWaterfallRows = 0;
 static uint16_t hypercubeFrame = 0;
 static uint32_t hypercubeLastTickMs = 0;
 
@@ -3048,7 +3107,7 @@ static uint8_t justGoLastPmkidCount = 0;
 static uint32_t justGoLastDeauthCount = 0;
 static uint32_t justGoLastConsoleUpdateMs = 0;
 
-#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
 static constexpr uint8_t TDISPLAY_NAV_MAX_ITEMS = 64;
 static Button tdisplayNavItems[TDISPLAY_NAV_MAX_ITEMS];
 static uint8_t tdisplayNavCount = 0;
@@ -3307,13 +3366,40 @@ static bool tdisplayNavConsumeRefreshRequest() {
 static bool tdisplayHandleButtonInput(int& outX, int& outY) {
   static bool wasNextDown = false;
   static bool wasSelectDown = false;
+  static int lastEncA = HIGH;
 
-  const bool nextDown = (digitalRead(BUTTON_1) == LOW);
-  const bool selectDown = (digitalRead(BUTTON_2) == LOW);
+  const bool nextDown = (PIN_NAV_NEXT >= 0) && (digitalRead(PIN_NAV_NEXT) == LOW);
+  const bool selectDown = (PIN_NAV_SELECT >= 0) && (digitalRead(PIN_NAV_SELECT) == LOW);
 
   tdisplayNavBuild();
 
-  if (nextDown && !wasNextDown) {
+  bool rotateNext = false;
+  bool rotatePrev = false;
+#if defined(NEONDRIVE_TARGET_TEMBED)
+  if (PIN_ENCODER_A >= 0 && PIN_ENCODER_B >= 0) {
+    const int a = digitalRead(PIN_ENCODER_A);
+    const int b = digitalRead(PIN_ENCODER_B);
+    if (a != lastEncA) {
+      // Quadrature decode on A edge: CW => next, CCW => previous.
+      if (b != a) {
+        rotateNext = true;
+      } else {
+        rotatePrev = true;
+      }
+      lastEncA = a;
+    }
+  }
+#endif
+
+  if (rotatePrev) {
+    if (tdisplayNavCount > 0) {
+      tdisplayNavIndex = (tdisplayNavIndex == 0) ? (tdisplayNavCount - 1) : (tdisplayNavIndex - 1);
+      tdisplayNavRefreshRequested = true;
+    }
+    return false;
+  }
+
+  if (rotateNext || (nextDown && !wasNextDown)) {
     wasNextDown = true;
     if (tdisplayNavCount > 0) {
       tdisplayNavIndex = (uint8_t)((tdisplayNavIndex + 1) % tdisplayNavCount);
@@ -3561,8 +3647,10 @@ static void drawCyberBackdrop() {
 
 static void drawHome() {
   tft.fillScreen(TFT_BLACK);
-  #if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+  #if defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
   drawHeader("NEONDRIVE // T-DISPLAY-S3");
+  #elif defined(NEONDRIVE_TARGET_TEMBED)
+  drawHeader("NEONDRIVE // T-EMBED-CC1101");
   #else
   drawHeader("NEONDRIVE // CYD");
   #endif
@@ -4817,6 +4905,43 @@ static void drawJustGo() {
   drawBorder();
 }
 
+static uint16_t scopeWaterfallColor(uint8_t level) {
+  if (level >= 90) return TFT_RED;
+  if (level >= 75) return TFT_ORANGE;
+  if (level >= 60) return TFT_YELLOW;
+  if (level >= 45) return TFT_GREEN;
+  if (level >= 25) return TFT_CYAN;
+  if (level > 0) return TFT_NAVY;
+  return TFT_BLACK;
+}
+
+static void scopeResetWaterfall() {
+  memset(scopeWaterfall, 0, sizeof(scopeWaterfall));
+  scopeWaterfallRows = 0;
+}
+
+static void scopePushWaterfallFrame() {
+  int chIntensity[SCOPE_CH_COUNT] = {0};
+  int maxIntensity = 1;
+  for (int i = 0; i < apCount; i++) {
+    int ch = aps[i].channel;
+    if (ch < 1 || ch > SCOPE_CH_COUNT) continue;
+    int weight = clampi(aps[i].rssi, -100, -30) + 100;  // stronger AP contributes more
+    chIntensity[ch - 1] += weight;
+    if (chIntensity[ch - 1] > maxIntensity) maxIntensity = chIntensity[ch - 1];
+  }
+
+  for (int ch = 0; ch < SCOPE_CH_COUNT; ch++) {
+    for (int row = SCOPE_WATERFALL_MAX_ROWS - 1; row > 0; row--) {
+      scopeWaterfall[ch][row] = scopeWaterfall[ch][row - 1];
+    }
+    scopeWaterfall[ch][0] = (uint8_t)((chIntensity[ch] * 100) / maxIntensity);
+  }
+  if (scopeWaterfallRows < SCOPE_WATERFALL_MAX_ROWS) {
+    scopeWaterfallRows++;
+  }
+}
+
 static void drawScopeGraph() {
   const int w = tft.width();
   const int h = tft.height();
@@ -4837,7 +4962,6 @@ static void drawScopeGraph() {
     for (int i = 0; i < 5; i++) {
       scopeApDrawnSig[i] = 0;
     }
-    for (int ch = 0; ch < 14; ch++) scopeChBarDrawn[ch] = -1;
 
     tft.fillScreen(TFT_BLACK);
     drawHeader("SCOPE");
@@ -4848,7 +4972,7 @@ static void drawScopeGraph() {
     tft.setTextDatum(TL_DATUM);
     tft.setTextSize(1);
     tft.setTextColor(TFT_CYAN, TFT_BLACK);
-    tft.drawString("WiFi AP Strength + Channel Intensity", content.x + 2, content.y + 18);
+    tft.drawString("WiFi AP Strength + Channel Waterfall", content.x + 2, content.y + 18);
 
     tft.drawRect(leftX, panelY, leftW, panelH, TFT_DARKGREY);
     tft.drawRect(rightX, panelY, rightW, panelH, TFT_DARKGREY);
@@ -4864,21 +4988,10 @@ static void drawScopeGraph() {
       tft.drawRect(barX, barY, leftW - 72, barH, TFT_DARKGREY);
     }
 
-    const int chartBaseY = panelY + panelH - 14;
-    const int chartTopY = panelY + 20;
-    const int chartH = chartBaseY - chartTopY;
-    const int barW = 8;
-    const int barGap = 2;
-    for (int ch = 1; ch <= 13; ch++) {
-      int x = rightX + 4 + ((ch - 1) * (barW + barGap));
-      tft.drawRect(x, chartTopY, barW, chartH, TFT_DARKGREY);
-      if (ch == 1 || ch == 6 || ch == 11 || ch == 13) {
-        char cbuf[4];
-        snprintf(cbuf, sizeof(cbuf), "%d", ch);
-        tft.setTextColor(TFT_CYAN, TFT_BLACK);
-        tft.drawString(cbuf, x - 1, chartBaseY + 2);
-      }
-    }
+    const int wfTopY = panelY + 20;
+    const int wfBottomY = panelY + panelH - 14;
+    const int wfH = wfBottomY - wfTopY;
+    tft.drawRect(rightX + 2, wfTopY, rightW - 4, wfH, TFT_DARKGREY);
     drawBorder();
     scopeLayoutDrawn = true;
   } else {
@@ -4906,7 +5019,7 @@ static void drawScopeGraph() {
 
   tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
   tft.drawString("Top AP RSSI", leftX + 6, panelY + 4);
-  tft.drawString("Ch Intensity", rightX + 6, panelY + 4);
+  tft.drawString("Ch Waterfall", rightX + 6, panelY + 4);
 
   // LEFT: strongest AP bars
   const int apRows = 5;
@@ -4955,31 +5068,32 @@ static void drawScopeGraph() {
     scopeApDrawnSig[i] = rowSig;
   }
 
-  // RIGHT: channel intensity histogram (ch 1..13)
-  int chIntensity[14] = {0};
-  int maxIntensity = 1;
-  for (int i = 0; i < apCount; i++) {
-    int ch = aps[i].channel;
-    if (ch < 1 || ch > 13) continue;
-    int weight = clampi(aps[i].rssi, -100, -30) + 100; // stronger AP contributes more
-    chIntensity[ch] += weight;
-    if (chIntensity[ch] > maxIntensity) maxIntensity = chIntensity[ch];
-  }
+  // RIGHT: channel waterfall heatmap (ch 1..13)
+  const int wfTopY = panelY + 20;
+  const int wfBottomY = panelY + panelH - 14;
+  const int wfH = wfBottomY - wfTopY;
+  const int wfInnerX = rightX + 4;
+  const int wfInnerW = rightW - 8;
+  const int colGap = 1;
+  int colW = (wfInnerW - (SCOPE_CH_COUNT - 1) * colGap) / SCOPE_CH_COUNT;
+  if (colW < 1) colW = 1;
+  const int totalW = (colW * SCOPE_CH_COUNT) + ((SCOPE_CH_COUNT - 1) * colGap);
+  const int xStart = rightX + ((rightW - totalW) / 2);
 
-  const int chartBaseY = panelY + panelH - 14;
-  const int chartTopY = panelY + 20;
-  const int chartH = chartBaseY - chartTopY;
-  const int barW = 8;
-  const int barGap = 2;
-
-  for (int ch = 1; ch <= 13; ch++) {
-    int x = rightX + 4 + ((ch - 1) * (barW + barGap));
-    int bh = (chIntensity[ch] * chartH) / maxIntensity;
-    int y = chartBaseY - bh;
-    if (bh != scopeChBarDrawn[ch]) {
-      tft.fillRect(x + 1, chartTopY + 1, barW - 2, chartH - 2, TFT_BLACK);
-      if (bh > 0) tft.fillRect(x + 1, y, barW - 2, bh, TFT_GREEN);
-      scopeChBarDrawn[ch] = bh;
+  for (int ch = 0; ch < SCOPE_CH_COUNT; ch++) {
+    const int x = xStart + (ch * (colW + colGap));
+    for (int py = 0; py < wfH; py++) {
+      uint8_t level = 0;
+      if (py < scopeWaterfallRows) {
+        level = scopeWaterfall[ch][py];
+      }
+      tft.fillRect(x, wfTopY + py, colW, 1, scopeWaterfallColor(level));
+    }
+    if ((ch + 1) == 1 || (ch + 1) == 6 || (ch + 1) == 11 || (ch + 1) == 13) {
+      char cbuf[4];
+      snprintf(cbuf, sizeof(cbuf), "%d", ch + 1);
+      tft.setTextColor(TFT_CYAN, TFT_BLACK);
+      tft.drawString(cbuf, x, wfBottomY + 2);
     }
   }
 }
@@ -4992,6 +5106,7 @@ static void scopeTick() {
   if (now - scopeLastScanMs < 4000) return;
 
   doWifiScanBlocking();
+  scopePushWaterfallFrame();
   scopeLastScanMs = millis();
   drawScopeGraph();
 }
@@ -5101,9 +5216,10 @@ static void engageAutoMode(AutoMode mode) {
   } else if (mode == AutoMode::RAW) {
     Serial.println("[auto] RAW engaged (logging snapshots)");
   } else if (mode == AutoMode::SCOPE) {
+    scopeResetWaterfall();
     scopeLastScanMs = 0;
     scopeLastDrawMs = 0;
-    Serial.println("[auto] SCOPE engaged (AP strength graph)");
+    Serial.println("[auto] SCOPE engaged (AP waterfall graph)");
   } else if (mode == AutoMode::JAMMIT) {
     jammitLastTickMs = 0;
     jammitLastPkts = 0;
@@ -9326,17 +9442,22 @@ static void drawAbout() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(compact ? 1 : 2);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  #if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+  #if defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
   tft.drawString("NEONdrive T-Display-S3", content.x + 2, content.y + 8);
+  #elif defined(NEONDRIVE_TARGET_TEMBED)
+  tft.drawString("NEONdrive T-Embed-CC1101", content.x + 2, content.y + 8);
   #else
   tft.drawString("NEONdrive CYD", content.x + 2, content.y + 8);
   #endif
 
   tft.setTextSize(1);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  #if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+  #if defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
   tft.drawString("ESP32-S3 | 320x170 landscape UI", content.x + 2, content.y + (compact ? 24 : 40));
   tft.drawString("Touch:auto-detect + BTN1/BTN2 nav", content.x + 2, content.y + (compact ? 36 : 56));
+  #elif defined(NEONDRIVE_TARGET_TEMBED)
+  tft.drawString("ESP32-S3 | 320x170 landscape UI", content.x + 2, content.y + (compact ? 24 : 40));
+  tft.drawString("Encoder wheel + keys navigation", content.x + 2, content.y + (compact ? 36 : 56));
   #else
   tft.drawString("Landscape USB-right | Touch PRESET #5 baked", content.x + 2, content.y + (compact ? 24 : 40));
   tft.drawString("Config: LittleFS /config.json", content.x + 2, content.y + (compact ? 36 : 56));
@@ -9389,7 +9510,11 @@ static void setScreen(ScreenId next) {
       break;
     case ScreenId::BRUCE_MENU:        drawBruceMenu(); break;
     case ScreenId::BRUCE_SET_TARGET:  bruceTargetScroll = 0; drawBruceSetTarget(); break;
-    case ScreenId::SCOPE_GRAPH:       scopeLayoutDrawn = false; drawScopeGraph(); break;
+    case ScreenId::SCOPE_GRAPH:
+      scopeLayoutDrawn = false;
+      scopeResetWaterfall();
+      drawScopeGraph();
+      break;
     case ScreenId::LED_CONTROL:       drawLedControl(); break;
     case ScreenId::BRUCE_MONITOR: {
       monitorLineCount = 0;
@@ -9420,7 +9545,7 @@ static void setScreen(ScreenId next) {
 #endif
 }
 
-#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
 static void tdisplayRedrawCurrentScreen() {
   switch (screen) {
     case ScreenId::HOME:                drawHome(); break;
@@ -9455,15 +9580,19 @@ void setup() {
   Serial.begin(115200);
   delay(100);
   Serial.println();
-  #if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+  #if defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
   Serial.println("=== NEONDRIVE // T-Display-S3 | Milestone D ===");
+  #elif defined(NEONDRIVE_TARGET_TEMBED)
+  Serial.println("=== NEONDRIVE // T-EMBED-CC1101 | Milestone D ===");
   #else
   Serial.println("=== NEONDRIVE // CYD | Milestone D ===");
   #endif
 
-#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
-  pinMode(BUTTON_1, INPUT_PULLUP);
-  pinMode(BUTTON_2, INPUT_PULLUP);
+#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
+  if (PIN_NAV_NEXT >= 0) pinMode(PIN_NAV_NEXT, INPUT_PULLUP);
+  if (PIN_NAV_SELECT >= 0) pinMode(PIN_NAV_SELECT, INPUT_PULLUP);
+  if (PIN_ENCODER_A >= 0) pinMode(PIN_ENCODER_A, INPUT_PULLUP);
+  if (PIN_ENCODER_B >= 0) pinMode(PIN_ENCODER_B, INPUT_PULLUP);
 #endif
 
   backlightBringup();
@@ -9490,12 +9619,14 @@ void setup() {
   Serial.print(" tft.height()="); Serial.println(tft.height());
 
   // Touch init (CYD only)
-#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#if defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
   if (!tdisplayTouchInit()) {
     Serial.println("[touch] no supported touch controller detected; BUTTON_1/BUTTON_2 only");
   } else {
     Serial.println("[touch] touch enabled + BUTTON_1/BUTTON_2 fallback enabled");
   }
+#elif defined(NEONDRIVE_TARGET_TEMBED)
+  Serial.println("[input] encoder + button navigation enabled (no touch)");
 #else
   ts.begin();
   ts.setRotation(0);
@@ -9589,7 +9720,7 @@ void loop() {
     webServer.handleClient();
   }
 
-#if defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
   if (tdisplayNavConsumeRefreshRequest()) {
     tdisplayRedrawCurrentScreen();
   }
@@ -10257,6 +10388,7 @@ void loop() {
     }
     if (hit(btnScopeRefresh, tx, ty)) {
       doWifiScanBlocking();
+      scopePushWaterfallFrame();
       scopeLastScanMs = millis();
       drawScopeGraph();
       waitTouchRelease();
