@@ -176,3 +176,17 @@ int pollWifiScanAsync() {
   collectScanResults(n);
   return 1;
 }
+
+bool wifiStaHasValidIp() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  IPAddress ip = WiFi.localIP();
+  return !(ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] == 0);
+}
+
+bool wifiGetStaNetwork(IPAddress& localIp, IPAddress& subnetMask, IPAddress& gateway) {
+  if (!wifiStaHasValidIp()) return false;
+  localIp = WiFi.localIP();
+  subnetMask = WiFi.subnetMask();
+  gateway = WiFi.gatewayIP();
+  return true;
+}

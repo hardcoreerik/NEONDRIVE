@@ -68,10 +68,17 @@ public:
   static void stop();
   static void update();
   static void reset();
+  static void setEnabled(bool enabled);
+  static bool isEnabled();
+  static void ingestPromiscuousPacket(const wifi_promiscuous_pkt_t* pkt,
+                                      wifi_promiscuous_pkt_type_t type);
+  static uint16_t getPps();
+  static int8_t getLastRssi();
   
   // State queries
   static bool isActive() { return active; }
   static uint8_t getCurrentChannel() { return currentChannel; }
+  static uint8_t getChannelFilter() { return channelFilter; }  // 0 = hopping (all), 1..13 = locked
   static const DeauthStats& getStats() { static DeauthStats empty = {}; return stats ? *stats : empty; }
   static uint32_t getTotalEvents() { return stats ? (stats->total_deauths + stats->total_disassocs) : 0; }
   
@@ -86,10 +93,15 @@ public:
 
 private:
   static bool active;
+  static bool enabled;
   static uint8_t currentChannel;
   static uint8_t channelIndex;
   static uint32_t lastChannelHop;
   static uint8_t channelFilter;
+  static uint32_t ppsWindowCount;
+  static uint16_t currentPps;
+  static uint32_t lastPpsCommitMs;
+  static int8_t lastRssi;
   
   // Data storage
   static DeauthEvent* logBuffer;  // Heap-allocated ring buffer
@@ -99,7 +111,6 @@ private:
   static std::vector<AttackerInfo>* topAttackers;  // Heap-allocated to save DRAM
   
   // Frame processing
-  static void promiscuousCallback(void* buf, wifi_promiscuous_pkt_type_t type);
   static void processDeauthFrame(const uint8_t* frame, uint16_t len, int8_t rssi, uint8_t channel, bool is_disassoc);
   static void addLogEntry(const DeauthEvent& event);
   static void updateAttackerTracking(const uint8_t* mac, int8_t rssi);

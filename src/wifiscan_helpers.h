@@ -3,6 +3,7 @@
 // Small glue header to expose AP globals and scanning helpers without
 // colliding with the existing WiFiScan.h (case-insensitive filesystems).
 #include "ap_record.h"
+#include <IPAddress.h>
 
 extern ApRecord aps[MAX_APS];
 extern int apCount;
@@ -16,3 +17,6 @@ void dedupeKeepStrongest();
 void doWifiScanBlocking();
 bool startWifiScanAsync();
 int pollWifiScanAsync();
+
+bool wifiStaHasValidIp();
+bool wifiGetStaNetwork(IPAddress& localIp, IPAddress& subnetMask, IPAddress& gateway);

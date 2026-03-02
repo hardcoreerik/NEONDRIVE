@@ -10,8 +10,16 @@ Each release must include:
 
 - `neondrive_<version>_cyd_2_4_app.bin`
 - `neondrive_<version>_cyd_2_4_fullflash.bin`
+- `neondrive_<version>_cyd_3_5_app.bin`
+- `neondrive_<version>_cyd_3_5_fullflash.bin`
 - `neondrive_<version>_t_display_s3_app.bin`
 - `neondrive_<version>_t_display_s3_fullflash.bin`
+- `neondrive_<version>_t_embed_cc1101_app.bin`
+- `neondrive_<version>_t_embed_cc1101_fullflash.bin`
+- `Device-Bins/NEONDRIVE_CYD-2.4_<version>.bin`
+- `Device-Bins/NEONDRIVE_CYD-3.5_<version>.bin`
+- `Device-Bins/NEONDRIVE_T-DisplayS3_<version>.bin`
+- `Device-Bins/NEONDRIVE_T-Embed-CC1101_<version>.bin`
 - `release_manifest.json`
 - `release_sha256.txt`
 
@@ -21,13 +29,15 @@ From repository root:
 
 ```bash
 python scripts/build_release_bins.py --version v0.1.0
+python scripts/build_device_bins.py --version v0.1.0
 ```
 
 Optional:
 
 ```bash
-python scripts/build_release_bins.py --targets t_display_s3 --version v0.1.0-rc1
+python scripts/build_release_bins.py --targets cyd_3_5 --version v0.1.0-rc1
 python scripts/build_release_bins.py --no-clean --version v0.1.0
+python scripts/build_device_bins.py --no-clean --version v0.1.0
 ```
 
 Output directory:
@@ -66,4 +76,6 @@ git push origin v0.1.0
 | Target | Bootloader | Partitions | boot_app0 | App |
 | --- | --- | --- | --- | --- |
 | `cyd_2_4` | `0x1000` | `0x8000` | `0xE000` | `0x10000` |
+| `cyd_3_5` | `0x1000` | `0x8000` | `0xE000` | `0x10000` |
 | `t_display_s3` | `0x0000` | `0x8000` | `0xE000` | `0x10000` |
+| `t_embed_cc1101` | `0x0000` | `0x8000` | `0xE000` | `0x10000` |

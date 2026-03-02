@@ -1,0 +1,24 @@
+#pragma once
+
+// NEONDRIVE // CYD-3.5 profile (ESP32, 4MB flash)
+#define ND_PROFILE_CODE "cyd_3_5"
+#define ND_PROFILE_NAME "NEONDRIVE // CYD-3.5"
+#define ND_HOME_HEADER  "NEONDRIVE // CYD 3.5"
+
+#define ND_DISPLAY_W 480
+#define ND_DISPLAY_H 320
+
+#define ND_HW_TOUCH 1
+#define ND_HW_BUTTON_NAV 0
+#define ND_HW_ENCODER 0
+#define ND_HW_KEYBOARD 0
+#define ND_HW_CC1101 0
+#define ND_HW_SD 1
+
+#define ND_FLASH_MB 4
+#define ND_EXPECT_PSRAM 0
+
+#define ND_FEATURE_WEB_UI 1
+#define ND_FEATURE_SCOPE_WATERFALL 1
+#define ND_FEATURE_SD_CAPTURE 1
+#define ND_FEATURE_SUBGHZ_TOOLKIT 0

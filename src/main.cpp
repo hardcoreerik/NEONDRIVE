@@ -1,16 +1,25 @@
-// Main firmware entry point and UI orchestration for the CYD target.
+// Main firmware entry point and UI orchestration for NEONDRIVE device targets.
 #include <Arduino.h>
 #include <SPI.h>
 #include <Wire.h>
 #include <TFT_eSPI.h>
-#if defined(ARDUINO_LILYGO_T_DISPLAY_S3) || defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
+
+#if defined(NEONDRIVE_TARGET_TDISPLAY_S3) || defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
 #define NEONDRIVE_TARGET_BUTTON_NAV 1
 #endif
-#if defined(ARDUINO_LILYGO_T_DISPLAY_S3) && !defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
+#if defined(NEONDRIVE_TARGET_TDISPLAY_S3) && !defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
 #define NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH 1
 #endif
 #if defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
 #define NEONDRIVE_TARGET_TEMBED 1
+#endif
+#if !defined(NEONDRIVE_TARGET_TDISPLAY_S3) && !defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
+#define NEONDRIVE_TARGET_CYD 1
+#endif
+
+#include "device_profile_select.h"
+#if defined(NEONDRIVE_TARGET_CYD)
+#include "board_variant.h"
 #endif
 
 #if !defined(NEONDRIVE_TARGET_BUTTON_NAV)
@@ -31,6 +40,7 @@ using fs::File;
 #include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
+#include <time.h>
 #include <freertos/semphr.h>
 #include "deauth_hunter.h"
 #include "bruce_wifi.h"
@@ -55,6 +65,8 @@ using fs::File;
 static constexpr bool BOARD_HAS_TOUCH = false;
 static constexpr bool BOARD_HAS_SD = false;
 static constexpr bool TFT_USES_SPI_BUS = false;
+static constexpr int BOARD_TFT_ROTATION = 1;
+static constexpr bool BOARD_TFT_INVERT = true;
 static constexpr int PIN_LCD_POWER_ON = 15;
 
 // TFT is 8-bit parallel on this board, so SPI TFT pins are unused.
@@ -78,6 +90,7 @@ static constexpr int PIN_NAV_NEXT = BUTTON_1;
 static constexpr int PIN_NAV_SELECT = BUTTON_2;
 static constexpr int PIN_ENCODER_A = -1;
 static constexpr int PIN_ENCODER_B = -1;
+static constexpr int PIN_SW1 = -1;
 
 // T-Display-S3 has one TFT backlight pin.
 static constexpr int BL_PINS[] = {38};
@@ -90,6 +103,8 @@ static constexpr uint8_t LED_PWM_CHANNELS[] = {0, 1, 2};
 static constexpr bool BOARD_HAS_TOUCH = false;
 static constexpr bool BOARD_HAS_SD = false;
 static constexpr bool TFT_USES_SPI_BUS = true;
+static constexpr int BOARD_TFT_ROTATION = 1;
+static constexpr bool BOARD_TFT_INVERT = true;
 static constexpr int PIN_LCD_POWER_ON = -1;
 
 static constexpr int PIN_TFT_SCLK = 40;
@@ -112,6 +127,7 @@ static constexpr int PIN_NAV_NEXT = 6;    // BOARD_USER_KEY
 static constexpr int PIN_NAV_SELECT = 0;  // ENCODER_KEY
 static constexpr int PIN_ENCODER_A = 1;
 static constexpr int PIN_ENCODER_B = 2;
+static constexpr int PIN_SW1 = -1;
 
 static constexpr int BL_PINS[] = {21};
 static constexpr uint8_t BL_PWM_CHANNELS[] = {4};
@@ -123,47 +139,129 @@ static constexpr uint8_t LED_PWM_CHANNELS[] = {0, 1, 2};
 static constexpr bool BOARD_HAS_TOUCH = true;
 static constexpr bool BOARD_HAS_SD = true;
 static constexpr bool TFT_USES_SPI_BUS = true;
+static constexpr int BOARD_TFT_ROTATION = CYD_TFT_ROTATION;
+static constexpr bool BOARD_TFT_INVERT = CYD_TFT_INVERT;
 static constexpr int PIN_LCD_POWER_ON = -1;
 
-static constexpr int PIN_TFT_SCLK = 14;
-static constexpr int PIN_TFT_MISO = 12;
-static constexpr int PIN_TFT_MOSI = 13;
-static constexpr int PIN_TFT_CS   = 15;
+static constexpr int PIN_TFT_SCLK = CYD_PIN_TFT_SCLK;
+static constexpr int PIN_TFT_MISO = CYD_PIN_TFT_MISO;
+static constexpr int PIN_TFT_MOSI = CYD_PIN_TFT_MOSI;
+static constexpr int PIN_TFT_CS   = CYD_PIN_TFT_CS;
 
-static constexpr int PIN_TOUCH_CS = TOUCH_CS; // from build_flags (-DTOUCH_CS=33)
-static constexpr int PIN_SD_SCLK  = 18;
-static constexpr int PIN_SD_MISO  = 19;
-static constexpr int PIN_SD_MOSI  = 23;
-static constexpr int PIN_SD_CS    = 5;
+static constexpr int PIN_TOUCH_CS = CYD_PIN_TOUCH_CS;
+static constexpr int PIN_SD_SCLK  = CYD_PIN_SD_SCLK;
+static constexpr int PIN_SD_MISO  = CYD_PIN_SD_MISO;
+static constexpr int PIN_SD_MOSI  = CYD_PIN_SD_MOSI;
+static constexpr int PIN_SD_CS    = CYD_PIN_SD_CS;
 static constexpr int PIN_NAV_NEXT = -1;
 static constexpr int PIN_NAV_SELECT = -1;
 static constexpr int PIN_ENCODER_A = -1;
 static constexpr int PIN_ENCODER_B = -1;
+static constexpr int PIN_SW1 = CYD_PIN_SW1;
 
-// CYD TFT backlight (variant-safe pins)
-static constexpr int BL_PINS[] = {21, 27};
-static constexpr uint8_t BL_PWM_CHANNELS[] = {4, 5};
+static constexpr int BL_PINS[] = {CYD_BL_PINS[0], CYD_BL_PINS[1]};
+static constexpr uint8_t BL_PWM_CHANNELS[] = {CYD_BL_PWM_CHANNELS[0], CYD_BL_PWM_CHANNELS[1]};
 
-// CYD onboard RGB LED (active-low)
-static constexpr int LED_PINS[] = {4, 16, 17};  // R, G, B
-static constexpr uint8_t LED_PWM_CHANNELS[] = {0, 1, 2};
+static constexpr int LED_PINS[] = {CYD_LED_PINS[0], CYD_LED_PINS[1], CYD_LED_PINS[2]};  // R, G, B
+static constexpr uint8_t LED_PWM_CHANNELS[] = {CYD_LED_PWM_CHANNELS[0], CYD_LED_PWM_CHANNELS[1], CYD_LED_PWM_CHANNELS[2]};
 #endif
 static bool backlightPwmReady = false;
 static uint8_t backlightLevel = 255;  // Always full LCD backlight on boot
 
 static bool statusLedPwmReady = false;
 
-// Touch raw ranges (no calibration defaults)
+// Touch raw ranges are variant-defined for CYD targets.
+#if defined(NEONDRIVE_TARGET_CYD)
+static constexpr int RAW_X_MIN = CYD_TOUCH_RAW_X_MIN;
+static constexpr int RAW_X_MAX = CYD_TOUCH_RAW_X_MAX;
+static constexpr int RAW_Y_MIN = CYD_TOUCH_RAW_Y_MIN;
+static constexpr int RAW_Y_MAX = CYD_TOUCH_RAW_Y_MAX;
+#else
 static constexpr int RAW_X_MIN = 250;
 static constexpr int RAW_X_MAX = 3850;
 static constexpr int RAW_Y_MIN = 250;
 static constexpr int RAW_Y_MAX = 3850;
+#endif
+static int g_touchRawXMin = RAW_X_MIN;
+static int g_touchRawXMax = RAW_X_MAX;
+static int g_touchRawYMin = RAW_Y_MIN;
+static int g_touchRawYMax = RAW_Y_MAX;
+#if defined(NEONDRIVE_TARGET_CYD)
+static bool g_touchSwapXY = CYD_TOUCH_SWAP_XY;
+static bool g_touchInvertX = CYD_TOUCH_INVERT_X;
+static bool g_touchInvertY = CYD_TOUCH_INVERT_Y;
+static int g_touchZMin = CYD_TOUCH_Z_MIN;
+#else
+static bool g_touchSwapXY = false;
+static bool g_touchInvertX = true;
+static bool g_touchInvertY = false;
+static int g_touchZMin = 80;
+#endif
 
 TFT_eSPI tft;
 #if !defined(NEONDRIVE_TARGET_BUTTON_NAV)
 XPT2046_Touchscreen ts(PIN_TOUCH_CS);
 #endif
 static uint32_t g_touchDebounceUntilMs = 0;
+
+#ifndef ND_TOUCH_VISUAL_DEBUG
+#define ND_TOUCH_VISUAL_DEBUG 0
+#endif
+
+static int g_touchDebugPrevX = -1;
+static int g_touchDebugPrevY = -1;
+static uint32_t g_touchDebugUntilMs = 0;
+
+static void touchDebugDrawMarker(int x, int y) {
+#if ND_TOUCH_VISUAL_DEBUG
+  const int w = tft.width();
+  const int h = tft.height();
+
+  if (g_touchDebugPrevX >= 0 && g_touchDebugPrevY >= 0) {
+    const int px = g_touchDebugPrevX;
+    const int py = g_touchDebugPrevY;
+    tft.drawCircle(px, py, 8, TFT_BLACK);
+    tft.drawLine(px - 10, py, px + 10, py, TFT_BLACK);
+    tft.drawLine(px, py - 10, px, py + 10, TFT_BLACK);
+  }
+
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  if (x >= w) x = w - 1;
+  if (y >= h) y = h - 1;
+  tft.drawCircle(x, y, 8, TFT_YELLOW);
+  tft.drawLine(x - 10, y, x + 10, y, TFT_YELLOW);
+  tft.drawLine(x, y - 10, x, y + 10, TFT_YELLOW);
+
+  char buf[40];
+  snprintf(buf, sizeof(buf), "touch x=%d y=%d", x, y);
+  tft.fillRect(0, h - 14, w, 14, TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.drawString(buf, 2, h - 12, 1);
+
+  g_touchDebugPrevX = x;
+  g_touchDebugPrevY = y;
+  g_touchDebugUntilMs = millis() + 450;
+#else
+  (void)x;
+  (void)y;
+#endif
+}
+
+static void touchDebugTick() {
+#if ND_TOUCH_VISUAL_DEBUG
+  if ((int32_t)(g_touchDebugUntilMs - millis()) > 0) return;
+  if (g_touchDebugPrevX < 0 || g_touchDebugPrevY < 0) return;
+  const int px = g_touchDebugPrevX;
+  const int py = g_touchDebugPrevY;
+  tft.drawCircle(px, py, 8, TFT_BLACK);
+  tft.drawLine(px - 10, py, px + 10, py, TFT_BLACK);
+  tft.drawLine(px, py - 10, px, py + 10, TFT_BLACK);
+  g_touchDebugPrevX = -1;
+  g_touchDebugPrevY = -1;
+#endif
+}
 
 // ---------- Utilities ----------
 static int clampi(int v, int lo, int hi) {
@@ -283,7 +381,10 @@ static void drawBorder() {
 #endif
 }
 
-// ---------- Touch (baked PRESET #5) ----------
+static int display_get_width() { return tft.width(); }
+static int display_get_height() { return tft.height(); }
+
+// ---------- Touch ----------
 
 struct TouchState {
   bool down;
@@ -450,8 +551,8 @@ static bool tdisplayTouchInit() {
 }
 #endif
 
-static TouchState readTouch() {
-  TouchState s{};
+static bool touch_read_point(TouchState& s) {
+  s = TouchState{};
   s.down = false;
 
 #if defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
@@ -459,7 +560,7 @@ static TouchState readTouch() {
   int ry = -1;
   int rz = 0;
   if (!tdisplayReadTouchRaw(rx, ry, rz)) {
-    return s;
+    return false;
   }
 
   int mappedX = 0;
@@ -476,10 +577,10 @@ static TouchState readTouch() {
   g_lastTouchRawX = s.rx;
   g_lastTouchRawY = s.ry;
   g_lastTouchRawZ = s.z;
-  return s;
+  return true;
 #elif defined(NEONDRIVE_TARGET_TEMBED)
   // T-Embed uses encoder/buttons only; no touch controller.
-  return s;
+  return false;
 #else
   // NOTE: On some CYD/XPT2046 boards, ts.touched() can get "stuck true" after redraws.
   // We avoid that by always sampling getPoint() and using pressure (z) as truth.
@@ -493,24 +594,36 @@ static TouchState readTouch() {
 
   // Pressure gate: treat low pressure as NOT pressed (prevents stuck-touch deadlocks).
   // Tuneable threshold:
-  if (s.z <= 80) {
-    s.down = false;
-    return s;
+  if (s.z <= g_touchZMin) {
+    return false;
   }
 
-  // Map raw to screen-space
-  int mx = mapRawToRange(s.rx, RAW_X_MIN, RAW_X_MAX, tft.width());
-  int my = mapRawToRange(s.ry, RAW_Y_MIN, RAW_Y_MAX, tft.height());
+  // Map raw to screen-space.
+  // IMPORTANT: when swapXY is active, swap raw axes BEFORE scaling so
+  // X still maps to full display width and Y to full display height.
+  int rawX = s.rx;
+  int rawY = s.ry;
+  if (g_touchSwapXY) {
+    const int tmp = rawX;
+    rawX = rawY;
+    rawY = tmp;
+  }
+  int mx = mapRawToRange(rawX, g_touchRawXMin, g_touchRawXMax, display_get_width());
+  int my = mapRawToRange(rawY, g_touchRawYMin, g_touchRawYMax, display_get_height());
+  if (g_touchInvertX) mx = (display_get_width() - 1) - mx;
+  if (g_touchInvertY) my = (display_get_height() - 1) - my;
 
-  // PRESET #5: swapXY=false, invertX=true, invertY=false
-  mx = (tft.width() - 1) - mx;
+  s.x = clampi(mx, 0, display_get_width() - 1);
+  s.y = clampi(my, 0, display_get_height() - 1);
 
-  s.x = clampi(mx, 0, tft.width() - 1);
-  s.y = clampi(my, 0, tft.height() - 1);
-
-  s.down = true;
-  return s;
+  return true;
 #endif
+}
+
+static TouchState readTouch() {
+  TouchState s{};
+  if (touch_read_point(s)) s.down = true;
+  return s;
 }
 
 static bool touchEdgeTriggered(int &outX, int &outY) {
@@ -635,6 +748,7 @@ static void yoinkLogCallback(const char* msg) {
 #include "ap_record.h"
 
 #include "wifiscan_helpers.h"
+#include "recon_port_scanner.h"
 
 // Diagnostic/fallback controls
 #define JAMMIT_PROMISCUOUS_TEST 1
@@ -1416,6 +1530,9 @@ static void IRAM_ATTR promiscuousPacketCallback(void *buf, wifi_promiscuous_pkt_
     packetHead = (uint16_t)((packetHead + 1) % PACKET_RING_SIZE);
     portEXIT_CRITICAL_ISR(&packetRingMux);
   }
+
+  // Feed Recon Deauth Hunter parser from the shared global callback.
+  DeauthHunter::ingestPromiscuousPacket(ppkt, type);
   handleCapturedPacket(payload, len);
 }
 
@@ -1805,6 +1922,8 @@ static uint32_t wifiConnectScanStartedMs = 0;
 static int wifiConnectSelectedIdx = -1; // Index of selected AP in aps[] array
 static int wifiConnectScroll = 0;       // Scroll position for AP list
 static bool wifiConnectShowPasswordModal = false;  // Show password input modal
+static int wifiConnectStatusY = -1;
+static constexpr int WIFI_CONNECT_VISIBLE_ROWS = 4;
 static bool webServerRunning = false;   // Is the HTTP OTA server running?
 static uint16_t webServerPort = 8080;   // WebServer port
 static WebServer webServer(webServerPort);  // WebServer for OTA updates
@@ -1862,6 +1981,7 @@ enum class ScreenId : uint8_t {
   BRUCE_SET_TARGET,
   SCOPE_GRAPH,
   LED_CONTROL,
+  NEON_PANIC,
 };
 static ScreenId screen = ScreenId::HOME;
 
@@ -1888,6 +2008,7 @@ static const char* screenToStr(ScreenId s) {
     case ScreenId::BRUCE_SET_TARGET: return "BRUCE_SET_TARGET";
     case ScreenId::SCOPE_GRAPH: return "SCOPE_GRAPH";
     case ScreenId::LED_CONTROL: return "LED_CONTROL";
+    case ScreenId::NEON_PANIC: return "NEON_PANIC";
     default: return "UNKNOWN";
   }
 }
@@ -1952,7 +2073,7 @@ static bool usbHexToBytes(const String& in, uint8_t* out, int maxLen, int& outLe
 
 static void fillStatusJson(JsonDocument& doc) {
   doc["ok"] = true;
-  doc["name"] = "CYD-NEON";
+  doc["name"] = ND_PROFILE_CODE;
   doc["mode"] = (int)screen;
   doc["autoMode"] = autoModeStr(autoMode);
   doc["sniffActive"] = sniffActive;
@@ -2393,6 +2514,8 @@ static constexpr int UI_TOP_BUTTON_SHIFT_THRESHOLD_Y = 72;
 #endif
 
 static inline int buttonRenderYOffset(const Button& b) {
+  // Target Ops uses its own explicit geometry; don't apply global top shift there.
+  if (screen == ScreenId::TARGET_DETAILS) return 0;
   // Keep existing logical layouts, but move top rows below the enlarged hypercube.
   return (b.y <= UI_TOP_BUTTON_SHIFT_THRESHOLD_Y) ? UI_TOP_BUTTON_SHIFT_Y : 0;
 }
@@ -2439,13 +2562,15 @@ static void drawButton(const Button& b, uint16_t fill, uint16_t border, uint16_t
   tft.setTextColor(text, fill);
 
   // Keep labels inside button bounds; shrink only when needed.
+  const bool isJustGoHomeLabel = (b.label && strcmp(b.label, "Just Go") == 0);
+  const int labelInsetPx = isJustGoHomeLabel ? 4 : 10;
   int labelSize = UI_BUTTON_TEXT_SIZE;
   tft.setTextSize(labelSize);
-  while (labelSize > 1 && tft.textWidth(b.label) > (drawW - 10)) {
+  while (labelSize > 1 && tft.textWidth(b.label) > (drawW - labelInsetPx)) {
     labelSize--;
     tft.setTextSize(labelSize);
   }
-  tft.drawString(b.label, b.x + b.w / 2, (b.y + yOff) + b.h / 2);
+  tft.drawString(b.label, drawX + (drawW / 2), drawY + (drawH / 2));
 }
 
 static int hypercubeBoxX = 0;
@@ -2453,6 +2578,7 @@ static int hypercubeBoxY = 2;
 static int hypercubeBoxW = 24;
 static int hypercubeBoxH = 24;
 static int hypercubeReservedBottomY = 34;
+static constexpr int HYPERCUBE_CLEARANCE_PX = 5;
 static const char* currentHeaderTitle = nullptr;
 static void layoutHypercubeBox();
 
@@ -2561,7 +2687,31 @@ struct UiRect {
 
 static inline int uiScreenW() { return tft.width(); }
 static inline int uiScreenH() { return tft.height(); }
-static inline int uiTopBarH() { return hypercubeReservedBottomY; }
+static inline int uiHeaderBandH() {
+  return (uiScreenH() <= 180) ? 18 : 30;
+}
+static inline int uiTopBarH() { return uiHeaderBandH(); }
+static inline int uiHypercubeSafeLeft() {
+  return max(0, hypercubeBoxX - HYPERCUBE_CLEARANCE_PX);
+}
+static inline int uiHypercubeSafeRight() {
+  return min(uiScreenW(), hypercubeBoxX + hypercubeBoxW + HYPERCUBE_CLEARANCE_PX);
+}
+static inline int uiHypercubeSafeBottom() {
+  return min(uiScreenH(), hypercubeBoxY + hypercubeBoxH + HYPERCUBE_CLEARANCE_PX);
+}
+static inline bool uiIntersectsHypercubeBand(int y, int h) {
+  const int safeTop = max(0, hypercubeBoxY - HYPERCUBE_CLEARANCE_PX);
+  const int safeBottom = uiHypercubeSafeBottom();
+  return (y < safeBottom) && ((y + h) > safeTop);
+}
+static inline int uiRightLimitForBand(int y, int h) {
+  const int fullRight = uiScreenW() - UI_SAFE_MARGIN;
+  if (uiIntersectsHypercubeBand(y, h)) {
+    return min(fullRight, uiHypercubeSafeLeft());
+  }
+  return fullRight;
+}
 
 static UiRect computeBottomBarRect() {
   const int w = uiScreenW();
@@ -2627,7 +2777,7 @@ static void drawHeaderTitleOverlay() {
   tft.setTextSize((tft.height() <= 180) ? 1 : 2);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   String headerTitle = String(currentHeaderTitle);
-  const int maxTitleW = (hypercubeBoxX - 12) - 8;
+  const int maxTitleW = uiHypercubeSafeLeft() - 8;
   if (maxTitleW > 8) {
     while (headerTitle.length() > 3 && tft.textWidth(headerTitle) > maxTitleW) {
       headerTitle.remove(headerTitle.length() - 1);
@@ -2643,7 +2793,11 @@ static void drawHeaderTitleOverlay() {
 static void drawHeader(const char* title) {
   layoutHypercubeBox();
   currentHeaderTitle = title;
-  tft.fillRect(0, 0, tft.width(), hypercubeReservedBottomY, TFT_BLACK);
+  // Reserve only a compact global header strip; keep the larger clear area local to top-right hypercube usage.
+  const int headerBandH = uiHeaderBandH();
+  tft.fillRect(0, 0, tft.width(), headerBandH, TFT_BLACK);
+  const int hypercubeClearX = max(0, hypercubeBoxX - HYPERCUBE_CLEARANCE_PX);
+  tft.fillRect(hypercubeClearX, 0, tft.width() - hypercubeClearX, hypercubeReservedBottomY, TFT_BLACK);
   drawHeaderTitleOverlay();
 
   // Companion Sync badge (may be cleared/redrawn elsewhere; draw once on header paints too)
@@ -2651,9 +2805,9 @@ static void drawHeader(const char* title) {
   const uint32_t now = millis();
   const bool companionActive = (companionSyncUntilMs != 0) && ((int32_t)(companionSyncUntilMs - now) > 0);
   const int badgeX = 8;
-  const int badgeY = hypercubeReservedBottomY - 14;
+  const int badgeY = headerBandH - 14;
   const int badgeH = 12;
-  const int badgeMaxW = (hypercubeBoxX - 12) - badgeX;
+  const int badgeMaxW = uiHypercubeSafeLeft() - badgeX;
   const int badgeW = (badgeMaxW > 150) ? 150 : badgeMaxW;
   if (badgeW > 60) {
     if (companionActive) {
@@ -2678,10 +2832,11 @@ static void drawCompanionSyncBadgeTick() {
   const bool companionActive = (companionSyncUntilMs != 0) && ((int32_t)(companionSyncUntilMs - now) > 0);
 
   layoutHypercubeBox();
+  const int headerBandH = uiHeaderBandH();
   const int badgeX = 8;
-  const int badgeY = hypercubeReservedBottomY - 14;
+  const int badgeY = headerBandH - 14;
   const int badgeH = 12;
-  const int badgeMaxW = (hypercubeBoxX - 12) - badgeX;
+  const int badgeMaxW = uiHypercubeSafeLeft() - badgeX;
   const int badgeW = (badgeMaxW > 150) ? 150 : badgeMaxW;
   if (badgeW <= 60) return;
 
@@ -2745,6 +2900,8 @@ static Button btnCfgStartup, btnCfgTelemetry;
 static int wifiListTopY = 92;
 static int wifiListBottomY = 200;
 static int wifiRowH = 34;
+static int wifiListDrawX = 8;
+static int wifiListDrawW = 120;
 static Button btnWifiRows[4];
 
 static Button btnHopMinus, btnHopPlus;
@@ -2755,7 +2912,11 @@ static Button btnCfgWifi;
 static Button btnStartupAutoReconnect, btnStartupDefaultLockToggle;
 static Button btnTelemetryMinus, btnTelemetryPlus, btnTelemetryVerboseToggle;
 static Button btnMonitorTab1, btnMonitorTab2;
-static Button btnReconBack, btnReconStart, btnReconClear;
+static Button btnReconBack, btnReconModeDeauth, btnReconModePort;
+static Button btnReconStart, btnReconClear;
+static Button btnReconChMinus, btnReconChPlus, btnReconLock;
+static Button btnReconPortStartStop, btnReconPortExport;
+static Button btnReconPortUp, btnReconPortDown;
 static Button btnScopeBack, btnScopeRefresh;
 
 static ScreenId monitorReturnScreen = ScreenId::TARGET_DETAILS;
@@ -3052,23 +3213,54 @@ static uint32_t scopeLastDrawMs = 0;
 static bool scopeLayoutDrawn = false;
 static uint32_t scopeMetaDrawnSig = 0;
 static uint32_t scopeApDrawnSig[5] = {0};
+static bool scopeScanActive = false;
+static uint32_t scopeScanStartedMs = 0;
 static constexpr int SCOPE_CH_COUNT = 13;
 static constexpr int SCOPE_WATERFALL_MAX_ROWS = 72;
-static uint8_t scopeWaterfall[SCOPE_CH_COUNT][SCOPE_WATERFALL_MAX_ROWS];
+static constexpr int SCOPE_WATERFALL_BINS = 104;
+static uint8_t scopeWaterfall[SCOPE_WATERFALL_MAX_ROWS][SCOPE_WATERFALL_BINS];
 static uint8_t scopeWaterfallRows = 0;
 static uint16_t hypercubeFrame = 0;
 static uint32_t hypercubeLastTickMs = 0;
+static uint16_t neonPanicFrame = 0;
+static uint32_t neonPanicLastTickMs = 0;
+static ScreenId neonPanicReturnScreen = ScreenId::HOME;
+enum class NeonPanicMode : uint8_t {
+  BOOT_TUNNEL = 0,     // #1
+  BLUEPRINT_REALITY,   // #6
+  PWN_COUNTER,         // #9
+  STEALTH_MINIMAL      // #10
+};
+static NeonPanicMode neonPanicMode = NeonPanicMode::STEALTH_MINIMAL;
+static bool sw1Enabled = false;
+static bool sw1WasDown = false;
+static uint32_t sw1DebounceUntilMs = 0;
 
 static constexpr float HYPERCUBE_TARGET_SCREEN_FRACTION = 0.10f;
 
-// Hunter globals
-static bool reconActive = false;
+enum class ReconView : uint8_t { DEAUTH = 0, PORT_SCAN };
+
+// Recon globals
+static ReconView reconView = ReconView::DEAUTH;
+static bool reconActive = false;  // Deauth hunter run state
 static bool reconLayoutDrawn = false;
 static uint32_t reconLastDrawChannel = 0;
 static uint32_t reconLastLogCount = 0;
 static uint32_t reconLastTotalEvents = 0;
-static uint32_t reconConsoleY = 0;  // Console scroll area Y position
-static uint32_t reconConsoleH = 0;  // Console height
+static uint32_t reconConsoleY = 0;
+static uint32_t reconConsoleH = 0;
+static int16_t reconConsoleX = 8;
+static int16_t reconConsoleW = 0;
+static uint8_t reconSelectedChannel = 1;
+static bool reconChannelLock = false;
+static uint32_t reconDeauthConfirmUntilMs = 0;
+static uint32_t reconLastUiTickMs = 0;
+static String reconStatusLine = "";
+static uint8_t reconPortScroll = 0;
+static int8_t reconHostSelected = -1;
+static UiRect reconHostListRect = {0, 0, 0, 0};
+static int reconHostRowH = 14;
+static ReconPortScanner reconScanner;
 
 
 // Monitor view mode
@@ -3144,7 +3336,7 @@ static void tdisplayNavDrawHeaderStatus() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(titleSize);
   String headerTitle = String(currentHeaderTitle);
-  const int maxTitleW = (hypercubeBoxX - 12) - 8;
+  const int maxTitleW = uiHypercubeSafeLeft() - 8;
   if (maxTitleW > 8) {
     while (headerTitle.length() > 3 && tft.textWidth(headerTitle) > maxTitleW) {
       headerTitle.remove(headerTitle.length() - 1);
@@ -3157,7 +3349,7 @@ static void tdisplayNavDrawHeaderStatus() {
 
   const int titleW = tft.textWidth(headerTitle);
   const int statusX = titleX + titleW + 6;
-  const int statusRight = hypercubeBoxX - 12;
+  const int statusRight = uiHypercubeSafeLeft();
   const int statusW = statusRight - statusX;
   if (statusW < 38) return;
 
@@ -3305,7 +3497,7 @@ static void tdisplayNavBuild() {
         tdisplayNavPush(btnWifiConnectDisconnect);
         tdisplayNavPush(btnWifiConnectUp);
         tdisplayNavPush(btnWifiConnectDown);
-        for (int i = 0; i < 3; i++) tdisplayNavPush(btnWifiConnectList[i]);
+        for (int i = 0; i < WIFI_CONNECT_VISIBLE_ROWS; i++) tdisplayNavPush(btnWifiConnectList[i]);
       }
       break;
     case ScreenId::WEBSERVER:
@@ -3325,8 +3517,17 @@ static void tdisplayNavBuild() {
       break;
     case ScreenId::RECON:
       tdisplayNavPush(btnReconBack);
+      tdisplayNavPush(btnReconModeDeauth);
+      tdisplayNavPush(btnReconModePort);
       tdisplayNavPush(btnReconStart);
       tdisplayNavPush(btnReconClear);
+      tdisplayNavPush(btnReconChMinus);
+      tdisplayNavPush(btnReconChPlus);
+      tdisplayNavPush(btnReconLock);
+      tdisplayNavPush(btnReconPortStartStop);
+      tdisplayNavPush(btnReconPortExport);
+      tdisplayNavPush(btnReconPortUp);
+      tdisplayNavPush(btnReconPortDown);
       break;
     case ScreenId::SCOPE_GRAPH:
       tdisplayNavPush(btnScopeBack);
@@ -3336,6 +3537,8 @@ static void tdisplayNavBuild() {
     case ScreenId::TARGETS_PLACEHOLDER:
     case ScreenId::LED_CONTROL:
       tdisplayNavPush(btnBack);
+      break;
+    case ScreenId::NEON_PANIC:
       break;
     case ScreenId::BRUCE_MENU:
       for (int i = 0; i < 6; i++) tdisplayNavPush(bruceMenuBtns[i]);
@@ -3441,7 +3644,7 @@ static void layoutHome() {
   const int gridBtnW = (w - (pad * 2) - ((HOME_BTN_COLS - 1) * gapH)) / HOME_BTN_COLS;
 
   // Top row buttons match the same size as all other Home buttons.
-  const int topBtnY = compact ? (hypercubeReservedBottomY + 2) : 28;
+  const int topBtnY = compact ? (uiHeaderBandH() + 2) : 28;
   homeBtns[0] = {pad, topBtnY, gridBtnW, gridBtnH, "Just Go"};
   homeBtns[1] = {pad + gridBtnW + gapH, topBtnY, gridBtnW, gridBtnH, "WiFi"};
 
@@ -3473,14 +3676,14 @@ struct HypercubePalette {
 static void layoutHypercubeBox() {
   const int w = tft.width();
   const int h = tft.height();
-  int headerTop = 2;
+  int headerTop = HYPERCUBE_CLEARANCE_PX;
   int headerH = HYPERCUBE_TARGET_SIZE_PX + 4;
-  int marginRight = 4;
+  int marginRight = HYPERCUBE_CLEARANCE_PX;
   if (screen == ScreenId::WIFI_CONNECT) {
     // WiFi Connect gets a tighter top-right placement to keep content clear.
-    headerTop = 0;
+    headerTop = HYPERCUBE_CLEARANCE_PX;
     headerH = HYPERCUBE_TARGET_SIZE_PX + 2;
-    marginRight = 1;
+    marginRight = HYPERCUBE_CLEARANCE_PX;
   }
   const int minSize = (h <= 180) ? 36 : 48;
   int size = HYPERCUBE_TARGET_SIZE_PX;
@@ -3492,7 +3695,9 @@ static void layoutHypercubeBox() {
   hypercubeBoxH = size;
   hypercubeBoxX = w - marginRight - size;
   hypercubeBoxY = headerTop + ((headerH - size) / 2);
-  hypercubeReservedBottomY = hypercubeBoxY + hypercubeBoxH + 6;
+  hypercubeBoxX = clampi(hypercubeBoxX, HYPERCUBE_CLEARANCE_PX, max(HYPERCUBE_CLEARANCE_PX, w - HYPERCUBE_CLEARANCE_PX - size));
+  hypercubeBoxY = clampi(hypercubeBoxY, HYPERCUBE_CLEARANCE_PX, max(HYPERCUBE_CLEARANCE_PX, h - HYPERCUBE_CLEARANCE_PX - size));
+  hypercubeReservedBottomY = hypercubeBoxY + hypercubeBoxH + HYPERCUBE_CLEARANCE_PX;
 }
 
 static void drawCyberBackdropRegion(int x, int y, int w, int h) {
@@ -3647,13 +3852,7 @@ static void drawCyberBackdrop() {
 
 static void drawHome() {
   tft.fillScreen(TFT_BLACK);
-  #if defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
-  drawHeader("NEONDRIVE // T-DISPLAY-S3");
-  #elif defined(NEONDRIVE_TARGET_TEMBED)
-  drawHeader("NEONDRIVE // T-EMBED-CC1101");
-  #else
-  drawHeader("NEONDRIVE // CYD");
-  #endif
+  drawHeader(ND_HOME_HEADER);
   drawUniversalBackground();
 
   layoutHome();
@@ -3762,8 +3961,9 @@ static void drawPlaceholder(const char* title, const char* msg) {
 
 
 static void drawWifiRow(int idx, int y, bool selected) {
-  const int listX = 8;
-  const int listW = max(120, hypercubeBoxX - listX);
+  // Keep row width fixed to the list container width to prevent per-row overdraw.
+  const int listX = wifiListDrawX;
+  const int listW = max(120, wifiListDrawW);
   const uint16_t bg = selected ? TFT_DARKGREEN : TFT_BLACK;
   const uint16_t fg = selected ? TFT_BLACK : TFT_WHITE;
 
@@ -3806,7 +4006,7 @@ static void drawWifiConfirmOverlay() {
   const int boxH = compact ? 98 : (140 * 9) / 10;
   const int boxX = (w - boxW) / 2;
   int boxY = (h - boxH) / 2;
-  const int minBoxY = hypercubeReservedBottomY + 8;
+  const int minBoxY = uiHeaderBandH() + 8;
   if (boxY < minBoxY) boxY = minBoxY;
   const int maxBoxY = h - boxH - 4;
   if (boxY > maxBoxY) boxY = maxBoxY;
@@ -3859,7 +4059,7 @@ static void drawConfirmTarget() {
   const int boxH = compact ? 98 : (140 * 9) / 10;
   const int boxX = (w - boxW) / 2;
   int boxY = (h - boxH) / 2;
-  const int minBoxY = hypercubeReservedBottomY + 8;
+  const int minBoxY = uiHeaderBandH() + 8;
   if (boxY < minBoxY) boxY = minBoxY;
   const int maxBoxY = h - boxH - 4;
   if (boxY > maxBoxY) boxY = maxBoxY;
@@ -3908,7 +4108,7 @@ static void drawWifiScan() {
   const int btnH = compact ? 24 : 30;
   const int btnY = h - (compact ? 30 : 36);
   const int btnX0 = 8;
-  const int leftControlW = max(compact ? 164 : 180, hypercubeBoxX - 16);
+  const int leftControlW = max(compact ? 164 : 180, uiRightLimitForBand(btnY, btnH) - 8);
   const int btnW = max(56, (leftControlW - (btnGap * 2)) / 3);
   btnWifiBack = {btnX0 + (btnW + btnGap) * 0, btnY, btnW, btnH, "Back"};
   btnWifiScan = {btnX0 + (btnW + btnGap) * 1, btnY, btnW, btnH, "Scan"};
@@ -3916,7 +4116,7 @@ static void drawWifiScan() {
 
   // Square scroll buttons under the hypercube.
   const int scrollBtn = clampi(hypercubeBoxW, compact ? 18 : 22, compact ? 24 : 30);
-  int scrollTopY = hypercubeReservedBottomY + 8;
+  int scrollTopY = uiHypercubeSafeBottom() + 3;
   const int scrollGap = 6;
   if (scrollTopY + (scrollBtn * 2) + scrollGap > btnY - 4) {
     scrollTopY = btnY - 4 - ((scrollBtn * 2) + scrollGap);
@@ -3938,10 +4138,13 @@ static void drawWifiScan() {
 
   // AP list on the left; right border aligned to hypercube left edge.
   const int wifiListXLocal = 8;
-  const int wifiListWLocal = max(120, hypercubeBoxX - wifiListXLocal);
+  const int selectedY = compact ? (uiHeaderBandH() + 2) : 24;
+  const int wifiListRight = uiRightLimitForBand(selectedY, 14);
+  const int wifiListWLocal = max(120, wifiListRight - wifiListXLocal);
+  wifiListDrawX = wifiListXLocal;
+  wifiListDrawW = wifiListWLocal;
 
   // Top layout bands (avoid overlaps): title -> selected -> status -> hint -> list.
-  const int selectedY = compact ? (hypercubeReservedBottomY + 2) : 24;
   const int statusY = selectedY + 12;
   const int hintY = statusY + 12;
   wifiListTopY = hintY + 14;
@@ -3986,7 +4189,7 @@ static void drawWifiScan() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  const int selectedMaxW = hypercubeBoxX - 12;
+  const int selectedMaxW = uiRightLimitForBand(selectedY, 14) - 8;
   String selectedLine = "Selected: (none)";
   if (apSelected >= 0 && apSelected < apCount) {
     const ApRecord& a = aps[apSelected];
@@ -4019,6 +4222,7 @@ static bool isBlockingPopupActive() {
 }
 
 static void hypercubeAnimTick() {
+  if (screen == ScreenId::NEON_PANIC) return;
   if (isBlockingPopupActive()) return;
   const uint32_t now = millis();
   if (now - hypercubeLastTickMs < 85) return;
@@ -4037,279 +4241,128 @@ static void drawTargetDetails() {
   const int w = tft.width();
   const int h = tft.height();
   const bool compact = (h <= 180);
+  const UiRect content = computeContentRect();
   const UiRect bottom = computeBottomBarRect();
+  const int rightEdge = w - 5;
+  const int bottomEdge = h - 5;
+  const bool targetOpsRunning = sniffActive || (autoMode != AutoMode::NONE);
+  const int safeRight = min(content.x + content.w, uiHypercubeSafeLeft() - 1);
 
-  if (compact) {
-    const UiRect content = computeContentRect();
-    const int gap = 4;
+  // Option B: left action rail + right target/hud stack.
+  const int railX = content.x;
+  const int railY = content.y + 2;
+  const int railW = compact ? 72 : 78;
+  const int backBtnH = UI_BUTTON_H;
+  const int backBtnY = bottomEdge - backBtnH + 1;
+  const int railBottom = backBtnY - 6;  // Reserve corner lane for Back button.
+  const int railH = max(100, railBottom - railY);
+  const int railPad = 4;
+  const int railGap = compact ? 6 : 8;
+  int railBtnH = compact ? 22 : 26;
+  if ((railBtnH * 4) + (railGap * 3) > railH - (railPad * 2)) {
+    railBtnH = max(18, (railH - (railPad * 2) - (railGap * 3)) / 4);
+  }
+  const int railBtnW = railW - (railPad * 2);
 
-    // Pull target summary near the title/hypercube band on compact displays.
-    const int targetBoxY = content.y + 2;
-    const int targetBoxH = 30;
-    const int btnY = targetBoxY + targetBoxH + gap;
-    const int btnH = 22;
+  int by = railY + railPad;
+  btnTargetSniff = {railX + railPad, by, railBtnW, railBtnH, targetOpsRunning ? "Stop" : "Start"};
+  by += railBtnH + railGap;
+  btnTargetAutomate = {railX + railPad, by, railBtnW, railBtnH, "Attack"};
+  by += railBtnH + railGap;
+  btnTargetMonitor = {railX + railPad, by, railBtnW, railBtnH, "Monitor"};
+  by += railBtnH + railGap;
+  btnTargetLock = {railX + railPad, by, railBtnW, railBtnH, lockChannel ? "Locked" : "Lock"};
+  btnTargetBack = {railX + railPad, backBtnY, railBtnW, backBtnH, "Back"};
 
-    const int actionX = content.x;
-    const int actionW = w - (content.x * 2);
-    const int backW = 56;
-    const int monitorW = 70;
-    const int lockW = 64;
-    int attackW = actionW - backW - monitorW - lockW - (gap * 3);
-    if (attackW < 56) attackW = 56;
+  int mainX = railX + railW + 6;
+  int mainW = safeRight - mainX;
+  if (mainW < 120) {
+    mainX = content.x;
+    mainW = safeRight - mainX;
+  }
+  if (mainW < 100) mainW = 100;
 
-    btnTargetBack = {actionX, btnY, backW, btnH, "Back"};
-    btnTargetAutomate = {actionX + backW + gap, btnY, attackW, btnH, "Attack"};
-    btnTargetMonitor = {actionX + backW + gap + attackW + gap, btnY, monitorW, btnH, "Monitor"};
-    btnTargetLock = {actionX + backW + gap + attackW + gap + monitorW + gap, btnY, lockW, btnH,
-                     lockChannel ? "LOCKED" : "LOCK"};
-    btnTargetSniff = {bottom.x, bottom.y, bottom.w, UI_BUTTON_H, sniffActive ? "Stop Sniff" : "Start Sniff"};
-
-    int hudY = btnY + btnH + gap;
-    int hudH = bottom.y - hudY - 3;
-    if (hudH < 18) hudH = 18;
-
-    drawButton(btnTargetBack, TFT_NAVY, TFT_CYAN, TFT_WHITE);
-    drawButton(btnTargetAutomate, TFT_DARKCYAN, TFT_MAGENTA, TFT_WHITE);
-    drawButton(btnTargetMonitor, TFT_NAVY, TFT_MAGENTA, TFT_WHITE);
-    drawButton(btnTargetLock, lockChannel ? TFT_RED : TFT_DARKGREY, TFT_CYAN, TFT_WHITE);
-    drawButton(btnTargetSniff, sniffActive ? TFT_MAROON : TFT_DARKGREEN, TFT_MAGENTA, TFT_WHITE);
-
-    // Target summary box (moved up).
-    tft.drawRect(content.x, targetBoxY, content.w, targetBoxH, TFT_MAGENTA);
-    tft.setTextDatum(TL_DATUM);
-    tft.setTextSize(1);
-    tft.setTextColor(lockChannel ? TFT_RED : TFT_CYAN, TFT_BLACK);
-    tft.drawString(lockChannel ? "TARGET LOCKED" : "TARGET", content.x + 4, targetBoxY + 2);
-
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    char line[128];
-    if (hasTarget) {
-      String ssid = target.ssid.isEmpty() ? String("(hidden)") : target.ssid;
-      while (ssid.length() > 4 && tft.textWidth("SSID: " + ssid) > (content.w - 8)) {
-        ssid.remove(ssid.length() - 1);
-      }
-      snprintf(line, sizeof(line), "SSID: %s", ssid.c_str());
-      tft.drawString(line, content.x + 4, targetBoxY + 12);
-      snprintf(line, sizeof(line), "CH:%d RSSI:%ddBm %s",
-               target.channel, target.rssi, authToStr(target.auth));
-      tft.drawString(line, content.x + 4, targetBoxY + 22);
-    } else {
-      tft.drawString("No target selected.", content.x + 4, targetBoxY + 16);
-    }
-
-    // Compact HUD box.
-    tft.drawRect(content.x, hudY, content.w, hudH, TFT_CYAN);
-    tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.drawString("HUD", content.x + 4, hudY + 2);
-    tft.setTextColor(TFT_CYAN, TFT_BLACK);
-
-    if (autoMode == AutoMode::Y0INK && YoinkEngine::isRunning()) {
-      snprintf(line, sizeof(line), "Y0INK %s CH:%d NET:%d",
-               YoinkEngine::getStateStr(),
-               YoinkEngine::getCurrentChannel(),
-               YoinkEngine::getNetworkCount());
-      tft.drawString(line, content.x + 4, hudY + 12);
-      snprintf(line, sizeof(line), "HS:%d PMK:%d CL:%d",
-               YoinkEngine::getHandshakeCount(),
-               YoinkEngine::getPmkidCount(),
-               YoinkEngine::getClientCount());
-      tft.drawString(line, content.x + 4, hudY + 22);
-    } else if (sniffActive) {
-      snprintf(line, sizeof(line), "mode:%s sniff:ON pps:%d",
-               autoModeStr(autoMode), sniffPps);
-      tft.drawString(line, content.x + 4, hudY + 12);
-      snprintf(line, sizeof(line), "pkts:%lu lock:%s ch:%d",
-               (unsigned long)sniffPacketCount,
-               lockChannel ? "ON" : "OFF",
-               hasTarget ? target.channel : -1);
-      tft.drawString(line, content.x + 4, hudY + 22);
-    } else {
-      snprintf(line, sizeof(line), "sniff:OFF mode:%s", autoModeStr(autoMode));
-      tft.drawString(line, content.x + 4, hudY + 12);
-      snprintf(line, sizeof(line), "lock:%s ch:%d",
-               lockChannel ? "ON" : "OFF",
-               hasTarget ? target.channel : -1);
-      tft.drawString(line, content.x + 4, hudY + 22);
-    }
-
-    drawBorder();
-    return;
+  int targetY = railY;
+  int targetH = compact ? 76 : 84;
+  int hudY = targetY + targetH + 6;
+  int hudH = bottomEdge - hudY;
+  if (hudH < (compact ? 44 : 62)) {
+    targetH = max(compact ? 58 : 64, targetH - ((compact ? 44 : 62) - hudH));
+    hudY = targetY + targetH + 6;
+    hudH = bottomEdge - hudY;
   }
 
-  const int topBtnY = compact ? (hypercubeReservedBottomY + 2) : 40;
-  const int topGap = compact ? 4 : 6;
-  const int topBtnH = compact ? 24 : 30;
-  const int actionX = 10;
-  const int lockW = compact ? 68 : 78;
-  const int lockX = w - 10 - lockW;
-  const int actionAreaW = max(120, lockX - actionX - topGap);
-  const int backW = compact ? 58 : 66;
-  const int monitorW = compact ? 68 : 76;
-  const int autoW = max(compact ? 64 : 72, actionAreaW - backW - monitorW - (topGap * 2));
+  tft.drawRect(railX, railY, railW, railH, TFT_CYAN);
+  drawButton(btnTargetSniff, targetOpsRunning ? 0x7800 : 0x03A0,
+             targetOpsRunning ? 0xFD20 : 0x7FE0, TFT_WHITE);                        // start/stop primary
+  drawButton(btnTargetAutomate, 0x7800, 0xF800, TFT_WHITE);                         // attack red
+  drawButton(btnTargetMonitor, 0x180F, 0xB81F, TFT_WHITE);                         // violet monitor
+  drawButton(btnTargetLock, lockChannel ? 0x7800 : 0x4208, lockChannel ? 0xFD20 : 0x7BEF, TFT_WHITE);
+  drawButton(btnTargetBack, 0x001A, 0x07FF, TFT_WHITE);
 
-  btnTargetBack = {actionX, topBtnY, backW, topBtnH, "Back"};
-  btnTargetAutomate = {actionX + backW + topGap, topBtnY, autoW, topBtnH, "Attack"};
-  btnTargetMonitor = {actionX + backW + topGap + autoW + topGap, topBtnY, monitorW, topBtnH, "Monitor"};
-  btnTargetLock = {lockX, topBtnY, lockW, topBtnH, lockChannel ? "LOCKED" : "LOCK"};
-  btnTargetSniff = {bottom.x, bottom.y, bottom.w, UI_BUTTON_H, sniffActive ? "Stop Sniff" : "Start Sniff"};
-
-  int targetBoxY = topBtnY + topBtnH + 4;
-  int targetBoxH = compact ? 40 : ((h <= 240) ? 70 : 92);
-  int hudY = targetBoxY + targetBoxH + 4;
-  int hudH = bottom.y - hudY - 4;
-  const int minHudH = compact ? 20 : 36;
-  if (hudH < minHudH) {
-    const int need = minHudH - hudH;
-    targetBoxH = max(compact ? 24 : 48, targetBoxH - need);
-    hudY = targetBoxY + targetBoxH + 4;
-    hudH = bottom.y - hudY - 4;
-  }
-
-  // Neon button palette
-  drawButton(btnTargetBack, TFT_NAVY, TFT_CYAN, TFT_WHITE);
-  drawButton(btnTargetAutomate, TFT_DARKCYAN, TFT_MAGENTA, TFT_WHITE);
-  drawButton(btnTargetMonitor, TFT_NAVY, TFT_MAGENTA, TFT_WHITE);
-  drawButton(btnTargetLock, lockChannel ? TFT_RED : TFT_DARKGREY, TFT_CYAN, TFT_WHITE);
-  drawButton(btnTargetSniff, sniffActive ? TFT_MAROON : TFT_DARKGREEN, TFT_MAGENTA, TFT_WHITE);
-
-  // Target info panel
-  tft.drawRect(10, targetBoxY, w - 20, targetBoxH, TFT_MAGENTA);
+  tft.drawRect(mainX, targetY, mainW, targetH, TFT_MAGENTA);
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(compact ? 1 : 2);
   tft.setTextColor(lockChannel ? TFT_RED : TFT_CYAN, TFT_BLACK);
-  tft.drawString(lockChannel ? "TARGET LOCKED" : "TARGET", 16, targetBoxY + 6);
-
+  tft.drawString(lockChannel ? "TARGET LOCKED" : "TARGET", mainX + 6, targetY + 5);
   tft.setTextSize(1);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
 
-  if (hasTarget) {
-    char line[128];
-    if (compact) {
-      String ssid = target.ssid.isEmpty() ? String("(hidden)") : target.ssid;
-      if (ssid.length() > 18) ssid = ssid.substring(0, 15) + "...";
-      snprintf(line, sizeof(line), "SSID: %s", ssid.c_str());
-      tft.drawString(line, 16, targetBoxY + 18);
-      snprintf(line, sizeof(line), "CH:%d RSSI:%ddBm %s",
-               target.channel, target.rssi, authToStr(target.auth));
-      tft.drawString(line, 16, targetBoxY + 30);
-    } else {
-      snprintf(line, sizeof(line), "SSID: %s", target.ssid.c_str());
-      tft.drawString(line, 16, targetBoxY + 28);
-
-      snprintf(line, sizeof(line), "BSSID: %s", target.bssid.c_str());
-      tft.drawString(line, 16, targetBoxY + 42);
-
-      snprintf(line, sizeof(line), "CH: %d   RSSI: %ddBm   SEC: %s",
-               target.channel, target.rssi, authToStr(target.auth));
-      tft.drawString(line, 16, targetBoxY + 56);
+  auto drawTrimmed = [&](String s, int x, int y, int maxW, uint16_t col) {
+    bool trimmed = false;
+    while (s.length() > 4 && tft.textWidth(s) > maxW) {
+      s.remove(s.length() - 1);
+      trimmed = true;
     }
+    if (trimmed && s.length() > 3) s += "...";
+    while (s.length() > 4 && tft.textWidth(s) > maxW) s.remove(s.length() - 1);
+    tft.setTextColor(col, TFT_BLACK);
+    tft.drawString(s, x, y);
+  };
+
+  if (hasTarget) {
+    String ssid = target.ssid.isEmpty() ? String("(hidden)") : target.ssid;
+    drawTrimmed(String("SSID: ") + ssid, mainX + 8, targetY + (compact ? 24 : 30), mainW - 12, TFT_WHITE);
+    drawTrimmed(String("CH:") + String(target.channel) + " RSSI:" + String(target.rssi) + "dBm SEC:" + String(authToStr(target.auth)),
+                mainX + 8, targetY + (compact ? 38 : 46), mainW - 12, TFT_WHITE);
+    drawTrimmed(String("BSSID: ") + target.bssid, mainX + 8, targetY + (compact ? 52 : 60), mainW - 12, 0xA71F);
   } else {
-    tft.drawString("No target selected.", 16, targetBoxY + (compact ? 22 : 32));
+    tft.drawString("No target selected.", mainX + 8, targetY + 34);
   }
 
-  // HUD / Stats
-  tft.drawRect(10, hudY, w - 20, hudH, TFT_CYAN);
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.drawString("HUD", 16, hudY + 6);
-
+  // Per request: Live HUD extends to screen right/bottom with a 5px margin.
+  const int hudW = rightEdge - mainX;
+  tft.drawRect(mainX, hudY, hudW, hudH, TFT_CYAN);
+  tft.setTextSize(compact ? 1 : 2);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  if (compact && autoMode == AutoMode::Y0INK && YoinkEngine::isRunning()) {
-    char hud[96];
-    snprintf(hud, sizeof(hud), "Y0INK %s CH:%d NET:%d",
-             YoinkEngine::getStateStr(),
-             YoinkEngine::getCurrentChannel(),
-             YoinkEngine::getNetworkCount());
-    tft.drawString(hud, 16, hudY + 16);
-    snprintf(hud, sizeof(hud), "HS:%d PMK:%d CL:%d",
+  tft.drawString("LIVE HUD", mainX + 6, hudY + 4);
+  tft.setTextSize(1);
+
+  int lineY = hudY + (compact ? 18 : 24);
+  const int lineGap = compact ? 12 : 14;
+  char line[128];
+  snprintf(line, sizeof(line), "mode:%s", autoModeStr(autoMode));
+  drawTrimmed(String(line), mainX + 8, lineY, hudW - 12, TFT_WHITE);
+  lineY += lineGap;
+  snprintf(line, sizeof(line), "sniff:%s  lock:%s", sniffActive ? "ON" : "OFF", lockChannel ? "ON" : "OFF");
+  drawTrimmed(String(line), mainX + 8, lineY, hudW - 12, 0x9DFF);
+  lineY += lineGap;
+  snprintf(line, sizeof(line), "pkts:%lu  pps:%d", (unsigned long)sniffPacketCount, sniffPps);
+  drawTrimmed(String(line), mainX + 8, lineY, hudW - 12, 0x7BEF);
+  lineY += lineGap;
+  if (autoMode == AutoMode::Y0INK && YoinkEngine::isRunning()) {
+    snprintf(line, sizeof(line), "HS:%d PMK:%d CL:%d",
              YoinkEngine::getHandshakeCount(),
              YoinkEngine::getPmkidCount(),
              YoinkEngine::getClientCount());
-    tft.drawString(hud, 16, hudY + 28);
-  } else if (compact && sniffActive) {
-    char hud[96];
-    snprintf(hud, sizeof(hud), "mode:%s sniff:ON pps:%d",
-             autoModeStr(autoMode), sniffPps);
-    tft.drawString(hud, 16, hudY + 16);
-    snprintf(hud, sizeof(hud), "pkts:%lu ch:%d lock:%s",
-             (unsigned long)sniffPacketCount,
-             hasTarget ? target.channel : -1,
-             lockChannel ? "ON" : "OFF");
-    tft.drawString(hud, 16, hudY + 28);
-  } else if (compact) {
-    char hud[96];
-    snprintf(hud, sizeof(hud), "sniff:OFF mode:%s", autoModeStr(autoMode));
-    tft.drawString(hud, 16, hudY + 16);
-    snprintf(hud, sizeof(hud), "lock:%s ch:%d",
-             lockChannel ? "ON" : "OFF",
-             hasTarget ? target.channel : -1);
-    tft.drawString(hud, 16, hudY + 28);
-  } else if (autoMode == AutoMode::Y0INK && YoinkEngine::isRunning()) {
-    // === YOINK ENGINE HUD ===
-    char hud[128];
-    snprintf(hud, sizeof(hud), "STATE: %s  CH:%d  NETS:%d",
-             YoinkEngine::getStateStr(),
-             YoinkEngine::getCurrentChannel(),
-             YoinkEngine::getNetworkCount());
-    tft.drawString(hud, 16, hudY + 6);
-
-    const char* tgtSsid = YoinkEngine::getTargetSSID();
-    if (tgtSsid && tgtSsid[0]) {
-      snprintf(hud, sizeof(hud), "TGT: %s  RSSI:%d  AUTH:%s",
-               tgtSsid, YoinkEngine::getTargetRSSI(),
-               YoinkEngine::getTargetAuthStr());
-    } else {
-      snprintf(hud, sizeof(hud), "TGT: (scanning...)");
-    }
-    tft.drawString(hud, 16, hudY + 18);
-
-    snprintf(hud, sizeof(hud), "CLIENTS:%d  DEAUTHS:%lu  PKTS:%lu",
-             YoinkEngine::getClientCount(),
-             (unsigned long)YoinkEngine::getDeauthCount(),
-             (unsigned long)YoinkEngine::getPacketCount());
-    tft.drawString(hud, 16, hudY + 30);
-
-    // EAPOL progress: M1-M4 indicators
-    uint8_t mask = YoinkEngine::getEapolMask();
-    snprintf(hud, sizeof(hud), "EAPOL: M1%s M2%s M3%s M4%s  HS:%d  PMKID:%d",
-             (mask & 0x01) ? "[Y]" : "[-]",
-             (mask & 0x02) ? "[Y]" : "[-]",
-             (mask & 0x04) ? "[Y]" : "[-]",
-             (mask & 0x08) ? "[Y]" : "[-]",
-             YoinkEngine::getHandshakeCount(),
-             YoinkEngine::getPmkidCount());
-    tft.drawString(hud, 16, hudY + 42);
-  } else if (sniffActive) {
-    uint32_t up = (millis() - sniffStartMs) / 1000UL;
-    char hud[128];
-    snprintf(hud, sizeof(hud), "mode:%s  sniff:ON  pps:%d  pkts:%lu  up:%lus", autoModeStr(autoMode),
-             sniffPps, (unsigned long)sniffPacketCount, (unsigned long)up);
-    tft.drawString(hud, 16, hudY + 20);
-
-    if (autoMode == AutoMode::JAMMIT) {
-      snprintf(hud, sizeof(hud), "lock:%s ch:%d jam:%u",
-               lockChannel ? "ON" : "OFF",
-               hasTarget ? target.channel : -1,
-               (unsigned)jammitLastScore);
-    } else {
-      snprintf(hud, sizeof(hud), "lock: %s  ch:%d",
-               lockChannel ? "ON" : "OFF",
-               hasTarget ? target.channel : -1);
-    }
-    tft.drawString(hud, 16, hudY + 34);
+  } else if (autoMode == AutoMode::JAMMIT) {
+    snprintf(line, sizeof(line), "jam:%u  deauth:%lu", (unsigned)jammitLastScore, (unsigned long)jammitDeauthCount);
   } else {
-    tft.drawString("sniff: OFF", 16, hudY + 20);
-    char hud2[96];
-    snprintf(hud2, sizeof(hud2), "lock: %s", lockChannel ? "ON" : "OFF");
-    tft.drawString(hud2, 16, hudY + 34);
+    snprintf(line, sizeof(line), "ch:%d  rssi:%ddBm",
+             hasTarget ? target.channel : -1,
+             hasTarget ? target.rssi : 0);
   }
-
-  if (!compact) {
-    // Vibe label in upper-right
-    tft.setTextDatum(TR_DATUM);
-    tft.setTextSize(1);
-    tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
-    tft.drawString("NEON OPS // chillwave mode", w - 6, 10);
-  }
+  drawTrimmed(String(line), mainX + 8, lineY, hudW - 12, TFT_MAGENTA);
 
   drawBorder();
 }
@@ -4793,9 +4846,9 @@ static void drawJustGo() {
   const bool compact = (tft.height() <= 180);
   const int panelX = content.x;
   const int panelY = compact ? 30 : 34;
-  const int panelRightLimit = hypercubeBoxX - (compact ? 8 : 10); // keep clear from hypercube
-  const int panelW = max(compact ? 132 : 120, panelRightLimit - panelX);
   const int panelH = compact ? 24 : 28;
+  const int panelRightLimit = uiRightLimitForBand(panelY, panelH);
+  const int panelW = max(compact ? 132 : 120, panelRightLimit - panelX);
   tft.drawRoundRect(panelX, panelY, panelW, panelH, 5, TFT_DARKGREY);
   tft.fillRoundRect(panelX + 1, panelY + 1, panelW - 2, panelH - 2, 5, TFT_BLACK);
   const char* stageStr = "IDLE";
@@ -4906,12 +4959,15 @@ static void drawJustGo() {
 }
 
 static uint16_t scopeWaterfallColor(uint8_t level) {
-  if (level >= 90) return TFT_RED;
-  if (level >= 75) return TFT_ORANGE;
-  if (level >= 60) return TFT_YELLOW;
-  if (level >= 45) return TFT_GREEN;
-  if (level >= 25) return TFT_CYAN;
-  if (level > 0) return TFT_NAVY;
+  // Thermal-style palette for spectrum waterfall rendering.
+  if (level >= 96) return TFT_WHITE;
+  if (level >= 88) return TFT_RED;
+  if (level >= 76) return TFT_ORANGE;
+  if (level >= 62) return TFT_YELLOW;
+  if (level >= 48) return TFT_GREEN;
+  if (level >= 32) return TFT_CYAN;
+  if (level >= 18) return 0x041F;  // deep blue
+  if (level > 0) return 0x0010;    // near-black blue
   return TFT_BLACK;
 }
 
@@ -4921,87 +4977,125 @@ static void scopeResetWaterfall() {
 }
 
 static void scopePushWaterfallFrame() {
-  int chIntensity[SCOPE_CH_COUNT] = {0};
-  int maxIntensity = 1;
+  float chPower[SCOPE_CH_COUNT + 1] = {0};  // 1..13 used
+
+  // Aggregate AP energy onto channels with spill-over to adjacent channels.
   for (int i = 0; i < apCount; i++) {
     int ch = aps[i].channel;
     if (ch < 1 || ch > SCOPE_CH_COUNT) continue;
-    int weight = clampi(aps[i].rssi, -100, -30) + 100;  // stronger AP contributes more
-    chIntensity[ch - 1] += weight;
-    if (chIntensity[ch - 1] > maxIntensity) maxIntensity = chIntensity[ch - 1];
+
+    int clamped = clampi(aps[i].rssi, -100, -25);
+    float base = (float)(clamped + 100);  // 0..75
+    // Boost stronger APs so dominant channels pop in the waterfall.
+    base = (base * base) / 40.0f;
+
+    for (int d = -2; d <= 2; d++) {
+      int c2 = ch + d;
+      if (c2 < 1 || c2 > SCOPE_CH_COUNT) continue;
+      float k = 0.0f;
+      if (d == 0) k = 1.00f;
+      else if (d == -1 || d == 1) k = 0.45f;
+      else k = 0.20f;
+      chPower[c2] += (base * k);
+    }
   }
 
-  for (int ch = 0; ch < SCOPE_CH_COUNT; ch++) {
-    for (int row = SCOPE_WATERFALL_MAX_ROWS - 1; row > 0; row--) {
-      scopeWaterfall[ch][row] = scopeWaterfall[ch][row - 1];
-    }
-    scopeWaterfall[ch][0] = (uint8_t)((chIntensity[ch] * 100) / maxIntensity);
+  float maxPower = 1.0f;
+  for (int ch = 1; ch <= SCOPE_CH_COUNT; ch++) {
+    if (chPower[ch] > maxPower) maxPower = chPower[ch];
   }
+
+  // Push historical rows down (newest row at 0).
+  int rowsToShift = scopeWaterfallRows;
+  if (rowsToShift >= SCOPE_WATERFALL_MAX_ROWS) rowsToShift = SCOPE_WATERFALL_MAX_ROWS - 1;
+  for (int row = rowsToShift; row > 0; row--) {
+    memcpy(scopeWaterfall[row], scopeWaterfall[row - 1], SCOPE_WATERFALL_BINS);
+  }
+
+  // Build a smooth spectrum line across bins by interpolating channel power.
+  for (int b = 0; b < SCOPE_WATERFALL_BINS; b++) {
+    float fch = 1.0f + ((float)b * 12.0f) / (float)(SCOPE_WATERFALL_BINS - 1);  // 1..13
+    int cLo = (int)fch;
+    if (cLo < 1) cLo = 1;
+    if (cLo > SCOPE_CH_COUNT) cLo = SCOPE_CH_COUNT;
+    int cHi = cLo + 1;
+    if (cHi > SCOPE_CH_COUNT) cHi = SCOPE_CH_COUNT;
+    float t = fch - (float)cLo;
+    float p = (chPower[cLo] * (1.0f - t)) + (chPower[cHi] * t);
+    float norm = p / maxPower;
+    if (norm < 0.0f) norm = 0.0f;
+    if (norm > 1.0f) norm = 1.0f;
+
+    // Gamma emphasis to make weak/medium signals visible like a spectrum waterfall.
+    float shaped = sqrtf(norm);
+    uint8_t level = (uint8_t)(shaped * 100.0f);
+    scopeWaterfall[0][b] = level;
+  }
+
   if (scopeWaterfallRows < SCOPE_WATERFALL_MAX_ROWS) {
     scopeWaterfallRows++;
   }
 }
 
 static void drawScopeGraph() {
-  const int w = tft.width();
-  const int h = tft.height();
-  const UiRect content = computeContentRect();
+  layoutHypercubeBox();
   const UiRect bottom = computeBottomBarRect();
-  const int panelY = content.y + 46;
-  const int panelH = bottom.y - panelY - 8;
-  const int leftX = 8;
-  const int leftW = 154;
-  const int rightX = 166;
-  const int rightW = w - rightX - 8;
+  const int w = tft.width();
+  const int screenTopY = 0;
+  const int pad = UI_SAFE_MARGIN;
+  const int contentX = pad;
+  const int contentW = w - (pad * 2);
+  const int titleY = screenTopY + 3;
+  const int metaY = titleY;
+  const int titleTextH = 8;                  // text size 1
+  const int dataY = titleY + titleTextH + 5; // exactly 5px below "SCOPE" title text
+  int dataH = bottom.y - dataY - 2;
+  if (dataH < 40) dataH = 40;
+  const int gap = 4;
+  int wfH = (dataH * 64) / 100;
+  if (wfH < 70) wfH = 70;
+  if (wfH > dataH - 30) wfH = dataH - 30;
+  int apH = dataH - wfH - gap;
+  if (apH < 26) {
+    apH = 26;
+    wfH = dataH - apH - gap;
+    if (wfH < 40) wfH = 40;
+  }
 
-  btnScopeBack = {bottom.x, bottom.y, 92, UI_BUTTON_H, "Back"};
-  btnScopeRefresh = {bottom.x + 98, bottom.y, 92, UI_BUTTON_H, "Refresh"};
+  const int wfPanelX = contentX;
+  const int wfPanelY = dataY;
+  // Per requirement: CH waterfall always ends 5px before hypercube left edge.
+  const int wfRightLimit = min(contentX + contentW, max(contentX + 40, uiHypercubeSafeLeft()));
+  const int wfPanelW = wfRightLimit - wfPanelX;
+  const int wfPanelH = wfH;
+  const int apPanelX = contentX;
+  const int apPanelY = wfPanelY + wfPanelH + gap;
+  const int apPanelW = contentW;
+  const int apPanelH = apH;
+
+  const int buttonGap = 6;
+  const int buttonW = (bottom.w - buttonGap) / 2;
+  btnScopeBack = {bottom.x, bottom.y, buttonW, UI_BUTTON_H, "Back"};
+  btnScopeRefresh = {bottom.x + buttonW + buttonGap, bottom.y, buttonW, UI_BUTTON_H, "Refresh"};
 
   if (!scopeLayoutDrawn) {
     scopeMetaDrawnSig = 0;
     for (int i = 0; i < 5; i++) {
       scopeApDrawnSig[i] = 0;
     }
-
-    tft.fillScreen(TFT_BLACK);
-    drawHeader("SCOPE");
-    drawUniversalBackground();
-    drawButton(btnScopeBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
-    drawButton(btnScopeRefresh, TFT_DARKCYAN, TFT_CYAN, TFT_WHITE);
-
-    tft.setTextDatum(TL_DATUM);
-    tft.setTextSize(1);
-    tft.setTextColor(TFT_CYAN, TFT_BLACK);
-    tft.drawString("WiFi AP Strength + Channel Waterfall", content.x + 2, content.y + 18);
-
-    tft.drawRect(leftX, panelY, leftW, panelH, TFT_DARKGREY);
-    tft.drawRect(rightX, panelY, rightW, panelH, TFT_DARKGREY);
-
-    // Static row/bar outlines for partial redraw updates.
-    const int apRows = 5;
-    const int apRowH = (panelH - 20) / apRows;
-    for (int i = 0; i < apRows; i++) {
-      int y = panelY + 18 + (i * apRowH);
-      int barX = leftX + 66;
-      int barY = y + 3;
-      int barH = apRowH - 7;
-      tft.drawRect(barX, barY, leftW - 72, barH, TFT_DARKGREY);
-    }
-
-    const int wfTopY = panelY + 20;
-    const int wfBottomY = panelY + panelH - 14;
-    const int wfH = wfBottomY - wfTopY;
-    tft.drawRect(rightX + 2, wfTopY, rightW - 4, wfH, TFT_DARKGREY);
-    drawBorder();
     scopeLayoutDrawn = true;
-  } else {
-    // Keep button visuals current without redrawing the full screen.
-    drawButton(btnScopeBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
-    drawButton(btnScopeRefresh, TFT_DARKCYAN, TFT_CYAN, TFT_WHITE);
   }
+
+  tft.fillRect(0, screenTopY, w, bottom.y - screenTopY - 1, TFT_BLACK);
+  drawButton(btnScopeBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
+  drawButton(btnScopeRefresh, TFT_DARKCYAN, TFT_CYAN, TFT_WHITE);
+  drawBorder();
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("SCOPE", contentX, titleY);
+
   char meta[72];
   if (wifiIsScanning) {
     snprintf(meta, sizeof(meta), "Scanning...");
@@ -5011,103 +5105,137 @@ static void drawScopeGraph() {
   }
   const uint32_t metaSig = hashText(meta);
   if (metaSig != scopeMetaDrawnSig) {
-    tft.fillRect(content.x + 2, content.y + 30, w - 20, 12, TFT_BLACK);
     tft.setTextColor(wifiIsScanning ? TFT_YELLOW : TFT_GREEN, TFT_BLACK);
-    tft.drawString(meta, content.x + 2, content.y + 30);
+    tft.drawString(meta, contentX + 58, metaY);
     scopeMetaDrawnSig = metaSig;
   }
 
+  // Main panels consume nearly all content area.
+  tft.drawRect(wfPanelX, wfPanelY, wfPanelW, wfPanelH, TFT_DARKGREY);
+  tft.drawRect(apPanelX, apPanelY, apPanelW, apPanelH, TFT_DARKGREY);
+
   tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
-  tft.drawString("Top AP RSSI", leftX + 6, panelY + 4);
-  tft.drawString("Ch Waterfall", rightX + 6, panelY + 4);
+  tft.drawString("CH Waterfall", wfPanelX + 6, wfPanelY + 4);
+  tft.drawString("Top AP RSSI", apPanelX + 6, apPanelY + 4);
 
-  // LEFT: strongest AP bars
+  // Waterfall heatmap (full-width, top panel)
+  const int wfInnerX = wfPanelX + 4;
+  const int wfInnerY = wfPanelY + 14;
+  const int wfInnerW = wfPanelW - 8;
+  const int wfInnerH = wfPanelH - 28;
+  tft.fillRect(wfInnerX, wfInnerY, wfInnerW, wfInnerH, TFT_BLACK);
+  if (wfInnerW > 0 && wfInnerH > 0) {
+    for (int py = 0; py < wfInnerH; py++) {
+      int srcRow = (py * SCOPE_WATERFALL_MAX_ROWS) / wfInnerH;
+      if (srcRow < 0) srcRow = 0;
+      if (srcRow >= SCOPE_WATERFALL_MAX_ROWS) srcRow = SCOPE_WATERFALL_MAX_ROWS - 1;
+      const bool rowValid = (srcRow < scopeWaterfallRows);
+      for (int px = 0; px < wfInnerW; px++) {
+        int srcBin = (px * SCOPE_WATERFALL_BINS) / wfInnerW;
+        if (srcBin < 0) srcBin = 0;
+        if (srcBin >= SCOPE_WATERFALL_BINS) srcBin = SCOPE_WATERFALL_BINS - 1;
+        uint8_t level = rowValid ? scopeWaterfall[srcRow][srcBin] : 0;
+        tft.drawPixel(wfInnerX + px, wfInnerY + py, scopeWaterfallColor(level));
+      }
+    }
+  }
+
+  // Channel guide lines + labels on top of waterfall.
+  if (wfInnerW > 1 && wfInnerH > 0) {
+    for (int ch = 1; ch <= SCOPE_CH_COUNT; ch++) {
+      int x = wfInnerX + ((ch - 1) * (wfInnerW - 1)) / (SCOPE_CH_COUNT - 1);
+      if (ch == 1 || ch == 6 || ch == 11 || ch == 13) {
+        char cbuf[4];
+        snprintf(cbuf, sizeof(cbuf), "%d", ch);
+        tft.setTextColor(TFT_CYAN, TFT_BLACK);
+        tft.drawString(cbuf, x - 2, wfPanelY + wfPanelH - 12);
+      }
+      tft.drawFastVLine(x, wfInnerY, wfInnerH, 0x18E3);
+    }
+  }
+
+  // AP RSSI bars (full-width bottom panel)
   const int apRows = 5;
-  const int apRowH = (panelH - 20) / apRows;
-  for (int i = 0; i < apRows; i++) {
-    int y = panelY + 18 + (i * apRowH);
-    int barX = leftX + 66;
-    int barY = y + 3;
-    int barH = apRowH - 7;
-    int rowW = leftW - 4;
+  const int apInnerX = apPanelX + 4;
+  const int apInnerY = apPanelY + 16;
+  const int apInnerW = apPanelW - 8;
+  const int apInnerH = apPanelH - 20;
+  tft.fillRect(apInnerX, apInnerY, apInnerW, apInnerH, TFT_BLACK);
+  const int rowH = (apInnerH > 0) ? (apInnerH / apRows) : 0;
+  const int nameW = (apInnerW * 38) / 100;
+  const int rssiW = 56;
+  const int barMaxW = apInnerW - nameW - rssiW - 6;
 
-    char name[14];
+  for (int i = 0; i < apRows; i++) {
+    const int y = apInnerY + (i * rowH);
+    if (rowH < 7 || y >= (apInnerY + apInnerH)) break;
+    char name[18];
     int rssi = -127;
     int barW = 0;
+
     if (i >= apCount) {
       snprintf(name, sizeof(name), "--");
     } else {
       const ApRecord& ap = aps[i];
-      int clamped = clampi(ap.rssi, -100, -30);
-      int level = clamped + 100; // 0..70
-      barW = (level * (leftW - 72)) / 70;
+      const int clamped = clampi(ap.rssi, -100, -30);
+      const int level = clamped + 100;  // 0..70
+      barW = (level * barMaxW) / 70;
       rssi = ap.rssi;
-      snprintf(name, sizeof(name), "%.10s", ap.ssid.c_str());
+      snprintf(name, sizeof(name), "%.16s", ap.ssid.c_str());
     }
 
-    uint32_t rowSig = hashText(name);
-    rowSig ^= (uint32_t)(uint16_t)(rssi + 256) << 16;
-    rowSig ^= (uint32_t)(uint16_t)barW;
-    bool rowChanged = (rowSig != scopeApDrawnSig[i]);
-    if (!rowChanged) continue;
-
-    tft.fillRect(leftX + 2, y + 1, rowW, apRowH - 2, TFT_BLACK);
     tft.setTextColor((i >= apCount) ? TFT_DARKGREY : TFT_WHITE, TFT_BLACK);
-    tft.drawString(name, leftX + 6, y + 2);
+    tft.drawString(name, apInnerX + 2, y + 1);
 
-    tft.drawRect(barX, barY, leftW - 72, barH, TFT_DARKGREY);
-    if (barW > 0) tft.fillRect(barX + 1, barY + 1, barW, barH - 2, TFT_CYAN);
+    const int barX = apInnerX + nameW;
+    const int barY = y + 2;
+    const int bh = rowH - 4;
+    tft.drawRect(barX, barY, barMaxW, bh, TFT_DARKGREY);
+    if (barW > 0) {
+      tft.fillRect(barX + 1, barY + 1, barW, bh - 2, TFT_CYAN);
+    }
 
     if (i < apCount) {
       char rssiTxt[12];
       snprintf(rssiTxt, sizeof(rssiTxt), "%ddBm", rssi);
       tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-      tft.drawString(rssiTxt, barX + 4, y + 2);
-    }
-
-    scopeApDrawnSig[i] = rowSig;
-  }
-
-  // RIGHT: channel waterfall heatmap (ch 1..13)
-  const int wfTopY = panelY + 20;
-  const int wfBottomY = panelY + panelH - 14;
-  const int wfH = wfBottomY - wfTopY;
-  const int wfInnerX = rightX + 4;
-  const int wfInnerW = rightW - 8;
-  const int colGap = 1;
-  int colW = (wfInnerW - (SCOPE_CH_COUNT - 1) * colGap) / SCOPE_CH_COUNT;
-  if (colW < 1) colW = 1;
-  const int totalW = (colW * SCOPE_CH_COUNT) + ((SCOPE_CH_COUNT - 1) * colGap);
-  const int xStart = rightX + ((rightW - totalW) / 2);
-
-  for (int ch = 0; ch < SCOPE_CH_COUNT; ch++) {
-    const int x = xStart + (ch * (colW + colGap));
-    for (int py = 0; py < wfH; py++) {
-      uint8_t level = 0;
-      if (py < scopeWaterfallRows) {
-        level = scopeWaterfall[ch][py];
-      }
-      tft.fillRect(x, wfTopY + py, colW, 1, scopeWaterfallColor(level));
-    }
-    if ((ch + 1) == 1 || (ch + 1) == 6 || (ch + 1) == 11 || (ch + 1) == 13) {
-      char cbuf[4];
-      snprintf(cbuf, sizeof(cbuf), "%d", ch + 1);
-      tft.setTextColor(TFT_CYAN, TFT_BLACK);
-      tft.drawString(cbuf, x, wfBottomY + 2);
+      tft.drawString(rssiTxt, barX + barMaxW + 4, y + 1);
     }
   }
 }
 
 static void scopeTick() {
   if (screen != ScreenId::SCOPE_GRAPH) return;
+  if (scopeScanActive) {
+    const int poll = pollWifiScanAsync();
+    if (poll == 0) {
+      if (millis() - scopeScanStartedMs > 30000) {
+        scopeScanActive = false;
+        wifiIsScanning = false;
+        WiFi.scanDelete();
+        drawScopeGraph();
+      }
+      return;
+    }
+    scopeScanActive = false;
+    if (poll > 0) {
+      scopePushWaterfallFrame();
+      scopeLastScanMs = millis();
+    }
+    drawScopeGraph();
+    return;
+  }
   if (wifiIsScanning) return;
 
   uint32_t now = millis();
   if (now - scopeLastScanMs < 4000) return;
 
-  doWifiScanBlocking();
-  scopePushWaterfallFrame();
-  scopeLastScanMs = millis();
+  scopeScanActive = startWifiScanAsync();
+  if (scopeScanActive) {
+    scopeScanStartedMs = millis();
+  } else {
+    wifiIsScanning = false;
+  }
   drawScopeGraph();
 }
 
@@ -5217,6 +5345,8 @@ static void engageAutoMode(AutoMode mode) {
     Serial.println("[auto] RAW engaged (logging snapshots)");
   } else if (mode == AutoMode::SCOPE) {
     scopeResetWaterfall();
+    scopeScanActive = false;
+    scopeScanStartedMs = 0;
     scopeLastScanMs = 0;
     scopeLastDrawMs = 0;
     Serial.println("[auto] SCOPE engaged (AP waterfall graph)");
@@ -5282,6 +5412,71 @@ static void drawConfig() {
   drawHeader("Config");
   drawUniversalBackground();
 
+#if defined(NEONDRIVE_TARGET_CYD)
+  const UiRect content = computeContentRect();
+  const UiRect bottom = computeBottomBarRect();
+  const int w = tft.width();
+
+  btnBack = {bottom.x, bottom.y, 98, UI_BUTTON_H, "Back"};
+  drawButton(btnBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
+
+  const int panelX = 8;
+  const int panelY = 34;
+  const int panelH = 20;
+  const int panelRight = max(panelX + 140, uiHypercubeSafeLeft() - 5);
+  const int panelW = max(140, panelRight - panelX);
+  tft.drawRoundRect(panelX, panelY, panelW, panelH, 5, TFT_DARKGREY);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("System + connectivity controls", panelX + 5, panelY + 6);
+
+  // Strict 2x3 grid with explicit no-overlap spacing.
+  // Keep y > threshold so global top-button Y shift never applies on this screen.
+  const int gridLeft = content.x;
+  const int gapX = 10;
+  const int gapY = 10;
+  const int gridTop = max(panelY + panelH + 10, UI_TOP_BUTTON_SHIFT_THRESHOLD_Y + 4);
+  const int gridBottom = bottom.y - 8;
+  const int spanH = max(72, gridBottom - gridTop);
+  int bh = (spanH - (gapY * 2)) / 3;
+  bh = clampi(bh, 24, 40);
+  const int usedH = (bh * 3) + (gapY * 2);
+  const int y0 = gridTop + max(0, (spanH - usedH) / 2);
+  const int y1 = y0 + bh + gapY;
+  const int y2 = y1 + bh + gapY;
+  const int rowRight0 = uiRightLimitForBand(y0, bh);
+  const int rowRight1 = uiRightLimitForBand(y1, bh);
+  const int rowRight2 = uiRightLimitForBand(y2, bh);
+  const int gridRight = min(w - content.x, min(rowRight0, min(rowRight1, rowRight2)));
+  const int bw = max(56, ((gridRight - gridLeft) - gapX) / 2);
+  const int x0 = gridLeft;
+  const int x1 = gridLeft + bw + gapX;
+
+  btnCfgWifi = {x0, y0, bw, bh, "Adapter"};
+  drawButton(btnCfgWifi, TFT_BLUE, TFT_CYAN, TFT_WHITE);
+
+  btnCfgWifiConnect = {x1, y0, bw, bh, "WiFi Link"};
+  drawButton(btnCfgWifiConnect, TFT_DARKCYAN, TFT_WHITE, TFT_WHITE);
+
+  btnCfgWebserver = {x0, y1, bw, bh, "Web + AP"};
+  drawButton(btnCfgWebserver, TFT_DARKGREEN, TFT_YELLOW, TFT_WHITE);
+
+  btnCfgStartup = {x1, y1, bw, bh, "Startup"};
+  drawButton(btnCfgStartup, TFT_MAROON, TFT_ORANGE, TFT_WHITE);
+
+  btnCfgTelemetry = {x0, y2, bw, bh, "Telemetry"};
+  drawButton(btnCfgTelemetry, 0x022F, 0x7D7C, TFT_WHITE);
+
+  btnCfgLed = {x1, y2, bw, bh, "LED Control"};
+  drawButton(btnCfgLed, 0x4A49, TFT_CYAN, TFT_WHITE);
+
+  uiLogLayout("drawConfig(CYD)", content, bottom);
+  uiLogButtonRect("Config.Back", btnBack);
+  drawBorder();
+  return;
+#else
+
   const bool compact = (tft.height() <= 180);
   const UiRect content = computeContentRect();
   const UiRect bottom = computeBottomBarRect();
@@ -5299,8 +5494,8 @@ static void drawConfig() {
     // Fill the top-left header band with a quick summary.
     const int panelX = 8;
     const int panelY = 34;
-    const int panelW = max(120, hypercubeBoxX - panelX - 6);
     const int panelH = max(20, content.y - panelY - 4);
+    const int panelW = max(120, uiRightLimitForBand(panelY, panelH) - panelX);
     tft.drawRoundRect(panelX, panelY, panelW, panelH, 6, TFT_DARKGREY);
     tft.fillRoundRect(panelX + 1, panelY + 1, panelW - 2, panelH - 2, 6, TFT_BLACK);
     tft.setTextDatum(TL_DATUM);
@@ -5337,6 +5532,7 @@ static void drawConfig() {
   uiLogLayout("drawConfig", content, bottom);
   uiLogButtonRect("Config.Back", btnBack);
   drawBorder();
+#endif
 }
 
 static void drawStartupConfig() {
@@ -5371,6 +5567,8 @@ static void drawStartupConfig() {
              TFT_CYAN,
              TFT_WHITE);
 
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Default channel lock", content.x + 4, row2Y);
 
@@ -5381,6 +5579,8 @@ static void drawStartupConfig() {
              TFT_WHITE);
 
   if (!compact) {
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextSize(1);
     tft.setTextColor(TFT_CYAN, TFT_BLACK);
     tft.drawString("Saved to /config.json", content.x + 4, content.y + 138);
   }
@@ -5446,8 +5646,11 @@ static void drawLedControl() {
   drawUniversalBackground();
 
   const UiRect content = computeContentRect();
-  const UiRect bottom = computeBottomBarRect();
-  btnBack = {bottom.x, bottom.y, 92, UI_BUTTON_H, "Back"};
+
+  const int calibrationTextY = content.y + 2;
+  // Keep Back anchored exactly 10px below the calibration line (no font/UI band offsets).
+  const int backButtonY = calibrationTextY + 10;
+  btnBack = {content.x + 4, backButtonY, 92, UI_BUTTON_H, "Back"};
   drawButton(btnBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
 
   ledEnsureHueInitialized();
@@ -5457,10 +5660,10 @@ static void drawLedControl() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString("Physical CYD status LED calibration", content.x + 4, content.y + 2);
+  tft.drawString("Physical CYD status LED calibration", content.x + 4, calibrationTextY);
   drawLedControlDynamic();
 
-  uiLogLayout("drawLedControl", content, bottom);
+  uiLogLayout("drawLedControl", content, computeBottomBarRect());
   uiLogButtonRect("Led.Back", btnBack);
   drawBorder();
 }
@@ -5470,6 +5673,139 @@ static void drawWifiConfig() {
   drawHeader("Adapter Config");
   drawUniversalBackground();
 
+#if defined(NEONDRIVE_TARGET_CYD)
+  const UiRect content = computeContentRect();
+  const UiRect bottom = computeBottomBarRect();
+  const int w = tft.width();
+
+  btnBack = {bottom.x, bottom.y, 98, UI_BUTTON_H, "Back"};
+  btnSave = {bottom.x + 104, bottom.y, 98, UI_BUTTON_H, "Save"};
+  drawButton(btnBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
+  drawButton(btnSave, configDirty ? TFT_ORANGE : TFT_DARKGREY, TFT_WHITE, TFT_BLACK);
+
+  const int panelX = 8;
+  const int panelY = 34;
+  const int panelH = 20;
+  const int panelW = max(120, min(uiHypercubeSafeLeft() - 5, w - 10) - panelX);
+  tft.drawRoundRect(panelX, panelY, panelW, panelH, 5, TFT_DARKGREY);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("WiFi adapter timing + defaults", panelX + 5, panelY + 6);
+
+  // Keep all controls below top-shift threshold so render/touch stay aligned.
+  const int baseY = max(UI_TOP_BUTTON_SHIFT_THRESHOLD_Y + 6, panelY + panelH + 8);
+  const int rowGap = 6;
+  const int rowH = 24;
+  const int r0 = baseY;
+  const int r1 = r0 + rowH + rowGap;
+  const int r2 = r1 + rowH + rowGap;
+  const int r3 = r2 + rowH + rowGap;
+
+  auto drawRowBox = [&](int y) -> int {
+    const int right = uiRightLimitForBand(y, rowH);
+    const int x = content.x;
+    const int rw = max(120, right - x);
+    tft.drawRoundRect(x, y, rw, rowH, 5, TFT_DARKGREY);
+    return rw;
+  };
+
+  const int w0 = drawRowBox(r0);
+  const int w1 = drawRowBox(r1);
+  const int w2 = drawRowBox(r2);
+  const int w3 = drawRowBox(r3);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+
+  // Row 0: Hop interval
+  char hopVal[24];
+  snprintf(hopVal, sizeof(hopVal), "%dms", cfg.wifi_channelHopInterval);
+  const int hopBtnW = 44;
+  const int hopBtnH = 20;
+  const int hopBtnY = r0 + ((rowH - hopBtnH) / 2);
+  const int hopPlusX = content.x + w0 - hopBtnW - 4;
+  const int hopMinusX = hopPlusX - hopBtnW - 4;
+  btnHopMinus = {hopMinusX, hopBtnY, hopBtnW, hopBtnH, "-"};
+  btnHopPlus  = {hopPlusX, hopBtnY, hopBtnW, hopBtnH, "+"};
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.drawString("Hop interval", content.x + 6, r0 + 7);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextSize(1);
+  tft.drawString(hopVal, hopMinusX - 6, r0 + 7);
+  tft.setTextDatum(TL_DATUM);
+  drawButton(btnHopMinus, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+  drawButton(btnHopPlus,  TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+
+  // Row 1: Scan duration
+  char scanVal[24];
+  snprintf(scanVal, sizeof(scanVal), "%dms", cfg.wifi_scanDuration);
+  const int scanBtnW = 44;
+  const int scanBtnH = 20;
+  const int scanBtnY = r1 + ((rowH - scanBtnH) / 2);
+  const int scanPlusX = content.x + w1 - scanBtnW - 4;
+  const int scanMinusX = scanPlusX - scanBtnW - 4;
+  btnScanMinus = {scanMinusX, scanBtnY, scanBtnW, scanBtnH, "-"};
+  btnScanPlus  = {scanPlusX, scanBtnY, scanBtnW, scanBtnH, "+"};
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("Scan duration", content.x + 6, r1 + 7);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextSize(1);
+  tft.drawString(scanVal, scanMinusX - 6, r1 + 7);
+  tft.setTextDatum(TL_DATUM);
+  drawButton(btnScanMinus, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+  drawButton(btnScanPlus,  TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+
+  // Row 2: Deauth toggle
+  const int tglW = 106;
+  const int tglH = 20;
+  const int tglY2 = r2 + ((rowH - tglH) / 2);
+  const int tglX2 = content.x + w2 - tglW - 4;
+  btnDeauthToggle = {tglX2, tglY2, tglW, tglH, cfg.wifi_enableDeauth ? "ON" : "OFF"};
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("Enable deauth", content.x + 6, r2 + 7);
+  drawButton(btnDeauthToggle, cfg.wifi_enableDeauth ? TFT_DARKGREEN : TFT_MAROON, TFT_WHITE, TFT_WHITE);
+
+  // Row 3: Default lock toggle
+  const int tglY3 = r3 + ((rowH - tglH) / 2);
+  const int tglX3 = content.x + w3 - tglW - 4;
+  btnWifiDefaultLockToggle = {tglX3, tglY3, tglW, tglH, cfg.wifi_defaultLockChannel ? "ON" : "OFF"};
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("Default lock", content.x + 6, r3 + 7);
+  drawButton(btnWifiDefaultLockToggle,
+             cfg.wifi_defaultLockChannel ? TFT_DARKGREEN : TFT_MAROON,
+             TFT_WHITE,
+             TFT_WHITE);
+
+  // Saved SSID status line above bottom bar.
+  const int ssidY = bottom.y - 14;
+  tft.fillRect(content.x, ssidY - 2, w - (content.x * 2), 12, TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  String ssidLine = "Saved network: " + (cfg.wifi_ssid.isEmpty() ? String("(not set)") : cfg.wifi_ssid);
+  while (ssidLine.length() > 4 && tft.textWidth(ssidLine) > (w - (content.x * 2) - 2)) {
+    ssidLine.remove(ssidLine.length() - 1);
+  }
+  tft.drawString(ssidLine, content.x + 1, ssidY);
+
+  uiLogLayout("drawWifiConfig(CYD)", content, bottom);
+  uiLogButtonRect("WifiCfg.Back", btnBack);
+  uiLogButtonRect("WifiCfg.Save", btnSave);
+  drawBorder();
+  return;
+#else
   const bool compact = (tft.height() <= 180);
   const UiRect content = computeContentRect();
   const UiRect bottom = computeBottomBarRect();
@@ -5538,6 +5874,7 @@ static void drawWifiConfig() {
   uiLogButtonRect("WifiCfg.Back", btnBack);
   uiLogButtonRect("WifiCfg.Save", btnSave);
   drawBorder();
+#endif
 }
 
 // Forward declarations for web routes
@@ -5725,6 +6062,384 @@ static bool removeSdPathRecursive(const String& path) {
   return SD.rmdir(path);
 }
 
+// ---------- Time sync/persist (for SD FAT timestamps) ----------
+static constexpr time_t MIN_VALID_EPOCH = 1704067200;  // 2024-01-01 UTC
+static constexpr const char* LAST_EPOCH_PATH = "/last_epoch.txt";
+static bool ntpRequested = false;
+static uint32_t lastNtpAttemptMs = 0;
+static uint32_t lastClockTickMs = 0;
+static uint32_t lastEpochPersistMs = 0;
+static time_t lastPersistedEpoch = 0;
+
+static bool isSystemTimeValid() {
+  return time(nullptr) >= MIN_VALID_EPOCH;
+}
+
+static void restoreEpochFromLittleFs() {
+  if (!LittleFS.exists(LAST_EPOCH_PATH)) return;
+  File f = LittleFS.open(LAST_EPOCH_PATH, FILE_READ);
+  if (!f) return;
+  String epochStr = f.readStringUntil('\n');
+  f.close();
+  epochStr.trim();
+  if (epochStr.isEmpty()) return;
+  time_t savedEpoch = (time_t)strtoull(epochStr.c_str(), nullptr, 10);
+  if (savedEpoch < MIN_VALID_EPOCH) return;
+  if (savedEpoch <= time(nullptr)) return;
+  struct timeval tv;
+  tv.tv_sec = savedEpoch;
+  tv.tv_usec = 0;
+  settimeofday(&tv, nullptr);
+  Serial.printf("[time] Restored epoch from LittleFS: %lu\n", (unsigned long)savedEpoch);
+}
+
+static void persistEpochToLittleFs(bool force = false) {
+  time_t nowEpoch = time(nullptr);
+  if (nowEpoch < MIN_VALID_EPOCH) return;
+  if (!force) {
+    if (millis() - lastEpochPersistMs < 60000) return;
+    if (lastPersistedEpoch != 0 && (nowEpoch - lastPersistedEpoch) < 60) return;
+  }
+  File f = LittleFS.open(LAST_EPOCH_PATH, FILE_WRITE);
+  if (!f) return;
+  f.printf("%lu\n", (unsigned long)nowEpoch);
+  f.close();
+  lastPersistedEpoch = nowEpoch;
+  lastEpochPersistMs = millis();
+}
+
+static void requestNtpTimeIfNeeded() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (millis() - lastNtpAttemptMs < 30000) return;
+  lastNtpAttemptMs = millis();
+  configTzTime("UTC0", "pool.ntp.org", "time.nist.gov", "time.google.com");
+  if (!ntpRequested) {
+    Serial.println("[time] Requested NTP sync");
+    ntpRequested = true;
+  }
+}
+
+static void timeServiceTick() {
+  if (millis() - lastClockTickMs < 1000) return;
+  lastClockTickMs = millis();
+
+  if (!isSystemTimeValid()) {
+    requestNtpTimeIfNeeded();
+    return;
+  }
+
+  static bool reportedValid = false;
+  if (!reportedValid) {
+    reportedValid = true;
+    time_t nowEpoch = time(nullptr);
+    struct tm tmNow;
+    if (gmtime_r(&nowEpoch, &tmNow)) {
+      Serial.printf("[time] System time valid (UTC): %04d-%02d-%02d %02d:%02d:%02d\n",
+                    tmNow.tm_year + 1900, tmNow.tm_mon + 1, tmNow.tm_mday,
+                    tmNow.tm_hour, tmNow.tm_min, tmNow.tm_sec);
+    } else {
+      Serial.println("[time] System time valid");
+    }
+  }
+
+  persistEpochToLittleFs();
+}
+
+static String neonNavLink(const char* href, const char* label, const String& active) {
+  String out = "<a";
+  if (active == href) out += " class='active'";
+  out += " href='";
+  out += href;
+  out += "'>";
+  out += label;
+  out += "</a>";
+  return out;
+}
+
+static const char* neonBaseCss() {
+  return R"CSS(
+:root{
+  --bg-0:#05070d;
+  --bg-1:#0b1020;
+  --panel:#0e1626;
+  --panel-hi:#152138;
+  --text:#f3f7ff;
+  --muted:#97aac8;
+  --neon-cyan:#29f5ff;
+  --neon-magenta:#ff3ad9;
+  --neon-lime:#9aff3a;
+  --warning:#ffbf3a;
+  --danger:#ff4d5f;
+  --radius:14px;
+  --shadow:0 16px 36px rgba(0,0,0,.45);
+  --glow:0 0 20px rgba(41,245,255,.24);
+  --border:1px solid rgba(41,245,255,.22);
+  --grid:rgba(41,245,255,.08);
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;min-height:100%}
+body{
+  font-family:"Segoe UI","Trebuchet MS","Arial Narrow",Arial,sans-serif;
+  color:var(--text);
+  background:
+    radial-gradient(120% 80% at 10% -10%, rgba(255,58,217,.12), transparent 55%),
+    radial-gradient(120% 80% at 90% -20%, rgba(41,245,255,.1), transparent 52%),
+    linear-gradient(170deg,var(--bg-1) 0%,var(--bg-0) 52%,#04050a 100%);
+}
+.nd-grid,.nd-scan{position:fixed;inset:0;pointer-events:none;z-index:0}
+.nd-grid{
+  background-image:
+    linear-gradient(var(--grid) 1px,transparent 1px),
+    linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+  background-size:36px 36px;
+  opacity:.25;
+}
+.nd-scan{
+  background:repeating-linear-gradient(
+    to bottom,
+    rgba(255,255,255,.02) 0,
+    rgba(255,255,255,.02) 1px,
+    rgba(0,0,0,0) 2px,
+    rgba(0,0,0,0) 4px
+  );
+  opacity:.18;
+}
+.nd-wrap{position:relative;z-index:1;max-width:1160px;margin:0 auto;padding:16px 14px 26px}
+.nd-topbar{
+  position:sticky;top:0;z-index:4;
+  margin:4px 0 14px;padding:14px 14px 10px;
+  background:rgba(8,13,24,.88);
+  border:var(--border);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow);
+  backdrop-filter:blur(6px);
+}
+.nd-kicker{
+  margin:0 0 3px;
+  font-size:11px;
+  letter-spacing:.22em;
+  text-transform:uppercase;
+  color:var(--neon-cyan);
+}
+h1{
+  margin:0;
+  font-size:clamp(1.1rem,2vw,1.45rem);
+  letter-spacing:.08em;
+  text-transform:uppercase;
+}
+.nd-subtitle{margin:8px 0 0;color:var(--muted)}
+.nd-nav-toggle{
+  display:none;
+  margin-top:10px;
+  border:1px solid rgba(41,245,255,.5);
+  background:rgba(41,245,255,.12);
+  color:var(--text);
+  border-radius:999px;
+  padding:7px 12px;
+}
+.nd-nav{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.nd-nav a{
+  color:var(--muted);
+  text-decoration:none;
+  padding:6px 10px;
+  border:1px solid rgba(41,245,255,.22);
+  border-radius:999px;
+  font-size:13px;
+}
+.nd-nav a:hover,.nd-nav a.active{
+  color:var(--text);
+  border-color:rgba(41,245,255,.72);
+  background:linear-gradient(120deg,rgba(41,245,255,.2),rgba(255,58,217,.16));
+  box-shadow:0 0 14px rgba(41,245,255,.2);
+}
+.nd-main{display:grid;gap:14px}
+.nd-grid-2{display:grid;gap:14px;grid-template-columns:repeat(2,minmax(0,1fr))}
+.nd-panel{
+  background:linear-gradient(180deg,rgba(21,33,56,.84),rgba(14,22,38,.86));
+  border:var(--border);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow);
+  padding:14px;
+}
+.nd-panel h2,.nd-panel h3{
+  margin:0 0 10px;
+  font-size:1rem;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color:var(--neon-cyan);
+}
+p{margin:0 0 10px;line-height:1.45}
+a{color:var(--neon-cyan)}
+a:hover{color:var(--text)}
+.nd-actions{display:flex;flex-wrap:wrap;gap:8px}
+.nd-btn,.nd-btn-ghost,.nd-btn-danger{
+  appearance:none;
+  border:1px solid transparent;
+  border-radius:10px;
+  padding:9px 13px;
+  text-decoration:none;
+  cursor:pointer;
+  font-weight:700;
+  letter-spacing:.03em;
+}
+.nd-btn{
+  background:linear-gradient(135deg,var(--neon-cyan),#00c1ff);
+  color:#04111a;
+  box-shadow:var(--glow);
+}
+.nd-btn-ghost{
+  background:rgba(41,245,255,.08);
+  border-color:rgba(41,245,255,.45);
+  color:var(--text);
+}
+.nd-btn-danger{
+  background:rgba(255,77,95,.2);
+  border-color:rgba(255,77,95,.7);
+  color:#ffeef1;
+}
+input,select,textarea{
+  width:100%;
+  border-radius:10px;
+  border:1px solid rgba(151,170,200,.35);
+  background:rgba(5,8,14,.85);
+  color:var(--text);
+  padding:9px 10px;
+}
+input[type='file']{padding:9px}
+input:focus,select:focus,textarea:focus,.nd-btn:focus,.nd-btn-ghost:focus,.nd-btn-danger:focus,.nd-nav-toggle:focus,a:focus{
+  outline:2px solid var(--neon-magenta);
+  outline-offset:2px;
+}
+.nd-help{color:var(--muted);font-size:13px}
+.nd-status{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  border-radius:999px;
+  padding:4px 10px;
+  font-size:12px;
+  font-weight:700;
+  letter-spacing:.04em;
+  border:1px solid rgba(151,170,200,.3);
+}
+.nd-ok{color:#cbffd4;border-color:rgba(154,255,58,.6);background:rgba(154,255,58,.15)}
+.nd-warn{color:#ffe2ad;border-color:rgba(255,191,58,.7);background:rgba(255,191,58,.16)}
+.nd-bad{color:#ffd0d5;border-color:rgba(255,77,95,.75);background:rgba(255,77,95,.16)}
+.nd-table{width:100%;border-collapse:collapse}
+.nd-table th,.nd-table td{
+  border-bottom:1px solid rgba(151,170,200,.18);
+  padding:8px 6px;
+  text-align:left;
+  vertical-align:top;
+}
+.nd-table th{color:var(--neon-cyan);font-size:.8rem;text-transform:uppercase;letter-spacing:.08em}
+.nd-inline{display:inline}
+.nd-pre{
+  background:rgba(3,5,10,.88);
+  border:1px solid rgba(151,170,200,.22);
+  border-radius:10px;
+  padding:10px;
+  overflow:auto;
+  max-height:65vh;
+  white-space:pre-wrap;
+  color:#dbffe5;
+}
+.nd-toast{
+  position:fixed;
+  right:14px;
+  bottom:14px;
+  z-index:9;
+  background:rgba(6,10,18,.92);
+  border:1px solid rgba(41,245,255,.5);
+  border-radius:10px;
+  padding:8px 11px;
+  box-shadow:var(--glow);
+  transform:translateY(12px);
+  opacity:0;
+  transition:all .2s ease;
+}
+.nd-toast.show{transform:translateY(0);opacity:1}
+.nd-toast.bad{border-color:rgba(255,77,95,.7)}
+@media (max-width:860px){
+  .nd-grid-2{grid-template-columns:1fr}
+  .nd-nav-toggle{display:inline-block}
+  .nd-nav{display:none}
+  body.nav-open .nd-nav{display:flex}
+}
+)CSS";
+}
+
+static String neonPageStart(const String& title,
+                            const String& subtitle,
+                            const String& activeNav,
+                            int refreshSeconds = 0,
+                            const String& toastMessage = "",
+                            const String& toastType = "ok") {
+  String html = "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
+  if (refreshSeconds > 0) {
+    html += "<meta http-equiv='refresh' content='";
+    html += String(refreshSeconds);
+    html += "'>";
+  }
+  html += "<title>";
+  html += escapeHtml(title);
+  html += "</title><style>";
+  html += neonBaseCss();
+  html += "</style></head><body";
+  if (!toastMessage.isEmpty()) {
+    html += " data-toast='";
+    html += escapeHtml(toastMessage);
+    html += "' data-toast-type='";
+    html += escapeHtml(toastType);
+    html += "'";
+  }
+  html += "><div class='nd-grid'></div><div class='nd-scan'></div><div class='nd-wrap'>";
+  html += "<header class='nd-topbar'><p class='nd-kicker'>NEONDRIVE // firmware web ops</p><h1>";
+  html += escapeHtml(title);
+  html += "</h1>";
+  if (!subtitle.isEmpty()) {
+    html += "<p class='nd-subtitle'>";
+    html += subtitle;
+    html += "</p>";
+  }
+  html += "<button class='nd-nav-toggle' type='button' aria-label='Toggle navigation' onclick='document.body.classList.toggle(\"nav-open\")'>Menu</button>";
+  html += "<nav class='nd-nav'>";
+  html += neonNavLink("/", "Home", activeNav);
+  html += neonNavLink("/android", "Android", activeNav);
+  html += neonNavLink("/sd", "SD Manager", activeNav);
+  html += neonNavLink("/wpasec", "WPA-SEC", activeNav);
+  html += neonNavLink("/yoink/log", "YOINK Log", activeNav);
+  html += "</nav></header><main class='nd-main'>";
+  return html;
+}
+
+static String neonPageEnd() {
+  return R"HTML(</main></div><script>
+(function(){
+  var d=document;
+  function toast(msg,type){
+    if(!msg){return;}
+    var el=d.createElement('div');
+    el.className='nd-toast'+(type==='bad'?' bad':'');
+    el.textContent=msg;
+    d.body.appendChild(el);
+    requestAnimationFrame(function(){el.classList.add('show');});
+    setTimeout(function(){el.classList.remove('show');setTimeout(function(){el.remove();},220);},2400);
+  }
+  d.querySelectorAll('form').forEach(function(f){
+    f.addEventListener('submit',function(){
+      var b=f.querySelector("button[type='submit']");
+      if(!b){return;}
+      if(!b.dataset.txt){b.dataset.txt=b.textContent;}
+      b.disabled=true;
+      b.textContent='Working...';
+    });
+  });
+  toast(d.body.getAttribute('data-toast'), d.body.getAttribute('data-toast-type'));
+})();
+</script></body></html>)HTML";
+}
+
 static void startWebServer() {
   if (webServerRunning) {
     Serial.println("[web] WebServer already running");
@@ -5743,74 +6458,55 @@ static void startWebServer() {
     bool hasApk = sdOk && SD.exists(androidApkPath);
     bool hasWpaResults = sdOk && SD.exists(wpasecResultsPath);
 
-    String appBlock =
-      "<h2>Android Companion</h2>"
-      "<p>Manage install page and APK from this device.</p>"
-      "<p><a href='/android'><button type='button'>Android Install Page</button></a></p>";
+    String appBlock = "<section class='nd-panel'><h2>Android Companion</h2>";
+    appBlock += "<p>Manage install page and APK directly from this unit.</p>";
+    appBlock += "<p><span class='nd-status ";
+    appBlock += hasApk ? "nd-ok'>APK PRESENT</span>" : "nd-warn'>APK MISSING</span>";
+    appBlock += "</p><div class='nd-actions'>";
+    appBlock += "<a class='nd-btn' href='/android'>Open Android Page</a>";
     if (hasApk) {
-      appBlock += "<p><a href='/android.apk'>Direct APK Download</a></p>";
+      appBlock += "<a class='nd-btn-ghost' href='/android.apk'>Direct APK Download</a>";
     } else {
-      appBlock += "<p>APK not found on SD: /CYDCompanion.apk (upload from install page).</p>";
+      appBlock += "<span class='nd-help'>Upload /CYDCompanion.apk from Android page.</span>";
     }
+    appBlock += "</div></section>";
 
-    String wpaBlock;
+    String wpaBlock = "<section class='nd-panel'><h2>WPA-SEC</h2>";
     if (cfg.wpasec_apikey.isEmpty()) {
-      wpaBlock =
-        "<h2>WPA-SEC</h2>"
-        "<p>API key is not configured on device.</p>"
-        "<p><a href='/wpasec/config'><button type='button'>Configure API Key</button></a></p>";
+      wpaBlock += "<p><span class='nd-status nd-bad'>API KEY NOT CONFIGURED</span></p>";
+      wpaBlock += "<div class='nd-actions'><a class='nd-btn-danger' href='/wpasec/config'>Configure API Key</a></div>";
     } else {
-      wpaBlock =
-        "<h2>WPA-SEC</h2>"
-        "<p>Push captures and pull cracked results.</p>"
-        "<p><a href='/wpasec'><button type='button'>WPA-SEC Console</button></a> "
-        "<a href='/wpasec/config'><button type='button'>Edit Config</button></a></p>";
-      if (hasWpaResults) {
-        wpaBlock += "<p><a href='/wpasec/results'>View Local Results</a></p>";
-      }
-      wpaBlock += "<p><a href='https://wpa-sec.stanev.org/' target='_blank'>Open WPA-SEC Portal</a></p>";
+      wpaBlock += "<p><span class='nd-status nd-ok'>API KEY CONFIGURED</span></p>";
+      wpaBlock += "<p>Push captures and pull cracked results.</p><div class='nd-actions'>";
+      wpaBlock += "<a class='nd-btn' href='/wpasec'>Open Console</a>";
+      wpaBlock += "<a class='nd-btn-ghost' href='/wpasec/config'>Edit Config</a>";
+      if (hasWpaResults) wpaBlock += "<a class='nd-btn-ghost' href='/wpasec/results'>View Local Results</a>";
+      wpaBlock += "</div><p><a href='https://wpa-sec.stanev.org/' target='_blank' rel='noopener noreferrer'>Open WPA-SEC Portal</a></p>";
     }
+    wpaBlock += "</section>";
 
-    String toolsBlock =
-      "<h2>Pentest Quick Links</h2>"
-      "<p><a href='/android'>Android Companion</a> | "
-      "<a href='/wpasec'>WPA-SEC Console</a></p>"
-      "<p><a href='/sd'>SD File Manager</a></p>"
-      "<p><a href='/android.apk'>Download APK</a> | "
-      "<a href='/wpasec/results/download'>Download WPA-SEC Results</a></p>";
+    String toolsBlock = "<section class='nd-panel'><h2>Pentest Quick Links</h2>";
+    toolsBlock += "<div class='nd-actions'>";
+    toolsBlock += "<a class='nd-btn-ghost' href='/android'>Android Companion</a>";
+    toolsBlock += "<a class='nd-btn-ghost' href='/wpasec'>WPA-SEC Console</a>";
+    toolsBlock += "<a class='nd-btn-ghost' href='/sd'>SD File Manager</a>";
+    toolsBlock += "<a class='nd-btn-ghost' href='/android.apk'>Download APK</a>";
+    toolsBlock += "<a class='nd-btn-ghost' href='/wpasec/results/download'>Download WPA-SEC Results</a>";
+    toolsBlock += "</div></section>";
 
-    String html = R"(<!DOCTYPE html>
-<html>
-<head>
-  <title>CYD OTA Update</title>
-  <style>
-    body { font-family: Arial; margin: 20px; background: #1a1a1a; color: #fff; }
-    h1 { color: #00ff00; }
-    h2 { color: #00d4ff; margin-top: 26px; }
-    form { margin: 20px 0; padding: 20px; background: #222; border-radius: 5px; }
-    input { padding: 8px; margin: 5px; }
-    button { padding: 10px 20px; background: #00ff00; color: #000; border: none; cursor: pointer; }
-    button:hover { background: #00cc00; }
-    .box { margin: 14px 0; padding: 14px; background: #222; border-radius: 6px; }
-    a { color: #79d7ff; }
-  </style>
-</head>
-<body>
-  <h1>CYD OTA Firmware Update</h1>
-  <p>Upload a new firmware binary to update the device.</p>
-  <form method='POST' action='/update' enctype='multipart/form-data'>
-    <input type='file' name='update' accept='.bin' required>
-    <button type='submit'>Update Firmware</button>
-  </form>
-</body>
-</html>)";
-    int insertPos = html.lastIndexOf("</body>");
-    if (insertPos < 0) insertPos = html.length();
-    html = html.substring(0, insertPos) +
-      "<div class='box'>" + appBlock + "</div>" +
-      "<div class='box'>" + wpaBlock + "</div>" +
-      "<div class='box'>" + toolsBlock + "</div>" +
-      html.substring(insertPos);
+    String html = neonPageStart("CYD OTA Firmware Update",
+                                "Upload firmware and access companion tooling.",
+                                "/");
+    html += "<section class='nd-panel'><h2>Firmware Upload</h2>";
+    html += "<p>Flash a new firmware binary package to this device.</p>";
+    html += "<form method='POST' action='/update' enctype='multipart/form-data'>";
+    html += "<input type='file' name='update' accept='.bin' required>";
+    html += "<p class='nd-help'>Only firmware .bin files generated for this hardware target.</p>";
+    html += "<div class='nd-actions'><button class='nd-btn' type='submit'>Update Firmware</button></div>";
+    html += "</form></section>";
+    html += "<section class='nd-grid-2'>" + appBlock + wpaBlock + "</section>";
+    html += toolsBlock;
+    html += neonPageEnd();
     webServer.send(200, "text/html", html);
   });
 
@@ -5952,46 +6648,36 @@ static void startWebServer() {
       }
     }
 
-    String html = R"(<!DOCTYPE html>
-<html>
-<head>
-  <title>CYD Companion APK</title>
-  <style>
-    body { font-family: Arial; margin: 20px; background: #1a1a1a; color: #fff; }
-    h1 { color: #00d4ff; }
-    .box { background: #222; border-radius: 6px; padding: 14px; }
-    button { padding: 10px 20px; background: #00ff00; color: #000; border: none; cursor: pointer; }
-    button:hover { background: #00cc00; }
-    a { color: #79d7ff; }
-  </style>
-</head>
-<body>
-  <h1>CYD Companion Android App</h1>
-  <div class='box'>
-)";
+    String html = neonPageStart("CYD Companion Android App",
+                                "Host and update CYDCompanion.apk from SD storage.",
+                                "/android");
+    html += "<section class='nd-panel'>";
     if (!sdOk) {
-      html += "<p><b>SD card not available.</b> You can still use this page.</p>";
-      html += "<p>Insert/mount SD to upload CYDCompanion.apk.</p>";
+      html += "<p><span class='nd-status nd-bad'>SD CARD NOT AVAILABLE</span></p>";
+      html += "<p>Insert or mount SD to upload CYDCompanion.apk.</p>";
     } else if (!hasApk) {
-      html += "<p><b>CYDCompanion.apk not found</b> on SD root.</p>";
+      html += "<p><span class='nd-status nd-warn'>APK NOT FOUND</span></p>";
+      html += "<p>Expected file: <code>/CYDCompanion.apk</code> in SD root.</p>";
       html += "<p>Upload an APK below (it will be saved as /CYDCompanion.apk).</p>";
     } else {
-      html += "<p>APK file: CYDCompanion.apk</p>";
+      html += "<p><span class='nd-status nd-ok'>APK READY</span></p>";
+      html += "<p>APK file: <code>CYDCompanion.apk</code></p>";
       html += "<p>Size: " + String(apkSize) + " bytes</p>";
-      html += "<p><a href='/android.apk'><button type='button'>Download APK</button></a></p>";
+      html += "<p><a class='nd-btn' href='/android.apk'>Download APK</a></p>";
     }
     html += "<form method='POST' action='/android/upload' enctype='multipart/form-data'>";
-    html += "<p>Upload new APK to SD as CYDCompanion.apk:</p>";
+    html += "<h3>Upload APK</h3><p>Upload new APK to SD as <code>CYDCompanion.apk</code>.</p>";
     if (sdOk) {
       html += "<input type='file' name='apk' accept='.apk,application/vnd.android.package-archive' required>";
-      html += "<button type='submit'>Upload APK</button>";
+      html += "<div class='nd-actions'><button class='nd-btn' type='submit'>Upload APK</button></div>";
     } else {
       html += "<p>Upload disabled until SD is available.</p>";
     }
     html += "</form>";
-    html += "<p><a href='/sd'>Open SD File Manager</a></p>";
-    html += "<p><a href='/'>Back to OTA page</a></p>";
-    html += "</div></body></html>";
+    html += "<div class='nd-actions'><a class='nd-btn-ghost' href='/sd'>Open SD File Manager</a>";
+    html += "<a class='nd-btn-ghost' href='/'>Back to OTA</a></div>";
+    html += "</section>";
+    html += neonPageEnd();
     webServer.send(200, "text/html", html);
   });
 
@@ -6004,9 +6690,12 @@ static void startWebServer() {
     if (androidApkUploadFile) androidApkUploadFile.close();
     bool hasApk = SD.exists(androidApkPath);
     String msg = hasApk ? "APK uploaded/updated on SD." : "APK upload failed.";
-    webServer.send(200, "text/html",
-      "<html><body style='font-family:Arial;background:#111;color:#fff;'>"
-      "<h2>" + msg + "</h2><p><a href='/android'>Back</a></p></body></html>");
+    String html = neonPageStart("Android Upload Result", "APK deployment to SD completed.", "/android");
+    html += "<section class='nd-panel'><h2>";
+    html += escapeHtml(msg);
+    html += "</h2><div class='nd-actions'><a class='nd-btn-ghost' href='/android'>Back to Android Page</a></div></section>";
+    html += neonPageEnd();
+    webServer.send(200, "text/html", html);
   }, [](){
     HTTPUpload& upload = webServer.upload();
     if (upload.status == UPLOAD_FILE_START) {
@@ -6059,9 +6748,11 @@ static void startWebServer() {
       return;
     }
     if (!sdOk) {
-      String html = "<html><body style='font-family:Arial;background:#111;color:#fff;'>";
-      html += "<h2>SD File Manager</h2><p>SD card not available.</p>";
-      html += "<p><a href='/'>Back</a></p></body></html>";
+      String html = neonPageStart("SD File Manager", "Browse and maintain SD content.", "/sd");
+      html += "<section class='nd-panel'><h2>SD Card Not Available</h2>";
+      html += "<p>Insert or remount SD storage, then refresh this page.</p>";
+      html += "<div class='nd-actions'><a class='nd-btn-ghost' href='/'>Back Home</a></div></section>";
+      html += neonPageEnd();
       webServer.send(503, "text/html", html);
       return;
     }
@@ -6077,33 +6768,23 @@ static void startWebServer() {
       return;
     }
 
-    String html = R"(<html><head><title>SD File Manager</title>
-<style>
-body{font-family:Arial;margin:20px;background:#1a1a1a;color:#fff}
-h1{color:#00d4ff}
-a{color:#79d7ff}
-table{width:100%;border-collapse:collapse;margin-top:12px}
-th,td{padding:8px;border-bottom:1px solid #333;text-align:left}
-button{padding:6px 10px;background:#00ff00;color:#000;border:none;cursor:pointer}
-button:hover{background:#00cc00}
-.danger{background:#ff4d4d;color:#fff}
-.box{background:#222;border-radius:6px;padding:12px;margin:10px 0}
-input[type='text']{width:100%;padding:6px}
-</style></head><body>)";
-    html += "<h1>SD File Manager</h1>";
-    html += "<div class='box'><p>Current path: <b>" + escapeHtml(path) + "</b></p>";
-    html += "<p><a href='/'>Home</a> | <a href='/android'>Android</a>";
+    String html = neonPageStart("SD File Manager",
+                                "Inspect, upload, download, and remove SD files.",
+                                "/sd");
+    html += "<section class='nd-panel'><p>Current path: <b>" + escapeHtml(path) + "</b></p>";
+    html += "<div class='nd-actions'><a class='nd-btn-ghost' href='/'>Home</a><a class='nd-btn-ghost' href='/android'>Android</a>";
     if (path != "/") {
-      html += " | <a href='/sd?path=" + urlEncodeSimple(pathParent(path)) + "'>Up</a>";
+      html += "<a class='nd-btn-ghost' href='/sd?path=" + urlEncodeSimple(pathParent(path)) + "'>Up</a>";
     }
-    html += "</p></div>";
+    html += "</div></section>";
 
-    html += "<div class='box'><h3>Upload File</h3>";
+    html += "<section class='nd-panel'><h3>Upload File</h3>";
     html += "<form method='POST' action='/sd/upload?dir=" + urlEncodeSimple(path) + "' enctype='multipart/form-data'>";
     html += "<input type='file' name='file' required> ";
-    html += "<button type='submit'>Upload</button></form></div>";
+    html += "<div class='nd-actions'><button class='nd-btn' type='submit'>Upload</button></div></form></section>";
 
-    html += "<table><tr><th>Name</th><th>Type</th><th>Size</th><th>Actions</th></tr>";
+    html += "<section class='nd-panel'><h3>Directory Entries</h3>";
+    html += "<table class='nd-table'><tr><th>Name</th><th>Type</th><th>Size</th><th>Actions</th></tr>";
     while (true) {
       File entry = dir.openNextFile();
       if (!entry) break;
@@ -6122,18 +6803,19 @@ input[type='text']{width:100%;padding:6px}
       html += isDir ? "<td>dir</td>" : "<td>file</td>";
       html += "<td>" + String(size) + "</td><td>";
       if (isDir) {
-        html += "<a href='/sd?path=" + urlEncodeSimple(fullPath) + "'><button type='button'>Open</button></a> ";
+        html += "<a class='nd-btn-ghost' href='/sd?path=" + urlEncodeSimple(fullPath) + "'>Open</a> ";
       } else {
-        html += "<a href='/sd/get?path=" + urlEncodeSimple(fullPath) + "'><button type='button'>View/Download</button></a> ";
+        html += "<a class='nd-btn-ghost' href='/sd/get?path=" + urlEncodeSimple(fullPath) + "'>View/Download</a> ";
       }
-      html += "<form style='display:inline' method='POST' action='/sd/delete' onsubmit='return confirm(\"Delete " + escapeHtml(baseName) + "?\")'>";
+      html += "<form class='nd-inline' method='POST' action='/sd/delete' onsubmit='return confirm(\"Delete " + escapeHtml(baseName) + "?\")'>";
       html += "<input type='hidden' name='path' value='" + escapeHtml(fullPath) + "'>";
       html += "<input type='hidden' name='back' value='" + escapeHtml(path) + "'>";
-      html += "<button class='danger' type='submit'>Delete</button></form>";
+      html += "<button class='nd-btn-danger' type='submit'>Delete</button></form>";
       html += "</td></tr>";
     }
     dir.close();
-    html += "</table></body></html>";
+    html += "</table></section>";
+    html += neonPageEnd();
     webServer.send(200, "text/html", html);
   });
 
@@ -6182,10 +6864,12 @@ input[type='text']{width:100%;padding:6px}
       return;
     }
     bool ok = removeSdPathRecursive(path);
-    String html = "<html><body style='font-family:Arial;background:#111;color:#fff;'>";
-    html += ok ? "<h2>Deleted: " : "<h2>Delete failed: ";
+    String html = neonPageStart("SD Delete Result", "Delete operation completed.", "/sd");
+    html += "<section class='nd-panel'><h2>";
+    html += ok ? "Deleted: " : "Delete failed: ";
     html += escapeHtml(path) + "</h2>";
-    html += "<p><a href='/sd?path=" + urlEncodeSimple(back) + "'>Back to SD File Manager</a></p></body></html>";
+    html += "<div class='nd-actions'><a class='nd-btn-ghost' href='/sd?path=" + urlEncodeSimple(back) + "'>Back to SD File Manager</a></div></section>";
+    html += neonPageEnd();
     webServer.send(ok ? 200 : 500, "text/html", html);
   });
 
@@ -6197,13 +6881,15 @@ input[type='text']{width:100%;padding:6px}
     }
     String backDir = normalizeSdWebPath(webServer.arg("dir"));
     if (backDir.isEmpty()) backDir = "/";
-    String html = "<html><body style='font-family:Arial;background:#111;color:#fff;'>";
+    String html = neonPageStart("SD Upload Result", "Upload operation completed.", "/sd");
+    html += "<section class='nd-panel'>";
     if (sdUploadOk) {
       html += "<h2>Upload complete</h2>";
     } else {
       html += "<h2>Upload failed</h2><p>Check file/path and retry.</p>";
     }
-    html += "<p><a href='/sd?path=" + urlEncodeSimple(backDir) + "'>Back to SD File Manager</a></p></body></html>";
+    html += "<div class='nd-actions'><a class='nd-btn-ghost' href='/sd?path=" + urlEncodeSimple(backDir) + "'>Back to SD File Manager</a></div></section>";
+    html += neonPageEnd();
     webServer.send(sdUploadOk ? 200 : 500, "text/html", html);
   }, [](){
     HTTPUpload& upload = webServer.upload();
@@ -6250,32 +6936,20 @@ input[type='text']{width:100%;padding:6px}
     Serial.println("[web] GET /wpasec");
     bool sdOk = sdReady || mountSdCard(false);
     bool hasResults = sdOk && SD.exists(wpasecResultsPath);
-    String html = R"(<!DOCTYPE html>
-<html>
-<head>
-  <title>WPA-SEC Console</title>
-  <style>
-    body { font-family: Arial; margin: 20px; background: #1a1a1a; color: #fff; }
-    h1 { color: #00d4ff; }
-    .box { background: #222; border-radius: 6px; padding: 14px; margin: 12px 0; }
-    button { padding: 10px 20px; background: #00ff00; color: #000; border: none; cursor: pointer; }
-    button:hover { background: #00cc00; }
-    a { color: #79d7ff; }
-  </style>
-</head>
-<body>
-  <h1>WPA-SEC Console</h1>
-)";
-    html += "<div class='box'><p>API Key: ";
-    html += cfg.wpasec_apikey.isEmpty() ? "NOT CONFIGURED" : "CONFIGURED";
+    String html = neonPageStart("WPA-SEC Console",
+                                "Sync captured handshakes and pull cracked results.",
+                                "/wpasec");
+    html += "<section class='nd-panel'><p>API Key: ";
+    html += cfg.wpasec_apikey.isEmpty() ? "<span class='nd-status nd-bad'>NOT CONFIGURED</span>" : "<span class='nd-status nd-ok'>CONFIGURED</span>";
     html += "</p>";
     html += "<p>Captured: " + String(capturedHandshakes) + " | Cracked: " + String(crackedNetworks) + "</p>";
-    html += "<p><a href='/wpasec/sync'><button type='button'>Sync Captures to WPA-SEC</button></a></p>";
-    html += "<p><a href='/wpasec/download'><button type='button'>Download Latest Results</button></a></p>";
+    html += "<div class='nd-actions'><a class='nd-btn' href='/wpasec/sync'>Sync Captures to WPA-SEC</a>";
+    html += "<a class='nd-btn-ghost' href='/wpasec/download'>Download Latest Results</a></div>";
     html += hasResults ? "<p><a href='/wpasec/results'>View Results</a> | <a href='/wpasec/results/download'>Download Results File</a></p>" : "<p>No local results file yet.</p>";
-    html += "<p>Status: " + wpasecSyncStatus + "</p></div>";
-    html += "<p><a href='https://wpa-sec.stanev.org/' target='_blank'>Open WPA-SEC Website</a></p>";
-    html += "<p><a href='/'>Back to Home</a></p></body></html>";
+    html += "<p>Status: " + wpasecSyncStatus + "</p></section>";
+    html += "<p><a href='https://wpa-sec.stanev.org/' target='_blank' rel='noopener noreferrer'>Open WPA-SEC Website</a></p>";
+    html += "<div class='nd-actions'><a class='nd-btn-ghost' href='/wpasec/config'>Configure API Key</a><a class='nd-btn-ghost' href='/'>Back Home</a></div></section>";
+    html += neonPageEnd();
     webServer.send(200, "text/html", html);
   });
 
@@ -6443,34 +7117,26 @@ input[type='text']{width:100%;padding:6px}
 
   // HTML: YOINK session log file (read from SD)
   webServer.on("/yoink/log", HTTP_GET, [](){
-    // Serve the session log as a styled HTML page with auto-refresh
-    String html = R"(<html><head><meta charset='utf-8'><title>YOINK Log</title>
-<meta http-equiv='refresh' content='5'>
-<style>
-body{background:#0a0a1a;color:#0f0;font-family:'Courier New',monospace;font-size:12px;margin:16px}
-h1{color:#0ff;font-size:18px}
-.stats{color:#0ff;margin:8px 0}
-pre{background:#111;border:1px solid #333;padding:12px;overflow-x:auto;max-height:70vh;overflow-y:auto;white-space:pre-wrap}
-a{color:#f0f;text-decoration:none}
-a:hover{text-decoration:underline}
-.hdr{display:flex;justify-content:space-between;align-items:center}
-</style></head><body>
-<div class='hdr'><h1>YOINK // Session Log</h1><a href='/'>Home</a></div>)";
-
-    html += "<div class='stats'>";
+    // Serve the session log with auto-refresh.
+    String html = neonPageStart("YOINK Session Log",
+                                "Live telemetry stream and captured handshake files (refresh 5s).",
+                                "/yoink/log",
+                                5);
+    html += "<section class='nd-panel'><div class='nd-actions'><a class='nd-btn-ghost' href='/'>Home</a></div>";
+    html += "<p>";
     html += "State: " + String(YoinkEngine::getStateStr());
     html += " | Nets: " + String(YoinkEngine::getNetworkCount());
     html += " | HS: " + String(YoinkEngine::getHandshakeCount());
     html += " | PMKID: " + String(YoinkEngine::getPmkidCount());
     html += " | Pkts: " + String((unsigned long)YoinkEngine::getPacketCount());
     html += " | Deauths: " + String((unsigned long)YoinkEngine::getDeauthCount());
-    html += "</div>";
+    html += "</p>";
 
     bool sdOk = sdReady || mountSdCard(false);
     if (sdOk && SD.exists("/yoink_session.log")) {
       File f = SD.open("/yoink_session.log", FILE_READ);
       if (f) {
-        html += "<pre>";
+        html += "<pre class='nd-pre'>";
         while (f.available()) {
           char c = f.read();
           if (c == '<') html += "&lt;";
@@ -6485,7 +7151,7 @@ a:hover{text-decoration:underline}
       }
     } else {
       // Fallback: show live log ring
-      html += "<pre>";
+      html += "<pre class='nd-pre'>";
       uint8_t logCount = YoinkEngine::getLogCount();
       for (uint8_t i = 0; i < logCount; i++) {
         const YoinkLogEntry* e = YoinkEngine::getLogEntry(i);
@@ -6501,9 +7167,10 @@ a:hover{text-decoration:underline}
       }
       html += "</pre>";
     }
+    html += "</section>";
 
     // List captured files from /captures/<SSID>/Handshakes/
-    html += "<h2 style='color:#0ff'>Captured Files</h2>";
+    html += "<section class='nd-panel'><h2>Captured Files</h2>";
     if (sdOk && SD.exists("/captures")) {
       File capsDir = SD.open("/captures");
       if (capsDir && capsDir.isDirectory()) {
@@ -6544,8 +7211,9 @@ a:hover{text-decoration:underline}
         html += "</ul>";
       }
     }
+    html += "</section>";
 
-    html += "</body></html>";
+    html += neonPageEnd();
     webServer.send(200, "text/html", html);
   });
 
@@ -6584,51 +7252,56 @@ a:hover{text-decoration:underline}
 
   // WPA-SEC config page
   webServer.on("/wpasec/config", HTTP_GET, [](){
-    const char* html = 
-      "<html><head><title>WPA-SEC Configuration</title>"
-      "<style>"
-      "body { background: #0a0a0a; color: #00ff00; font-family: monospace; padding: 20px; }"
-      ".container { max-width: 600px; margin: 0 auto; }"
-      "h1 { color: #00ffff; border-bottom: 2px solid #ff00ff; padding-bottom: 10px; }"
-      ".box { border: 1px solid #00ff00; padding: 15px; margin: 15px 0; background: #1a1a1a; }"
-      "input { width: 100%; padding: 8px; margin: 5px 0; background: #222; color: #00ff00; border: 1px solid #00ff00; }"
-      "button { background: #ff00ff; color: #000; padding: 10px 20px; border: none; cursor: pointer; margin: 5px 0; }"
-      "button:hover { background: #00ffff; }"
-      ".status { color: #ffff00; margin: 10px 0; }"
-      ".success { color: #00ff00; }"
-      ".error { color: #ff0000; }"
-      "</style></head><body>"
-      "<div class='container'>"
-      "<h1>WPA-SEC Configuration</h1>"
-      "<div class='box'>"
-      "<h2>API Key Management</h2>"
-      "<p>Enter your WPA-SEC API key from <a href='https://wpa-sec.stanev.org/api.php' target='_blank'>https://wpa-sec.stanev.org/api.php</a></p>"
-      "<input type='text' id='apikey' placeholder='Enter 32-character hex API key' maxlength='32'><br>"
-      "<button onclick='saveApiKey()'>Save API Key</button>"
-      "<p class='status' id='status'></p>"
-      "</div>"
-      "<div class='box'>"
-      "<h2>Upload Handshakes to WPA-SEC</h2>"
-      "<p>Upload captured handshakes from <b>/captures/&lt;SSID&gt;/Handshakes/</b> (all SSIDs, recursive)</p>"
-      "<button onclick='startSync()'>Sync & Upload to WPA-SEC</button>"
-      "<p class='status' id='syncStatus'></p>"
-      "</div>"
-      "<div class='box'>"
-      "<h2>View Results</h2>"
-      "<a href='/wpasec/results'><button>View Results</button></a> "
-      "<a href='/wpasec/results/download'><button>Download Results</button></a>"
-      "</div>"
-      "</div>"
-      "<script>"
-      "function saveApiKey() { const apikey = document.getElementById('apikey').value; const status = document.getElementById('status'); "
-      "if (!apikey || apikey.length !== 32) { status.className = 'error'; status.textContent = 'ERROR: API key must be exactly 32 characters'; return; } "
-      "status.textContent = 'Saving...'; fetch('/api/config/wpasec', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'apikey=' + encodeURIComponent(apikey) }) "
-      ".then(r => r.json()).then(data => { if (data.ok) { status.className = 'success'; status.textContent = 'SUCCESS: API key saved'; } else { status.className = 'error'; status.textContent = 'ERROR: ' + data.error; } }) "
-      ".catch(e => { status.className = 'error'; status.textContent = 'ERROR: ' + e.message; }); } "
-      "function startSync() { const status = document.getElementById('syncStatus'); status.textContent = 'Starting sync...'; "
-      "fetch('/wpasec/sync').then(r => r.text()).then(() => { status.className = 'success'; status.textContent = 'Sync started! Check console for progress.'; setTimeout(() => location.reload(), 2000); }) "
-      ".catch(e => { status.className = 'error'; status.textContent = 'ERROR: ' + e.message; }); } "
-      "</script></body></html>";
+    String html = neonPageStart("WPA-SEC Configuration",
+                                "Manage API key and upload workflow.",
+                                "/wpasec");
+    html += "<section class='nd-grid-2'>";
+    html += "<article class='nd-panel'><h2>API Key Management</h2>";
+    html += "<p>Enter your WPA-SEC API key from <a href='https://wpa-sec.stanev.org/api.php' target='_blank' rel='noopener noreferrer'>wpa-sec.stanev.org/api.php</a>.</p>";
+    html += "<input type='text' id='apikey' placeholder='Enter 32-character hex API key' maxlength='32'>";
+    html += "<div class='nd-actions'><button class='nd-btn' type='button' onclick='saveApiKey()'>Save API Key</button></div>";
+    html += "<p id='status' class='nd-help'></p></article>";
+    html += "<article class='nd-panel'><h2>Upload Handshakes</h2>";
+    html += "<p>Upload captured handshakes from <b>/captures/&lt;SSID&gt;/Handshakes/</b> (all SSIDs, recursive).</p>";
+    html += "<div class='nd-actions'><button class='nd-btn' type='button' onclick='startSync()'>Sync & Upload to WPA-SEC</button></div>";
+    html += "<p id='syncStatus' class='nd-help'></p></article>";
+    html += "</section>";
+    html += "<section class='nd-panel'><h2>Results</h2><div class='nd-actions'>";
+    html += "<a class='nd-btn-ghost' href='/wpasec/results'>View Results</a>";
+    html += "<a class='nd-btn-ghost' href='/wpasec/results/download'>Download Results</a>";
+    html += "</div></section>";
+    html += R"JS(<script>
+function setStatus(id, msg, level){
+  const el = document.getElementById(id);
+  if(!el) return;
+  el.textContent = msg;
+  el.className = level === 'ok' ? 'nd-status nd-ok' : (level === 'bad' ? 'nd-status nd-bad' : 'nd-help');
+}
+function saveApiKey() {
+  const apikey = document.getElementById('apikey').value.trim();
+  if (!apikey || apikey.length !== 32) {
+    setStatus('status', 'ERROR: API key must be exactly 32 characters', 'bad');
+    return;
+  }
+  setStatus('status', 'Saving...', 'info');
+  fetch('/api/config/wpasec', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'apikey=' + encodeURIComponent(apikey)
+  }).then(r => r.json()).then(data => {
+    if (data.ok) setStatus('status', 'SUCCESS: API key saved', 'ok');
+    else setStatus('status', 'ERROR: ' + (data.error || 'unknown'), 'bad');
+  }).catch(e => setStatus('status', 'ERROR: ' + e.message, 'bad'));
+}
+function startSync() {
+  setStatus('syncStatus', 'Starting sync...', 'info');
+  fetch('/wpasec/sync').then(() => {
+    setStatus('syncStatus', 'Sync started! Refreshing status...', 'ok');
+    setTimeout(() => location.reload(), 1500);
+  }).catch(e => setStatus('syncStatus', 'ERROR: ' + e.message, 'bad'));
+}
+</script>)JS";
+    html += neonPageEnd();
     webServer.send(200, "text/html", html);
   });
 
@@ -6913,11 +7586,8 @@ static void stopWebServer() {
 }
 
 static inline int wifiConnectStatusLineY() {
-  const int controlsY = hypercubeReservedBottomY + 12;
-  const int rowH = 30;
-  const int maxRows = 3;
-  const int bottomY = controlsY + (maxRows * rowH) + 6;
-  return bottomY + 22;
+  if (wifiConnectStatusY > 0) return wifiConnectStatusY;
+  return tft.height() - 48;
 }
 
 static void drawWifiConnect() {
@@ -6927,136 +7597,139 @@ static void drawWifiConnect() {
 
   const int w = tft.width();
   const int h = tft.height();
-  // Selected network summary under title (left side of header area).
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  String selectedHeader = "Selected: (none)";
-  if (wifiConnectSelectedIdx >= 0 && wifiConnectSelectedIdx < apCount) {
-    const ApRecord& a = aps[wifiConnectSelectedIdx];
-    selectedHeader = "Selected: " + (a.ssid.isEmpty() ? String("(hidden)") : a.ssid);
-  }
-  const int selectedHeaderMaxW = hypercubeBoxX - 12;
-  if (selectedHeaderMaxW > 20) {
-    while (selectedHeader.length() > 4 && tft.textWidth(selectedHeader) > selectedHeaderMaxW) {
-      selectedHeader.remove(selectedHeader.length() - 1);
-    }
-    if (selectedHeader.length() > 4 && tft.textWidth(selectedHeader) > selectedHeaderMaxW) {
-      selectedHeader = "Selected: ...";
-    }
-  }
-  tft.drawString(selectedHeader, 8, 34);
+  const bool compact = (h <= 180);
+  const int wifiStatus = WiFi.status();
 
-  // Left control rail and list are moved down to open breathing room below header.
-  const int controlsX = 10;
-  const int controlsY = hypercubeReservedBottomY + 12;
-  const int controlsW = 66;
-  const int controlsH = 24;
-  const int controlsGap = 8;
+#if defined(NEONDRIVE_TARGET_CYD)
+  // CYD hard-locked geometry for the WiFi Connect screen.
+  const int btnGap = 6;
+  const int btnH = 30;
+  const int btnY = h - 36;
+  const int btnX0 = 8;
+  const int controlsW = max(236, uiRightLimitForBand(btnY, btnH) - 8);
+  const int btnW = (controlsW - (btnGap * 3)) / 4;
+  const int selectedY = 24;
+  const int statusY = 36;
+  const int hintY = 48;
+  const int statusLineY = btnY - 14;
+  wifiConnectStatusY = statusLineY;
+  const int listTopY = 62;
+  const int listBottomY = statusLineY - 4;
+  const int rowH = max(18, (listBottomY - listTopY) / WIFI_CONNECT_VISIBLE_ROWS);
+#else
+  const int btnGap = compact ? 4 : 6;
+  const int btnH = compact ? 24 : 30;
+  const int btnY = h - (compact ? 30 : 36);
+  const int btnX0 = 8;
+  const int controlsW = max(compact ? 208 : 236, uiRightLimitForBand(btnY, btnH) - 8);
+  const int btnW = max(48, (controlsW - (btnGap * 3)) / 4);
+  const int selectedY = compact ? (uiHeaderBandH() + 2) : 24;
+  const int statusY = selectedY + 12;
+  const int hintY = statusY + 12;
+  const int statusLineY = btnY - 14;
+  wifiConnectStatusY = statusLineY;
+  int listTopY = hintY + 14;
+  int listBottomY = statusLineY - 4;
+  int rowH = clampi((listBottomY - listTopY) / WIFI_CONNECT_VISIBLE_ROWS, compact ? 16 : 20, compact ? 24 : 30);
+  if ((rowH * WIFI_CONNECT_VISIBLE_ROWS) > (listBottomY - listTopY)) {
+    rowH = max(14, (listBottomY - listTopY) / WIFI_CONNECT_VISIBLE_ROWS);
+  }
+#endif
 
-  btnWifiConnectBack = {controlsX, controlsY, controlsW, controlsH, "Back"};
-  btnWifiConnectScan = {controlsX, controlsY + (controlsH + controlsGap), controlsW, controlsH, "Scan"};
-  btnWifiConnectSubmit = {controlsX, controlsY + ((controlsH + controlsGap) * 2), controlsW, controlsH, "Connect"};
-  btnWifiConnectDisconnect = {controlsX, controlsY + ((controlsH + controlsGap) * 3), controlsW, controlsH, "Disc"};
+  btnWifiConnectBack = {btnX0 + (btnW + btnGap) * 0, btnY, btnW, btnH, "Back"};
+  btnWifiConnectScan = {btnX0 + (btnW + btnGap) * 1, btnY, btnW, btnH, "Scan"};
+  btnWifiConnectSubmit = {btnX0 + (btnW + btnGap) * 2, btnY, btnW, btnH, "Connect"};
+  btnWifiConnectDisconnect = {btnX0 + (btnW + btnGap) * 3, btnY, btnW, btnH, "Disc"};
+
+  const int scrollBtn = clampi(hypercubeBoxW, compact ? 18 : 22, compact ? 24 : 30);
+  int scrollTopY = uiHypercubeSafeBottom() + 3;
+  const int scrollGap = 6;
+  if (scrollTopY + (scrollBtn * 2) + scrollGap > btnY - 6) {
+    scrollTopY = btnY - 6 - ((scrollBtn * 2) + scrollGap);
+  }
+  const int scrollX = hypercubeBoxX + ((hypercubeBoxW - scrollBtn) / 2);
+  btnWifiConnectUp = {scrollX, scrollTopY, scrollBtn, scrollBtn, "^"};
+  btnWifiConnectDown = {scrollX, scrollTopY + scrollBtn + scrollGap, scrollBtn, scrollBtn, "v"};
+
   drawButton(btnWifiConnectBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
   drawButton(btnWifiConnectScan, TFT_DARKCYAN, TFT_MAGENTA, TFT_WHITE);
   drawButton(btnWifiConnectSubmit, TFT_DARKGREEN, TFT_MAGENTA, TFT_WHITE);
-  int wifiStatus = WiFi.status();
   drawButton(btnWifiConnectDisconnect, wifiStatus == WL_CONNECTED ? TFT_MAROON : TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
-
-  const int listX = controlsX + controlsW + 10;
-  const int listTopY = controlsY;
-  const int scrollX = w - 52;
-  const int listW = scrollX - listX - 8;
-
-  // Right scroll buttons
-  btnWifiConnectUp   = {scrollX, listTopY, 42, 34, "^"};
-  btnWifiConnectDown = {scrollX, listTopY + 38, 42, 34, "v"};
   drawButton(btnWifiConnectUp, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
   drawButton(btnWifiConnectDown, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
 
-  // Status line
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  char st[80];
-  snprintf(st, sizeof(st), "Networks: %d  (tap to select)", apCount);
-  tft.drawString(st, listX, listTopY - 12);
+  const int listX = 8;
 
-  // AP list area - 3 visible rows
-  int wifiConnectListTopY = listTopY;
-  int wifiConnectListBottomY = h - 50;
-  int wifiConnectRowH = 30;
-  const int maxRows = 3;
+  const int listRight = uiRightLimitForBand(listTopY, rowH - 2);
+  const int listW = max(120, listRight - listX);
 
-  for (int r = 0; r < maxRows; r++) {
-    int idx = wifiConnectScroll + r;
-    int y = wifiConnectListTopY + r * wifiConnectRowH;
-    bool sel = (idx == wifiConnectSelectedIdx);
-    
-    if (idx < apCount) {
-      // Draw AP row
-      const ApRecord& a = aps[idx];
-      
-      uint16_t bgColor = sel ? TFT_DARKGREEN : TFT_BLACK;
-      uint16_t borderColor = sel ? TFT_MAGENTA : TFT_DARKGREY;
-      
-      tft.fillRect(listX, y, listW, wifiConnectRowH - 2, bgColor);
-      tft.drawRect(listX, y, listW, wifiConnectRowH - 2, borderColor);
-      
-      tft.setTextDatum(TL_DATUM);
-      tft.setTextSize(1);
-      tft.setTextColor(sel ? TFT_WHITE : TFT_CYAN, bgColor);
-      
-      char buf[80];
-      snprintf(buf, sizeof(buf), "%s | CH%d | %s | %ddBm",
-               a.ssid.isEmpty() ? "(hidden)" : a.ssid.c_str(),
-               a.channel,
-               authToStr(a.auth),
-               a.rssi);
-      tft.drawString(buf, listX + 2, y + 8);
-      
-      btnWifiConnectList[r] = {listX, y, listW, wifiConnectRowH - 2};
-    } else {
-      // Blank row
-      tft.fillRect(listX, y, listW, wifiConnectRowH - 2, TFT_BLACK);
-      tft.drawRect(listX, y, listW, wifiConnectRowH - 2, TFT_DARKGREY);
+  auto trimToWidth = [&](String s, int maxW) -> String {
+    bool trimmed = false;
+    while (s.length() > 4 && tft.textWidth(s) > maxW) {
+      s.remove(s.length() - 1);
+      trimmed = true;
     }
-  }
+    if (trimmed && s.length() > 3) s += "...";
+    while (s.length() > 4 && tft.textWidth(s) > maxW) {
+      s.remove(s.length() - 1);
+    }
+    return s;
+  };
 
-  // Bottom section: Selected AP info and status
-  int bottomY = wifiConnectListTopY + (maxRows * wifiConnectRowH) + 6;
-  tft.fillRect(0, bottomY, w, h - bottomY, TFT_BLACK);
-  const int statusY = wifiConnectStatusLineY();
-  
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  
+  String selectedLine = "Selected: (none)";
   if (wifiConnectSelectedIdx >= 0 && wifiConnectSelectedIdx < apCount) {
     const ApRecord& a = aps[wifiConnectSelectedIdx];
-    char buf[96];
-    snprintf(buf, sizeof(buf), "Selected: %s | CH %d | %s | %ddBm",
-             a.ssid.isEmpty() ? "(hidden)" : a.ssid.c_str(),
-             a.channel,
-             authToStr(a.auth),
-             a.rssi);
-    tft.drawString(buf, 8, bottomY + 6);
-  } else {
-    tft.drawString("Selected: (none)", 8, bottomY + 6);
+    selectedLine = "Selected: " + (a.ssid.isEmpty() ? String("(hidden)") : a.ssid) +
+                   " | CH " + String(a.channel) + " | " + String(a.rssi) + "dBm";
   }
+  selectedLine = trimToWidth(selectedLine, uiRightLimitForBand(selectedY, 14) - 8);
+  tft.drawString(selectedLine, listX, selectedY);
 
-  // WiFi connection status
-  tft.setTextColor(wifiConnectInProgress ? TFT_YELLOW : 
-                   (wifiStatus == WL_CONNECTED) ? TFT_GREEN : TFT_CYAN,
-                   TFT_BLACK);
-  
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  if (wifiConnectScanActive) tft.drawString("Scanning...", listX, statusY);
+  else tft.drawString("APs: " + String(apCount), listX, statusY);
+
+  if (wifiConnectScanActive) tft.drawString("Please wait...", listX, hintY);
+  else tft.drawString("Tap row to select network", listX, hintY);
+
+  for (int r = 0; r < WIFI_CONNECT_VISIBLE_ROWS; r++) {
+    const int idx = wifiConnectScroll + r;
+    const int y = listTopY + (r * rowH);
+    const bool sel = (idx == wifiConnectSelectedIdx);
+    btnWifiConnectList[r] = {listX, y, listW, rowH - 2};
+
+    if (idx < apCount) {
+      const ApRecord& a = aps[idx];
+      const uint16_t bgColor = sel ? TFT_DARKGREEN : TFT_BLACK;
+      const uint16_t borderColor = sel ? TFT_MAGENTA : TFT_DARKGREY;
+      tft.fillRect(listX, y, listW, rowH - 2, bgColor);
+      tft.drawRect(listX, y, listW, rowH - 2, borderColor);
+
+      tft.setTextColor(sel ? TFT_WHITE : TFT_CYAN, bgColor);
+      const int textY = y + ((rowH <= 18) ? 4 : ((rowH - 10) / 2));
+      String rowText = (a.ssid.isEmpty() ? String("(hidden)") : a.ssid) +
+                       " | CH" + String(a.channel) + " | " + authToStr(a.auth) +
+                       " | " + String(a.rssi) + "dBm";
+      rowText = trimToWidth(rowText, listW - 6);
+      tft.drawString(rowText, listX + 2, textY);
+    } else {
+      tft.fillRect(listX, y, listW, rowH - 2, TFT_BLACK);
+      tft.drawRect(listX, y, listW, rowH - 2, TFT_DARKGREY);
+    }
+  }
+  tft.fillRect(0, statusLineY - 2, w, 16, TFT_BLACK);
   if (wifiStatus == WL_CONNECTED) {
-    tft.drawString("Status: Connected - " + WiFi.localIP().toString(), 8, statusY);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString("Status: Connected  " + WiFi.localIP().toString(), listX, statusLineY);
   } else if (wifiConnectInProgress) {
-    tft.drawString("Status: Connecting...", 8, statusY);
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.drawString("Status: Connecting...", listX, statusLineY);
   } else {
-    tft.drawString("Status: Not connected", 8, statusY);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.drawString("Status: " + wifiConnectStatus, listX, statusLineY);
   }
 
   if (wifiConnectShowPasswordModal) {
@@ -7227,8 +7900,6 @@ static void drawWebserver() {
   int wifiStatus = WiFi.status();
   uint8_t apClients = WiFi.softAPgetStationNum();
   const int gap = 6;
-  const int leftX = content.x;
-  const int leftW = max(120, hypercubeBoxX - content.x - 6);
 
   // Hard bands: top status, middle detail, service row, bottom control row.
   // This prevents text from ever drawing over buttons.
@@ -7238,6 +7909,8 @@ static void drawWebserver() {
   // Title text is drawn near y=8; keep status box top border ~10px below that title band.
   const int topStatusY = 34;
   const int topStatusH = 60;  // Uses the empty area under "Webserver & AP".
+  const int leftX = content.x;
+  const int leftW = max(120, uiRightLimitForBand(topStatusY, topStatusH) - content.x);
   const int detailsY = topStatusY + topStatusH + 4;
   const int detailsH = max(24, serviceY - detailsY - 4);
 
@@ -7304,7 +7977,7 @@ static void drawWebserver() {
   tft.drawString(syncState, leftX + 4, rowY);
 
   // Right-side utility panel (uses free space marked in photo).
-  const int rightX = hypercubeBoxX + 2;
+  const int rightX = uiHypercubeSafeRight();
   const int rightW = max(48, (content.x + content.w) - rightX);
   const int rightY = topStatusY + topStatusH + 4;
   const int rightH = max(20, serviceY - rightY - 4);
@@ -7413,6 +8086,45 @@ static void monitorPushLine(uint16_t color, const char* fmt, ...) {
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
 
+  // Compact verbose mode tags so more payload text is visible in live console.
+  auto compactConsoleTag = [](char* s) {
+    if (!s || s[0] == '\0') return;
+    if (strncmp(s, "[YOINK]", 7) == 0) {
+      memmove(s + 3, s + 7, strlen(s + 7) + 1);
+      memcpy(s, "[Y]", 3);
+      return;
+    }
+    if (strncmp(s, "[RAW]", 5) == 0) {
+      memmove(s + 3, s + 5, strlen(s + 5) + 1);
+      memcpy(s, "[R]", 3);
+      return;
+    }
+    if (strncmp(s, "[JAMMIT]", 8) == 0) {
+      memmove(s + 3, s + 8, strlen(s + 8) + 1);
+      memcpy(s, "[J]", 3);
+      return;
+    }
+    if (strncmp(s, "YOINK ", 6) == 0) {
+      memmove(s + 4, s + 6, strlen(s + 6) + 1);
+      memcpy(s, "[Y]", 3);
+      s[3] = ' ';
+      return;
+    }
+    if (strncmp(s, "RAW ", 4) == 0) {
+      memmove(s + 4, s + 4, strlen(s + 4) + 1);
+      memcpy(s, "[R]", 3);
+      s[3] = ' ';
+      return;
+    }
+    if (strncmp(s, "JAMMIT ", 7) == 0) {
+      memmove(s + 4, s + 7, strlen(s + 7) + 1);
+      memcpy(s, "[J]", 3);
+      s[3] = ' ';
+      return;
+    }
+  };
+  compactConsoleTag(buf);
+
   if (monitorLineCount < MONITOR_MAX_LINES) {
     strncpy(monitorLines[monitorLineCount].text, buf, sizeof(monitorLines[monitorLineCount].text) - 1);
     monitorLines[monitorLineCount].text[sizeof(monitorLines[monitorLineCount].text) - 1] = '\0';
@@ -7438,6 +8150,12 @@ static void monitorUpdateLine(int lineIdx, uint16_t color, const char* fmt, ...)
   va_start(ap, fmt);
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
+
+  // Keep in-place raw/telemetry updates short too.
+  if (strncmp(buf, "[RAW]", 5) == 0) {
+    memmove(buf + 3, buf + 5, strlen(buf + 5) + 1);
+    memcpy(buf, "[R]", 3);
+  }
   
   strncpy(monitorLines[lineIdx].text, buf, sizeof(monitorLines[lineIdx].text) - 1);
   monitorLines[lineIdx].text[sizeof(monitorLines[lineIdx].text) - 1] = '\0';
@@ -7624,17 +8342,32 @@ static void drawMonitor() {
   const int h = tft.height();
   const UiRect content = computeContentRect();
   const UiRect bottom = computeBottomBarRect();
-  const int boxX = 8;
-  const int boxY = content.y + 40;
-  const int boxW = w - 16;
-  const int boxH = bottom.y - boxY - 6;
+  const int panelX = content.x;
+  const int panelRight = max(content.x + 120, min(w - 5, uiHypercubeSafeLeft() - 1));
+  const int panelW = max(120, panelRight - panelX);
+  const int backW = 74;
+  const int ctlH = UI_BUTTON_H;
+  const int ctlGap = 4;
+  int ctlX = hypercubeBoxX + ((hypercubeBoxW - backW) / 2);
+  ctlX = clampi(ctlX, 5, w - 5 - backW);
+  const int backY = bottom.y;
+  const int filesY = backY - (ctlH + ctlGap);
+  const int liveY = filesY - (ctlH + ctlGap);
+  const int statusY = content.y + 14;
+  const int boxX = panelX;
+  const int boxY = statusY + 16;
+  const int boxW = panelW;
+  const int boxBottom = h - 10;
+  const int boxH = max(24, boxBottom - boxY);
+  const int statusBoxY = statusY - 3;
+  const int statusBoxH = 14;
 
   if (!monitorLayoutDrawn) {
     tft.fillScreen(TFT_BLACK);
     drawHeader("Monitor");
     drawUniversalBackground();
 
-    btnMonitorBack = {bottom.x, bottom.y, 74, UI_BUTTON_H, "Back"};
+    btnMonitorBack = {ctlX, backY, backW, ctlH, "Back"};
     drawButton(btnMonitorBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
 
     tft.drawRect(boxX, boxY, boxW, boxH, TFT_DARKGREY);
@@ -7648,19 +8381,19 @@ static void drawMonitor() {
   }
 
   // Rebuild tab buttons every draw so hitboxes stay valid.
-  const int tabW = 60;
-  const int tabH = 20;
-  const int tabY = content.y + 16;
-  btnMonitorTab1 = {110, tabY, tabW, tabH, "LIVE"};
-  btnMonitorTab2 = {173, tabY, tabW, tabH, "FILES"};
+  btnMonitorTab1 = {ctlX, liveY, backW, ctlH, "LIVE"};
+  btnMonitorTab2 = {ctlX, filesY, backW, ctlH, "FILES"};
+  btnMonitorBack = {ctlX, backY, backW, ctlH, "Back"};
 
   const bool isYoink  = (autoMode == AutoMode::Y0INK  && YoinkEngine::isRunning());
   const bool isJammit = (autoMode == AutoMode::JAMMIT);
   const bool armed = isYoink || isJammit || (lockChannel && sniffActive && (rawCaptureActive || pcapCaptureActive));
 
   // Refresh only the status/header strip and tab area.
-  tft.fillRect(108, 48, w - 116, 34, TFT_BLACK);
+  tft.fillRect(panelX, statusY - 2, panelW, 30, TFT_BLACK);
+  tft.drawRect(panelX, statusBoxY, panelW, statusBoxH, TFT_DARKGREY);
   tft.setTextDatum(TL_DATUM);
+  tft.setTextFont(1);
   tft.setTextSize(1);
   tft.setTextColor(armed ? TFT_GREEN : TFT_YELLOW, TFT_BLACK);
   if (isYoink) {
@@ -7669,28 +8402,29 @@ static void drawMonitor() {
              YoinkEngine::getStateStr(),
              YoinkEngine::getHandshakeCount(),
              YoinkEngine::getPmkidCount());
-    tft.drawString(yHdr, 110, 50);
+    tft.drawString(yHdr, panelX + 4, statusY);
   } else if (isJammit) {
     char jHdr[80];
     snprintf(jHdr, sizeof(jHdr), "JAMMIT  D:%lu  C:%u  HS:%u",
              (unsigned long)jammitDeauthCount, (unsigned)jammitClientCount,
              (unsigned)monHandshakeHits);
     tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.drawString(jHdr, 110, 50);
+    tft.drawString(jHdr, panelX + 4, statusY);
   } else {
-    tft.drawString(armed ? "LIVE CAPTURE ACTIVE" : "Needs: LOCK + SNIFF + RECORD", 110, 50);
+    tft.drawString(armed ? "LIVE CAPTURE ACTIVE" : "Needs: LOCK + SNIFF + RECORD", panelX + 4, statusY);
   }
 
   uint16_t liveColor = (monitorMode == MonitorMode::LIVE) ? TFT_DARKGREEN : TFT_DARKGREY;
   uint16_t filesColor = (monitorMode == MonitorMode::FILES) ? TFT_DARKGREEN : TFT_DARKGREY;
   drawButton(btnMonitorTab1, liveColor, TFT_WHITE, TFT_WHITE);
   drawButton(btnMonitorTab2, filesColor, TFT_WHITE, TFT_WHITE);
+  drawButton(btnMonitorBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
 
   if (monitorMode == MonitorMode::FILES) {
-    const int ctlGap = 6;
-    btnMonitorUpDir = {btnMonitorBack.x + btnMonitorBack.w + ctlGap, bottom.y, 44, UI_BUTTON_H, ".."};
-    btnMonitorUp = {btnMonitorUpDir.x + btnMonitorUpDir.w + ctlGap, bottom.y, 36, UI_BUTTON_H, "^"};
-    btnMonitorDown = {btnMonitorUp.x + btnMonitorUp.w + ctlGap, bottom.y, 36, UI_BUTTON_H, "v"};
+    const int filesCtlGap = 6;
+    btnMonitorUpDir = {bottom.x, bottom.y, 44, UI_BUTTON_H, ".."};
+    btnMonitorUp = {btnMonitorUpDir.x + btnMonitorUpDir.w + filesCtlGap, bottom.y, 36, UI_BUTTON_H, "^"};
+    btnMonitorDown = {btnMonitorUp.x + btnMonitorUp.w + filesCtlGap, bottom.y, 36, UI_BUTTON_H, "v"};
     drawButton(btnMonitorUpDir, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
     drawButton(btnMonitorUp, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
     drawButton(btnMonitorDown, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
@@ -7746,22 +8480,36 @@ static void drawMonitor() {
     tft.drawString(monitorFileInfo, boxX + 4, boxY + boxH - 14);
   } else {
     // Redraw only changed monitor lines.
-    const int lineH = 12;
+    const int lineH = 10;
     const int textX = boxX + 16;
+    const int maxTextW = max(20, boxW - 24);
     tft.setTextDatum(TL_DATUM);
+    tft.setTextFont(1);
+    tft.setTextSize(1);
     for (int i = 0; i < MONITOR_MAX_LINES; i++) {
-      const bool hasLine = (i < monitorLineCount);
-      const char* txt = hasLine ? monitorLines[i].text : "";
-      const uint16_t col = hasLine ? monitorLines[i].color : TFT_WHITE;
+      // Newest entries render first at the top of the console.
+      const int srcIdx = monitorLineCount - 1 - i;
+      const bool hasLine = (srcIdx >= 0 && srcIdx < monitorLineCount);
+      const char* txt = hasLine ? monitorLines[srcIdx].text : "";
+      const uint16_t col = hasLine ? monitorLines[srcIdx].color : TFT_WHITE;
       const uint32_t sig = hashText(txt);
       if (monitorDrawnSig[i] == sig && monitorDrawnColor[i] == col && monitorDrawnCount == monitorLineCount) {
         continue;
       }
       int y = boxY + 8 + (i * lineH);
+      if (y + lineH > boxY + boxH - 2) break;  // Keep text fully inside console box.
       tft.fillRect(textX - 2, y, boxW - 22, lineH - 1, TFT_BLACK);
       if (hasLine) {
         tft.setTextColor(col, TFT_BLACK);
-        tft.drawString(txt, textX, y);
+        String line = txt ? String(txt) : String("");
+        bool trimmed = false;
+        while (line.length() > 1 && tft.textWidth(line) > maxTextW) {
+          line.remove(line.length() - 1);
+          trimmed = true;
+        }
+        if (trimmed && line.length() > 3) line += "...";
+        while (line.length() > 1 && tft.textWidth(line) > maxTextW) line.remove(line.length() - 1);
+        tft.drawString(line, textX, y);
       }
       monitorDrawnSig[i] = sig;
       monitorDrawnColor[i] = col;
@@ -8028,231 +8776,481 @@ static void monitorTick() {
 }
 
 static void clearReconConsoleArea() {
-  const int w = tft.width();
-  tft.fillRect(9, reconConsoleY + 16, w - 18, reconConsoleH - 18, TFT_BLACK);
+  const int x = reconConsoleX + 1;
+  const int w = max(0, reconConsoleW - 2);
+  const int h = max(0, (int)reconConsoleH - 18);
+  tft.fillRect(x, reconConsoleY + 16, w, h, TFT_BLACK);
 }
 
-// Draw Recon screen with hunter stats
-static void drawRecon() {
+static const char* reconScanStateLabel(ReconScanState st) {
+  switch (st) {
+    case ReconScanState::IDLE: return "IDLE";
+    case ReconScanState::DISCOVER_SEND: return "DISCOVER";
+    case ReconScanState::DISCOVER_WAIT: return "DISCOVER";
+    case ReconScanState::DISCOVER_READ: return "DISCOVER";
+    case ReconScanState::PORT_SCAN: return "PORT-SCAN";
+    case ReconScanState::DONE: return "DONE";
+    case ReconScanState::ERROR: return "ERROR";
+    default: return "UNKNOWN";
+  }
+}
+
+static void layoutReconBackButtonUnderHypercube(int modeRowY, int modeRowH) {
   const int w = tft.width();
   const int h = tft.height();
-  const int statsY = 34;
-  const int topY = statsY;
+  const int backW = 72;
+  const int backH = UI_BUTTON_H;
+  Button candidate = {
+    clampi(hypercubeBoxX + ((hypercubeBoxW - backW) / 2), UI_SAFE_MARGIN, w - UI_SAFE_MARGIN - backW),
+    hypercubeBoxY + hypercubeBoxH + 6,
+    backW,
+    backH,
+    "BACK"
+  };
 
-  // Stats panel under title row, to the left of the hypercube.
-  const int statsX = 0;
-  // Match console right edge (console rect ends at x = w - 9).
-  const int statsW = max(120, w - statsX - 8);
-  const int statsTargetArea = (w * h * 20) / 100;  // ~20% of total screen area
-  const int statsH = clampi(statsTargetArea / max(1, statsW), 34, 96);
+  int cy = candidate.y + buttonRenderYOffset(candidate);
+  bool intersectsModeRow = (cy < (modeRowY + modeRowH + 2)) && ((cy + backH) > modeRowY);
+  bool outOfBounds = (cy + backH > h - UI_SAFE_MARGIN);
 
-  // Console log area
-  reconConsoleY = statsY + statsH + 4;
-  reconConsoleH = h - reconConsoleY - 42;
-
-  // Control buttons (bottom)
-  const int btnW = 56;
-  const int btnH = 30;
-  const int btnY = h - 36;
-  const int btnGap = 6;
-  const int totalWidth = btnW * 4 + btnGap * 3;
-  const int startX = (w - totalWidth) / 2;
-  btnReconBack = {startX, btnY, btnW, btnH, "BACK"};
-  btnReconStart = {startX + (btnW + btnGap), btnY, btnW, btnH, reconActive ? "STOP" : "START"};
-  btnReconClear = {startX + (btnW + btnGap) * 2, btnY, btnW, btnH, "RESET"};
-  Button btnReconExport = {startX + (btnW + btnGap) * 3, btnY, btnW, btnH, "SAVE"};
-
-  if (!reconLayoutDrawn) {
-    tft.fillScreen(TFT_BLACK);
-    drawHeader("DEAUTH HUNTER");
-    drawUniversalBackground();
-
-    tft.drawRect(statsX, statsY, statsW, statsH, TFT_DARKGREY);
-    tft.fillRect(statsX + 1, statsY + 1, statsW - 2, statsH - 2, 0x0841);
-
-    tft.drawRect(8, reconConsoleY, w - 16, reconConsoleH, TFT_DARKGREY);
-    tft.fillRect(9, reconConsoleY + 1, w - 18, reconConsoleH - 2, TFT_BLACK);
-
-    drawBorder();
-    reconLayoutDrawn = true;
+  if (intersectsModeRow) {
+    // Second pass: keep X under hypercube, move Y below mode row.
+    candidate.y = modeRowY + modeRowH + 4;
+    if (candidate.y <= UI_TOP_BUTTON_SHIFT_THRESHOLD_Y) {
+      candidate.y = UI_TOP_BUTTON_SHIFT_THRESHOLD_Y + 1;
+    }
+    cy = candidate.y + buttonRenderYOffset(candidate);
+    intersectsModeRow = (cy < (modeRowY + modeRowH + 2)) && ((cy + backH) > modeRowY);
+    outOfBounds = (cy + backH > h - UI_SAFE_MARGIN);
   }
 
-  // Console header + run-state indicator (kept out of stats panel to avoid hypercube overlap).
-  tft.fillRect(9, reconConsoleY + 1, w - 18, 12, TFT_BLACK);
-  tft.setTextFont(1);
-  tft.setTextSize(1);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString("SRC_MAC            CH  RS TYPE PKT", 12, reconConsoleY + 4);
-  tft.setTextDatum(TR_DATUM);
-  tft.setTextColor(reconActive ? TFT_GREEN : TFT_RED, TFT_BLACK);
-  tft.drawString(reconActive ? "[HUNTING]" : "[STOPPED]", w - 12, reconConsoleY + 4);
-  tft.setTextDatum(TL_DATUM);
-
-  // Dynamic stats values + status indicator
-  const DeauthStats& stats = DeauthHunter::getStats();
-  tft.fillRect(statsX + 1, statsY + 1, statsW - 2, statsH - 2, 0x0841);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
-  tft.setTextColor(TFT_CYAN, 0x0841);
-  tft.drawString("Deauth:", statsX + 4, statsY + 4);
-  tft.drawString("Disassoc:", statsX + (statsW / 2), statsY + 4);
-  tft.drawString("Attackers:", statsX + 4, statsY + 20);
-  tft.drawString("Ch:", statsX + (statsW / 2), statsY + 20);
-  tft.setTextColor(TFT_WHITE, 0x0841);
-  char deauthStr[12];
-  char disassocStr[12];
-  char attackersStr[12];
-  snprintf(deauthStr, sizeof(deauthStr), "%lu", (unsigned long)stats.total_deauths);
-  snprintf(disassocStr, sizeof(disassocStr), "%lu", (unsigned long)stats.total_disassocs);
-  snprintf(attackersStr, sizeof(attackersStr), "%u", (unsigned)stats.unique_sources);
-  tft.drawString(deauthStr, statsX + 46, statsY + 4);
-  tft.drawString(disassocStr, statsX + (statsW / 2) + 50, statsY + 4);
-  tft.drawString(attackersStr, statsX + 58, statsY + 20);
-  char chStr[16];
-  snprintf(chStr, sizeof(chStr), "%d/%d", DeauthHunter::getCurrentChannel(), stats.most_active_channel ? stats.most_active_channel : 1);
-  tft.drawString(chStr, statsX + (statsW / 2) + 22, statsY + 20);
-
-  // Dynamic controls (START/STOP label changes)
-  drawButton(btnReconStart, reconActive ? TFT_RED : TFT_GREEN, TFT_WHITE, TFT_WHITE);
-  drawButton(btnReconClear, TFT_ORANGE, TFT_WHITE, TFT_WHITE);
-  drawButton(btnReconExport, TFT_BLUE, TFT_DARKGREY, TFT_WHITE);
-  drawButton(btnReconBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
-
-  // First entry into screen should reset incremental draw tracking.
-  if (reconLastLogCount == 0 && reconLastTotalEvents == 0) {
-    reconLastDrawChannel = DeauthHunter::getCurrentChannel();
+  if (intersectsModeRow || outOfBounds) {
+    btnReconBack = {UI_SAFE_MARGIN, h - UI_BOTTOM_BAR_H, 78, UI_BUTTON_H, "BACK"};
+  } else {
+    btnReconBack = candidate;
   }
+}
+
+static bool startReconDeauthHunter(bool forceDisconnect) {
+  if (wifiStaHasValidIp() && !forceDisconnect) {
+    reconDeauthConfirmUntilMs = millis() + 5000U;
+    reconStatusLine = "Connected STA detected: tap START again to disconnect and hunt";
+    return false;
+  }
+
+  if (wifiStaHasValidIp()) {
+    WiFi.disconnect(false, false);
+    delay(80);
+  }
+  WiFi.mode(WIFI_STA);
+  delay(30);
+
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_set_promiscuous_rx_cb(&promiscuousPacketCallback);
+  wifi_promiscuous_filter_t filt;
+  filt.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
+  esp_wifi_set_promiscuous_filter(&filt);
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(DeauthHunter::getCurrentChannel(), WIFI_SECOND_CHAN_NONE);
+
+  if (reconChannelLock) DeauthHunter::setChannelFilter(reconSelectedChannel);
+  DeauthHunter::setEnabled(true);
+  DeauthHunter::start();
+  reconActive = true;
+  reconStatusLine = "Deauth Hunter active (defensive monitor)";
+  return true;
+}
+
+static void stopReconDeauthHunter() {
+  if (!reconActive && !DeauthHunter::isEnabled()) return;
+  DeauthHunter::setEnabled(false);
+  DeauthHunter::stop();
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_set_promiscuous_rx_cb(nullptr);
+  reconActive = false;
+  reconStatusLine = "Deauth Hunter stopped";
 }
 
 // Helper: Draw console log entries
 static void drawReconConsole(bool fullRedraw = false) {
-  const int w = tft.width();
   const int lineHeight = 8;
-  const int maxVisibleLines = (reconConsoleH - 16) / lineHeight;  // Reserve space for header
+  const int maxVisibleLines = (reconConsoleH - 16) / lineHeight;
 
-  if (fullRedraw) {
-    // Full redraw - clear console area first
-    clearReconConsoleArea();
-  }
-  
+  if (fullRedraw) clearReconConsoleArea();
+
   uint16_t logCount = DeauthHunter::getLogCount();
   if (logCount == 0) {
     reconLastLogCount = 0;
     return;
   }
+  if (!fullRedraw && logCount <= reconLastLogCount) return;
 
-  // Determine what to redraw
-  uint16_t endIdx = logCount;
-  if (!fullRedraw && logCount <= reconLastLogCount) return;  // No new entries
-
-  // Draw visible log entries (newest at bottom, scrolling up)
   uint16_t displayStart = (logCount > maxVisibleLines) ? (logCount - maxVisibleLines) : 0;
-
   tft.setTextDatum(TL_DATUM);
   tft.setTextFont(1);
   tft.setTextSize(1);
 
-  for (uint16_t i = displayStart; i < endIdx; i++) {
+  for (uint16_t i = displayStart; i < logCount; i++) {
     const DeauthEvent* evt = DeauthHunter::getLogEntry(i);
     if (!evt) continue;
-
-    // Calculate Y position (scroll up as new entries arrive)
     int lineIdx = i - displayStart;
     int y = reconConsoleY + 14 + (lineIdx * lineHeight);
+    if (y + lineHeight > reconConsoleY + reconConsoleH) break;
 
-    if (y + lineHeight > reconConsoleY + reconConsoleH) break;  // Off screen
-
-    // Full source MAC for live triage.
     char macStr[18];
     snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
              evt->src_mac[0], evt->src_mac[1], evt->src_mac[2],
              evt->src_mac[3], evt->src_mac[4], evt->src_mac[5]);
 
-    const char* pktType = evt->is_disassoc ? "DISAS" : "DEAUTH";
-    // Format line
     char line[64];
-    snprintf(line, sizeof(line), "%s %2d %3d %c %s",
-             macStr, evt->channel, evt->rssi,
-             evt->is_disassoc ? 'D' : 'A', pktType);
+    snprintf(line, sizeof(line), "%s CH%02d %3d %s",
+             macStr, evt->channel, evt->rssi, evt->is_disassoc ? "DISAS" : "DEAUTH");
 
-    // Color code by RSSI strength
     uint16_t color = TFT_GREEN;
-    if (evt->rssi > -50) color = TFT_RED;        // Very close
-    else if (evt->rssi > -70) color = TFT_YELLOW;  // Medium
-    else color = TFT_CYAN;                       // Far
-
+    if (evt->rssi > -50) color = TFT_RED;
+    else if (evt->rssi > -70) color = TFT_YELLOW;
+    else color = TFT_CYAN;
     tft.setTextColor(color, TFT_BLACK);
-    tft.drawString(line, 12, y);
+    tft.drawString(line, reconConsoleX + 4, y);
   }
 
-  reconLastLogCount = logCount;  
+  reconLastLogCount = logCount;
 }
 
-// Periodic update for Recon screen
+static void drawReconDeauthPanel(int panelTop, int panelBottom) {
+  const int w = tft.width();
+  const int panelX = UI_SAFE_MARGIN;
+  // Keep Recon status/events boxes ending 5px before the hypercube left border.
+  int statusRight = hypercubeBoxX - 5;
+  statusRight = clampi(statusRight, panelX + 140, w - UI_SAFE_MARGIN);
+  const int panelW = statusRight - panelX;
+  const int statsH = 54;
+  const int statsY = panelTop;
+  tft.drawRect(panelX, statsY, panelW, statsH, TFT_DARKGREY);
+  tft.fillRect(panelX + 1, statsY + 1, panelW - 2, statsH - 2, 0x0841);
+
+  // STOP/RESET moved slightly down and made same size as BACK.
+  const int actionW = btnReconBack.w > 0 ? btnReconBack.w : 78;
+  const int actionH = btnReconBack.h > 0 ? btnReconBack.h : UI_BUTTON_H;
+  const int actionX = clampi(hypercubeBoxX + ((hypercubeBoxW - actionW) / 2), UI_SAFE_MARGIN, w - UI_SAFE_MARGIN - actionW);
+  const int actionYBase = statsY + 10;
+  const int hypercubeSafeY = uiHypercubeSafeBottom() + 4;
+  const int actionY = max(actionYBase, hypercubeSafeY);
+  int clearY = actionY + actionH + 3;
+  const int clearYMax = panelBottom - actionH;
+  if (clearY > clearYMax) clearY = clearYMax;
+  btnReconStart = {actionX, actionY, actionW, actionH, reconActive ? "STOP" : "START"};
+  btnReconClear = {actionX, clearY, actionW, actionH, "RESET"};
+  drawButton(btnReconStart, reconActive ? TFT_RED : TFT_DARKGREEN, TFT_WHITE, TFT_WHITE);
+  drawButton(btnReconClear, 0xFD20, TFT_WHITE, TFT_BLACK);
+
+  // Keep BACK below RESET in deauth view and redraw it after action buttons.
+  int backY = btnReconClear.y + btnReconClear.h + 3;
+  const int modeTop = btnReconModeDeauth.y + buttonRenderYOffset(btnReconModeDeauth);
+  const int backYMax = modeTop - btnReconBack.h - 2;
+  if (backY > backYMax) backY = backYMax;
+  if (backY < 0) backY = 0;
+  btnReconBack = {actionX, backY, actionW, actionH, "BACK"};
+  drawButton(btnReconBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
+
+  const int ctlH = 16;
+  const int ctlW = 20;
+  const int ctlY = statsY + statsH - ctlH - 4;
+  const int lockW = 70;
+  const int lockX = panelX + panelW - lockW - 4;
+  const int plusX = lockX - ctlW - 4;
+  const int minusX = plusX - ctlW - 4;
+  btnReconChMinus = {minusX, ctlY, ctlW, ctlH, "-"};
+  btnReconChPlus = {plusX, ctlY, ctlW, ctlH, "+"};
+  btnReconLock = {lockX, ctlY, lockW, ctlH, reconChannelLock ? "[x] LOCK" : "[ ] LOCK"};
+
+  drawButton(btnReconChMinus, TFT_BLACK, TFT_CYAN, TFT_WHITE);
+  drawButton(btnReconChPlus, TFT_BLACK, TFT_CYAN, TFT_WHITE);
+  drawButton(btnReconLock,
+             reconChannelLock ? 0x03A0 : TFT_BLACK,
+             reconChannelLock ? TFT_GREEN : TFT_DARKGREY,
+             reconChannelLock ? TFT_WHITE : TFT_CYAN);
+
+  const DeauthStats& stats = DeauthHunter::getStats();
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_CYAN, 0x0841);
+  tft.drawString("DEAUTHS:", panelX + 4, statsY + 4);
+  tft.drawString("PPS:", panelX + 4, statsY + 18);
+  tft.drawString("LAST RSSI:", panelX + 4, statsY + 32);
+  tft.drawString("CH:", panelX + 150, statsY + 32);
+  tft.setTextColor(TFT_WHITE, 0x0841);
+  char deauthStr[16];
+  char ppsStr[12];
+  char rssiStr[12];
+  snprintf(deauthStr, sizeof(deauthStr), "%lu", (unsigned long)stats.total_deauths);
+  snprintf(ppsStr, sizeof(ppsStr), "%u", (unsigned)DeauthHunter::getPps());
+  snprintf(rssiStr, sizeof(rssiStr), "%d dBm", (int)DeauthHunter::getLastRssi());
+  tft.drawString(deauthStr, panelX + 58, statsY + 4);
+  tft.drawString(ppsStr, panelX + 30, statsY + 18);
+  tft.drawString(rssiStr, panelX + 62, statsY + 32);
+  char chStr[16];
+  if (reconChannelLock) {
+    snprintf(chStr, sizeof(chStr), "L%d", reconSelectedChannel);
+  } else {
+    snprintf(chStr, sizeof(chStr), "%d", DeauthHunter::getCurrentChannel());
+  }
+  tft.drawString(chStr, panelX + 170, statsY + 32);
+
+  // Deauth events box moved up and narrowed so right border stays clear of STOP/RESET.
+  reconConsoleY = statsY + statsH + 3;
+  int eventsRight = statusRight;
+  if (eventsRight < (panelX + 120)) eventsRight = panelX + 120;
+  const int eventsW = eventsRight - panelX;
+  reconConsoleX = panelX;
+  reconConsoleW = eventsW;
+  reconConsoleH = panelBottom - reconConsoleY;
+  if (reconConsoleH < 36) reconConsoleH = 36;
+  tft.drawRect(panelX, reconConsoleY, eventsW, reconConsoleH, TFT_DARKGREY);
+  tft.fillRect(panelX + 1, reconConsoleY + 1, eventsW - 2, reconConsoleH - 2, TFT_BLACK);
+  tft.fillRect(panelX + 1, reconConsoleY + 1, eventsW - 2, 12, TFT_BLACK);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.drawString("DEAUTH EVENTS", panelX + 4, reconConsoleY + 4);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(reconActive ? TFT_GREEN : TFT_RED, TFT_BLACK);
+  tft.drawString(reconActive ? "[HUNTING]" : "[STOPPED]", panelX + eventsW - 4, reconConsoleY + 4);
+  tft.setTextDatum(TL_DATUM);
+  drawReconConsole(true);
+}
+
+static void drawReconPortPanel(int panelTop, int panelBottom) {
+  const int w = tft.width();
+  const int panelX = UI_SAFE_MARGIN;
+  const int panelW = w - (UI_SAFE_MARGIN * 2);
+  const int topH = 46;
+
+  tft.drawRect(panelX, panelTop, panelW, topH, TFT_DARKGREY);
+  tft.fillRect(panelX + 1, panelTop + 1, panelW - 2, topH - 2, 0x0024);
+
+  const bool wifiOk = wifiStaHasValidIp();
+  btnReconPortStartStop = {panelX + panelW - 132, panelTop + 4, 62, 18,
+                           reconScanner.isRunning() ? "STOP" : "START"};
+  btnReconPortExport = {panelX + panelW - 66, panelTop + 4, 62, 18, "EXPORT"};
+  drawButton(btnReconPortStartStop,
+             wifiOk ? (reconScanner.isRunning() ? TFT_RED : TFT_DARKGREEN) : TFT_DARKGREY,
+             TFT_WHITE,
+             TFT_WHITE);
+  drawButton(btnReconPortExport, TFT_NAVY, TFT_CYAN, TFT_WHITE);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_CYAN, 0x0024);
+  if (wifiOk) {
+    char subnetBuf[24];
+    subnetBuf[0] = '\0';
+    if (reconScanner.subnetLabel()[0] != '\0') {
+      snprintf(subnetBuf, sizeof(subnetBuf), "%s", reconScanner.subnetLabel());
+    } else {
+      IPAddress ip = WiFi.localIP();
+      IPAddress mask = WiFi.subnetMask();
+      IPAddress net((uint8_t)(ip[0] & mask[0]),
+                    (uint8_t)(ip[1] & mask[1]),
+                    (uint8_t)(ip[2] & mask[2]),
+                    (uint8_t)(ip[3] & mask[3]));
+      const uint32_t maskU32 = reconIpv4ToU32(mask[0], mask[1], mask[2], mask[3]);
+      const uint8_t prefix = reconPrefixLengthFromMaskU32(maskU32);
+      snprintf(subnetBuf, sizeof(subnetBuf), "%u.%u.%u.%u/%u",
+               net[0], net[1], net[2], net[3], prefix);
+    }
+    char subnetLine[64];
+    snprintf(subnetLine, sizeof(subnetLine), "Subnet %s", subnetBuf);
+    tft.drawString(subnetLine, panelX + 4, panelTop + 4);
+    char stateLine[64];
+    snprintf(stateLine, sizeof(stateLine), "%s %u%%  Hosts:%u",
+             reconScanStateLabel(reconScanner.state()),
+             (unsigned)reconScanner.progressPct(),
+             (unsigned)reconScanner.hostCount());
+    tft.drawString(stateLine, panelX + 4, panelTop + 18);
+  } else {
+    tft.setTextColor(TFT_ORANGE, 0x0024);
+    tft.drawString("Port scanner requires WiFi STA connection", panelX + 4, panelTop + 10);
+  }
+
+  const int barX = panelX + 4;
+  const int barY = panelTop + topH - 10;
+  const int barW = panelW - 8;
+  const int pct = reconScanner.progressPct();
+  tft.drawRect(barX, barY, barW, 6, TFT_DARKGREY);
+  tft.fillRect(barX + 1, barY + 1, ((barW - 2) * pct) / 100, 4, TFT_GREEN);
+
+  const int listY = panelTop + topH + 4;
+  const int portsH = 40;
+  const int listH = panelBottom - listY - portsH - 2;
+  reconHostRowH = 12;
+  reconHostListRect = {panelX, listY, panelW - 24, max(24, listH)};
+  tft.drawRect(reconHostListRect.x, reconHostListRect.y, reconHostListRect.w, reconHostListRect.h, TFT_DARKGREY);
+  tft.fillRect(reconHostListRect.x + 1, reconHostListRect.y + 1, reconHostListRect.w - 2, reconHostListRect.h - 2, TFT_BLACK);
+
+  btnReconPortUp = {panelX + panelW - 22, listY, 20, 18, "^"};
+  btnReconPortDown = {panelX + panelW - 22, listY + 22, 20, 18, "v"};
+  drawButton(btnReconPortUp, TFT_BLACK, TFT_CYAN, TFT_WHITE);
+  drawButton(btnReconPortDown, TFT_BLACK, TFT_CYAN, TFT_WHITE);
+
+  const int rows = reconHostListRect.h / reconHostRowH;
+  const int hostCount = reconScanner.hostCount();
+  if (reconPortScroll > 0 && reconPortScroll >= hostCount) {
+    reconPortScroll = (hostCount > 0) ? (hostCount - 1) : 0;
+  }
+  for (int row = 0; row < rows; ++row) {
+    const int idx = reconPortScroll + row;
+    if (idx >= hostCount) break;
+    const ReconHostRecord* host = reconScanner.hostAt((uint8_t)idx);
+    if (!host) continue;
+    const bool selected = (idx == reconHostSelected);
+    const int y = reconHostListRect.y + 2 + (row * reconHostRowH);
+    if (selected) {
+      tft.fillRect(reconHostListRect.x + 1, y - 1, reconHostListRect.w - 2, reconHostRowH, 0x03A0);
+    }
+
+    char mac[18];
+    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+             host->mac[0], host->mac[1], host->mac[2], host->mac[3], host->mac[4], host->mac[5]);
+    char line[84];
+    snprintf(line, sizeof(line), "%s %s %s",
+             host->ip.toString().c_str(),
+             mac,
+             host->vendor);
+    tft.setTextColor(selected ? TFT_BLACK : TFT_CYAN, selected ? 0x03A0 : TFT_BLACK);
+    tft.drawString(line, reconHostListRect.x + 3, y);
+  }
+
+  const int portsY = listY + reconHostListRect.h + 4;
+  tft.drawRect(panelX, portsY, panelW, portsH, TFT_DARKGREY);
+  tft.fillRect(panelX + 1, portsY + 1, panelW - 2, portsH - 2, TFT_BLACK);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.drawString("Selected Host Ports", panelX + 4, portsY + 3);
+  if (reconHostSelected >= 0 && reconHostSelected < hostCount) {
+    const ReconHostRecord* host = reconScanner.hostAt((uint8_t)reconHostSelected);
+    if (host) {
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      char hostMeta[96];
+      snprintf(hostMeta, sizeof(hostMeta), "%s  %s  RTT:%ums",
+               host->ip.toString().c_str(), host->osGuess, (unsigned)host->rttMs);
+      tft.drawString(hostMeta, panelX + 4, portsY + 14);
+
+      char portsLine[120];
+      portsLine[0] = '\0';
+      for (uint8_t i = 0; i < host->openCount; ++i) {
+        char token[24];
+        snprintf(token, sizeof(token), "%u/%s%s",
+                 (unsigned)host->open[i].port,
+                 host->open[i].service ? host->open[i].service : "UNK",
+                 (i + 1U < host->openCount) ? " " : "");
+        if ((strlen(portsLine) + strlen(token) + 1) < sizeof(portsLine)) strcat(portsLine, token);
+      }
+      if (host->openCount == 0) snprintf(portsLine, sizeof(portsLine), "No open ports in default set");
+      tft.setTextColor(TFT_CYAN, TFT_BLACK);
+      tft.drawString(portsLine, panelX + 4, portsY + 26);
+    }
+  } else {
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.drawString("Tap a host above to inspect open services", panelX + 4, portsY + 18);
+  }
+}
+
+// Draw Recon screen with two subviews.
+static void drawRecon() {
+  const int w = tft.width();
+  const int h = tft.height();
+  const uint8_t hunterFilter = DeauthHunter::getChannelFilter();
+  reconChannelLock = (hunterFilter >= 1 && hunterFilter <= 13);
+  if (reconChannelLock) {
+    reconSelectedChannel = hunterFilter;
+  } else {
+    const uint8_t chNow = DeauthHunter::getCurrentChannel();
+    if (chNow >= 1 && chNow <= 13) reconSelectedChannel = chNow;
+  }
+
+  tft.fillScreen(TFT_BLACK);
+  drawHeader("RECON");
+  drawUniversalBackground();
+
+  // Mode buttons moved to bottom row.
+  const int modeY = h - UI_BUTTON_H - 2;
+  const int modeGap = 6;
+  const int modeW = (w - (UI_SAFE_MARGIN * 2) - modeGap) / 2;
+  btnReconModeDeauth = {UI_SAFE_MARGIN, modeY, modeW, UI_BUTTON_H, "DEAUTH-HUNTER"};
+  btnReconModePort = {UI_SAFE_MARGIN + modeW + modeGap, modeY, modeW, UI_BUTTON_H, "PORT SCANNER"};
+  layoutReconBackButtonUnderHypercube(modeY + buttonRenderYOffset(btnReconModeDeauth), UI_BUTTON_H);
+
+  drawButton(btnReconModeDeauth,
+             reconView == ReconView::DEAUTH ? TFT_DARKGREEN : TFT_BLACK,
+             TFT_CYAN,
+             TFT_WHITE);
+  drawButton(btnReconModePort,
+             reconView == ReconView::PORT_SCAN ? TFT_DARKGREEN : TFT_BLACK,
+             TFT_CYAN,
+             TFT_WHITE);
+  drawButton(btnReconBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
+
+  // Status box starts 5px below top header text band.
+  const int panelTop = uiHeaderBandH() + 5;
+  // Keep content panels 5px above the status text band drawn at (modeY - 10).
+  // Status band occupies ~10px height, so reserve until (modeY - 15).
+  const int panelBottom = modeY - 15;
+
+  if (reconView == ReconView::DEAUTH) {
+    drawReconDeauthPanel(panelTop, panelBottom);
+  } else {
+    drawReconPortPanel(panelTop, panelBottom);
+  }
+
+  if (!reconStatusLine.isEmpty()) {
+    const int statusY = modeY - 10;
+    tft.fillRect(UI_SAFE_MARGIN, statusY - 2, w - (UI_SAFE_MARGIN * 2), 10, TFT_BLACK);
+    tft.setTextSize(1);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+    tft.drawString(reconStatusLine, UI_SAFE_MARGIN + 2, statusY);
+  }
+
+  drawBorder();
+  reconLayoutDrawn = true;
+}
+
+// Periodic update for Recon screen.
 static void reconTick() {
   if (screen != ScreenId::RECON) return;
 
-  if (!reconActive) return;
-
-  // Update DeauthHunter channel hopping
-  DeauthHunter::update();
-
-  const DeauthStats& stats = DeauthHunter::getStats();
-  uint32_t totalEvents = DeauthHunter::getTotalEvents();
-  uint8_t currentCh = DeauthHunter::getCurrentChannel();
-
-  // Check if we have new events or channel changed
-  bool newEvents = (totalEvents > reconLastTotalEvents);
-  bool channelChanged = (currentCh != reconLastDrawChannel);
-
-  if (!newEvents && !channelChanged) return;
-
-  // Update stats panel (partial redraw)
-  if (newEvents || channelChanged) {
-    const int w = tft.width();
-    const int h = tft.height();
-    const int topY = 34;
-    const int statsX = 0;
-    const int statsY = topY;
-    // Match console right edge (console rect ends at x = w - 9).
-    const int statsW = max(120, w - statsX - 8);
-    const int statsTargetArea = (w * h * 20) / 100;  // ~20% of total screen area
-    const int statsH = clampi(statsTargetArea / max(1, statsW), 34, 96);
-
-    // Redraw compact stats panel values.
-    tft.fillRect(statsX + 1, statsY + 1, statsW - 2, statsH - 2, 0x0841);
-
-    tft.setTextDatum(TL_DATUM);
-    tft.setTextSize(1);
-    tft.setTextColor(TFT_CYAN, 0x0841);
-    tft.drawString("Deauth:", statsX + 4, statsY + 4);
-    tft.drawString("Disassoc:", statsX + (statsW / 2), statsY + 4);
-    tft.drawString("Attackers:", statsX + 4, statsY + 20);
-    tft.drawString("Ch:", statsX + (statsW / 2), statsY + 20);
-    tft.setTextColor(TFT_WHITE, 0x0841);
-    char deauthStr[12];
-    char disassocStr[12];
-    char attackersStr[12];
-    snprintf(deauthStr, sizeof(deauthStr), "%lu", (unsigned long)stats.total_deauths);
-    snprintf(disassocStr, sizeof(disassocStr), "%lu", (unsigned long)stats.total_disassocs);
-    snprintf(attackersStr, sizeof(attackersStr), "%u", (unsigned)stats.unique_sources);
-    tft.drawString(deauthStr, statsX + 46, statsY + 4);
-    tft.drawString(disassocStr, statsX + (statsW / 2) + 50, statsY + 4);
-    tft.drawString(attackersStr, statsX + 58, statsY + 20);
-
-    char chStr[16];
-    snprintf(chStr, sizeof(chStr), "%d/%d", currentCh, stats.most_active_channel ? stats.most_active_channel : 1);
-    tft.setTextColor(TFT_WHITE, 0x0841);
-    tft.drawString(chStr, statsX + (statsW / 2) + 22, statsY + 20);
-
-    reconLastDrawChannel = currentCh;
+  if (reconActive) {
+    DeauthHunter::update();
   }
 
-  // Update console log (incremental)
-  if (newEvents) {
-    drawReconConsole(false);  // false = incremental update
-    reconLastTotalEvents = totalEvents;
+  if (reconScanner.isRunning()) {
+    reconScanner.tick();
+    if (reconScanner.state() == ReconScanState::DONE) {
+      reconStatusLine = "Port scan complete";
+    } else if (reconScanner.state() == ReconScanState::ERROR) {
+      reconStatusLine = reconScanner.errorMessage();
+    }
+  }
+
+  const uint32_t now = millis();
+  if ((now - reconLastUiTickMs) < 250U) return;
+  reconLastUiTickMs = now;
+
+  if (reconView == ReconView::DEAUTH && reconActive) {
+    uint32_t totalEvents = DeauthHunter::getTotalEvents();
+    uint8_t currentCh = DeauthHunter::getCurrentChannel();
+    bool newEvents = (totalEvents > reconLastTotalEvents);
+    bool channelChanged = (currentCh != reconLastDrawChannel);
+    if (newEvents || channelChanged) {
+      reconLastTotalEvents = totalEvents;
+      reconLastDrawChannel = currentCh;
+      const int modeY = tft.height() - UI_BUTTON_H - 2;
+      const int panelTop = uiHeaderBandH() + 5;
+      const int panelBottom = modeY - 6;
+      drawReconDeauthPanel(panelTop, panelBottom);
+      return;
+    }
+  }
+
+  if (reconView == ReconView::PORT_SCAN && reconScanner.isRunning()) {
+    drawRecon();
   }
 }
 
@@ -8595,7 +9593,7 @@ void drawBruceSetTarget() {
   int controlW = compact ? 24 : 30;
 
   bruceTargetListX = content.x;
-  int listPanelRight = hypercubeBoxX - 4;
+  int listPanelRight = uiRightLimitForBand(content.y, 16);
   if (listPanelRight < (content.x + 100)) listPanelRight = content.x + content.w;
   int listPanelW = listPanelRight - bruceTargetListX;
   if (listPanelW < 100) listPanelW = 100;
@@ -8733,48 +9731,78 @@ void drawBruceMenu() {
   const bool compact = (h <= 180);
   const UiRect content = computeContentRect();
   const UiRect bottom = computeBottomBarRect();
+  const int safeLeft = uiHypercubeSafeLeft();
 
-  // Status text block
+  // Keep all Bruce UI at least 5px away from the hypercube safety band.
+  const int zoneLeft = content.x;
+  const int zoneRight = min(content.x + content.w, safeLeft - 1);
+  const int zoneW = max(120, zoneRight - zoneLeft);
+
+  // Status text block.
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
-  int statusY = content.y + 2;
+  const int statusY = content.y + 2;
+  const int statusH = bruceIsAttacking() ? 24 : 12;
+  const int statusTextW = max(60, zoneW - 6);
+  auto drawStatusLine = [&](const char* raw, int x, int y, uint16_t color) {
+    String s = raw ? raw : "";
+    while (s.length() > 1 && tft.textWidth(s) > statusTextW) {
+      s.remove(s.length() - 1);
+    }
+    if (raw && strlen(raw) > s.length() && s.length() > 3) {
+      s.remove(s.length() - 3);
+      s += "...";
+    }
+    tft.setTextColor(color, TFT_BLACK);
+    tft.drawString(s, x, y);
+  };
+
+  tft.fillRect(zoneLeft, statusY, zoneW, statusH + 2, TFT_BLACK);
+  tft.drawRect(zoneLeft, statusY, zoneW, statusH + 2, TFT_DARKGREY);
+
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   if (bruceHasSelectedTarget) {
     if (bruceTargetSsid[0] == '\0') {
-      tft.drawString("Target: ALL APs", 8, statusY);
+      drawStatusLine("Target: ALL APs", zoneLeft + 3, statusY + 1, TFT_CYAN);
     } else {
       char buf[56];
       snprintf(buf, sizeof(buf), "Target: %.20s [CH%d]", bruceTargetSsid, bruceTargetChannel);
-      tft.drawString(buf, 8, statusY);
+      drawStatusLine(buf, zoneLeft + 3, statusY + 1, TFT_CYAN);
     }
   } else {
-    tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.drawString("NO TARGET - Press Set Target", 8, statusY);
+    drawStatusLine("NO TARGET - Press Set Target", zoneLeft + 3, statusY + 1, TFT_RED);
   }
 
   if (bruceIsAttacking()) {
-    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    tft.drawString(bruceGetAttackName(), 8, statusY + 12);
+    drawStatusLine(bruceGetAttackName(), zoneLeft + 3, statusY + 13, TFT_YELLOW);
   }
 
-  const int pad = 8;
-  const int gap = compact ? 4 : 8;
-  const int btnW = (w - pad * 2 - gap) / 2;
-  const int gridTop = statusY + (bruceIsAttacking() ? 24 : 14);
+  // Normalized 3x2 grid with stable spacing.
+  const int cols = 2;
   const int rows = 3;
-  const int availH = bottom.y - gridTop - 4;
-  const int btnH = clampi((availH - (gap * (rows - 1))) / rows,
-                          compact ? 20 : 30,
-                          compact ? 28 : 40);
+  const int gapX = compact ? 4 : 8;
+  const int gapY = compact ? 4 : 7;
+  int gridTop = statusY + statusH + (compact ? 5 : 7);
+  // Avoid global top-button render offset that would shift only the first row and cause overlap.
+  if (gridTop <= UI_TOP_BUTTON_SHIFT_THRESHOLD_Y) {
+    gridTop = UI_TOP_BUTTON_SHIFT_THRESHOLD_Y + 1;
+  }
+  const int gridBottom = bottom.y - 2;
+  const int gridH = max(60, gridBottom - gridTop);
+  const int btnW = max(52, (zoneW - gapX) / cols);
+  const int btnH = max(18, (gridH - (gapY * (rows - 1))) / rows);
+  const int row1Y = gridTop;
+  const int row2Y = row1Y + btnH + gapY;
+  const int row3Y = row2Y + btnH + gapY;
 
   // Attack buttons (top 4)
-  bruceMenuBtns[0] = {pad,                gridTop,                    btnW, btnH, "Deauth Flood"};
-  bruceMenuBtns[1] = {pad + btnW + gap,   gridTop,                    btnW, btnH, "Beacon Spam"};
-  bruceMenuBtns[2] = {pad,                gridTop + btnH + gap,       btnW, btnH, "Probe Flood"};
-  bruceMenuBtns[3] = {pad + btnW + gap,   gridTop + btnH + gap,       btnW, btnH, "Deauth All"};
+  bruceMenuBtns[0] = {zoneLeft,               row1Y, btnW, btnH, "Deauth Flood"};
+  bruceMenuBtns[1] = {zoneLeft + btnW + gapX, row1Y, btnW, btnH, "Beacon Spam"};
+  bruceMenuBtns[2] = {zoneLeft,               row2Y, btnW, btnH, "Probe Flood"};
+  bruceMenuBtns[3] = {zoneLeft + btnW + gapX, row2Y, btnW, btnH, "Deauth All"};
   // Set Target and Back/Stop buttons (bottom row)
-  bruceMenuBtns[4] = {pad,                gridTop + ((btnH + gap) * 2), btnW, btnH, "Set Target"};
-  bruceMenuBtns[5] = {pad + btnW + gap,   gridTop + ((btnH + gap) * 2), btnW, btnH,
+  bruceMenuBtns[4] = {zoneLeft,               row3Y, btnW, btnH, "Set Target"};
+  bruceMenuBtns[5] = {zoneLeft + btnW + gapX, row3Y, btnW, btnH,
                       bruceIsAttacking() ? "STOP" : "Back"};
 
   drawButton(bruceMenuBtns[0], TFT_BLACK, 0xFF07, TFT_WHITE);
@@ -9431,42 +10459,358 @@ static void bruceMenuTick_UI(int tx, int ty) {
   waitTouchRelease();
 }
 
+static const char* neonPanicModeLabel(NeonPanicMode mode) {
+  switch (mode) {
+    case NeonPanicMode::BOOT_TUNNEL: return "MODE 1 // BOOT TUNNEL";
+    case NeonPanicMode::BLUEPRINT_REALITY: return "MODE 6 // BLUEPRINT->REALITY";
+    case NeonPanicMode::PWN_COUNTER: return "MODE 9 // PWN COUNTER";
+    case NeonPanicMode::STEALTH_MINIMAL: return "MODE 10 // STEALTH";
+  }
+  return "MODE";
+}
+
+static void projectHypercube(float cx, float cy, float scale,
+                             float ax, float ay, float az,
+                             float* px, float* py) {
+  const float ca = cosf(ax), sa = sinf(ax);
+  const float cb = cosf(ay), sb = sinf(ay);
+  const float cc = cosf(az), sc = sinf(az);
+  for (int i = 0; i < 16; i++) {
+    float x = (i & 1) ? 1.0f : -1.0f;
+    float y = (i & 2) ? 1.0f : -1.0f;
+    float z = (i & 4) ? 1.0f : -1.0f;
+    float w4 = (i & 8) ? 1.0f : -1.0f;
+
+    float xw = x * ca - w4 * sa;
+    float ww = x * sa + w4 * ca;
+    float yz = y * cb - z * sb;
+    float zz = y * sb + z * cb;
+    float xx = xw * cc - yz * sc;
+    float yy = xw * sc + yz * cc;
+
+    const float p4 = 2.5f / (3.5f - ww);
+    const float x3 = xx * p4;
+    const float y3 = yy * p4;
+    const float z3 = zz * p4;
+    const float p3 = 3.2f / (4.0f - z3);
+    px[i] = cx + (x3 * p3 * scale);
+    py[i] = cy + (y3 * p3 * scale);
+  }
+}
+
+static void drawProjectedHypercube(const float* px, const float* py,
+                                   int thickness, int nodeRadius,
+                                   uint16_t edgeA, uint16_t edgeB, uint16_t nodeCol) {
+  int edgeIdx = 0;
+  auto drawEdge = [&](int x0, int y0, int x1, int y1, uint16_t col) {
+    for (int t = 0; t < thickness; t++) {
+      tft.drawLine(x0 + t, y0, x1 + t, y1, col);
+    }
+  };
+  for (int i = 0; i < 16; i++) {
+    for (int bit = 0; bit < 4; bit++) {
+      const int j = i ^ (1 << bit);
+      if (i < j) {
+        const uint16_t col = ((edgeIdx++ & 1) == 0) ? edgeA : edgeB;
+        drawEdge((int)px[i], (int)py[i], (int)px[j], (int)py[j], col);
+      }
+    }
+  }
+  for (int i = 0; i < 16; i++) tft.fillCircle((int)px[i], (int)py[i], nodeRadius, nodeCol);
+}
+
+static void drawModeBootTunnel(int w, int h) {
+  const uint16_t bg = 0x0002;
+  tft.fillRect(0, 0, w, h, bg);
+  const int cx = w / 2;
+  const int cy = h / 2;
+  const float maxR = sqrtf((float)(cx * cx + cy * cy));
+
+  for (int y = 0; y < h; y += 3) {
+    const uint16_t c = (y < (h / 2)) ? 0x0003 : 0x0002;
+    tft.drawFastHLine(0, y, w, c);
+  }
+  for (int x = -h; x < w; x += 26) {
+    tft.drawLine(x, h - 1, x + h, 0, 0x0802);
+  }
+
+  const int starCount = 88;
+  for (int i = 0; i < starCount; i++) {
+    const uint32_t base = (uint32_t)(i * 2654435761UL);
+    const float a = ((float)(base % 6283U) / 1000.0f);
+    const float speed = 0.006f + ((float)((base >> 11) & 0x7FU) / 10000.0f);
+    float p = fmodf((float)neonPanicFrame * speed + ((float)((base >> 19) & 0xFFU) / 255.0f), 1.0f);
+    if (p < 0.0f) p += 1.0f;
+    const float z = 0.10f + (p * 0.90f);
+    const float rNow = z * z * maxR;
+    const float rPrev = max(0.0f, rNow - (0.9f + z * 10.0f));
+    const int x1 = cx + (int)(cosf(a) * rPrev);
+    const int y1 = cy + (int)(sinf(a) * rPrev);
+    const int x2 = cx + (int)(cosf(a) * rNow);
+    const int y2 = cy + (int)(sinf(a) * rNow);
+    uint16_t col = 0x5AEB;
+    if (z > 0.84f) col = 0xB67F;
+    else if (z > 0.66f) col = TFT_CYAN;
+    else if ((i & 3) == 0) col = 0x780F;
+    tft.drawLine(x1, y1, x2, y2, col);
+  }
+
+  float px[16], py[16];
+  projectHypercube((float)cx, (float)cy, (float)min(w, h) * 0.28f,
+                   (float)neonPanicFrame * 0.040f,
+                   (float)neonPanicFrame * 0.028f,
+                   (float)neonPanicFrame * 0.018f, px, py);
+  drawProjectedHypercube(px, py, 2, 3, TFT_CYAN, TFT_MAGENTA, 0x9FF3);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(0xE71F, bg);
+  tft.drawString("NEONDRIVE // HYPERCUBE BOOT TUNNEL", 6, 6);
+}
+
+static void drawModeBlueprintReality(int w, int h) {
+  const uint16_t bg = 0x0001;
+  tft.fillRect(0, 0, w, h, bg);
+  for (int y = 0; y < h; y += 14) tft.drawFastHLine(0, y, w, 0x18A3);
+  for (int x = 0; x < w; x += 14) tft.drawFastVLine(x, 0, h, 0x1062);
+
+  const int cx = w / 2;
+  const int cy = h / 2;
+  const float morph = (sinf((float)neonPanicFrame * 0.035f) + 1.0f) * 0.5f;
+  const int size = (int)((float)min(w, h) * 0.20f);
+  const int off = (int)((float)size * (0.25f + (morph * 0.35f)));
+  const int x0 = cx - size;
+  const int y0 = cy - size;
+  const int x1 = cx + size;
+  const int y1 = cy + size;
+  const int bx0 = x0 + off;
+  const int by0 = y0 - off;
+  const int bx1 = x1 + off;
+  const int by1 = y1 - off;
+
+  tft.drawRect(x0, y0, size * 2, size * 2, TFT_CYAN);
+  tft.drawRect(bx0, by0, size * 2, size * 2, 0xB81F);
+  tft.drawLine(x0, y0, bx0, by0, 0x7BFF);
+  tft.drawLine(x1, y0, bx1, by0, 0x7BFF);
+  tft.drawLine(x0, y1, bx0, by1, 0x7BFF);
+  tft.drawLine(x1, y1, bx1, by1, 0x7BFF);
+
+  float px[16], py[16];
+  const float scale = (float)min(w, h) * (0.12f + (morph * 0.20f));
+  projectHypercube((float)cx, (float)cy, scale,
+                   (float)neonPanicFrame * 0.028f,
+                   (float)neonPanicFrame * 0.021f,
+                   (float)neonPanicFrame * 0.015f, px, py);
+  drawProjectedHypercube(px, py, 2, 2, TFT_CYAN, TFT_MAGENTA, 0x87FF);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(0xDFFF, bg);
+  tft.drawString("NEONDRIVE // BLUEPRINT -> REALITY", 6, 6);
+}
+
+static void drawModePwnCounter(int w, int h) {
+  const uint16_t bg = 0x0002;
+  tft.fillRect(0, 0, w, h, bg);
+  for (int y = 0; y < h; y += 18) tft.drawFastHLine(0, y, w, 0x0822);
+
+  const unsigned long auditedTarget = (unsigned long)YoinkEngine::getNetworkCount();
+  const unsigned long pwnedTarget =
+      (unsigned long)crackedNetworks +
+      (unsigned long)YoinkEngine::getHandshakeCount() +
+      (unsigned long)YoinkEngine::getPmkidCount();
+  const uint16_t phase = (uint16_t)(neonPanicFrame % 160);
+  float intro = (float)phase / 70.0f;
+  if (intro > 1.0f) intro = 1.0f;
+  const unsigned long auditedNow = (unsigned long)(auditedTarget * intro);
+  const unsigned long pwnedNow = (unsigned long)(pwnedTarget * intro);
+
+  const int panelX = 10;
+  const int panelY = 28;
+  const int panelW = min(186, w - 120);
+  const int panelH = 92;
+  tft.fillRoundRect(panelX, panelY, panelW, panelH, 6, 0x0862);
+  tft.drawRoundRect(panelX, panelY, panelW, panelH, 6, TFT_CYAN);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_CYAN, 0x0862);
+  tft.drawString("NETWORKS AUDITED", panelX + 8, panelY + 10);
+  tft.setTextColor(TFT_WHITE, 0x0862);
+  tft.setTextSize(2);
+  tft.drawString(String(auditedNow), panelX + 8, panelY + 24);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_MAGENTA, 0x0862);
+  tft.drawString("PWNED COUNTER", panelX + 8, panelY + 56);
+  tft.setTextColor(0xFFE0, 0x0862);
+  tft.setTextSize(2);
+  tft.drawString(String(pwnedNow), panelX + 8, panelY + 70);
+
+  const int cubeCx = w - 68;
+  const int cubeCy = h / 2;
+  float px[16], py[16];
+  projectHypercube((float)cubeCx, (float)cubeCy, (float)min(w, h) * 0.16f,
+                   (float)neonPanicFrame * 0.042f,
+                   (float)neonPanicFrame * 0.031f,
+                   (float)neonPanicFrame * 0.020f, px, py);
+  drawProjectedHypercube(px, py, 2, 2, TFT_CYAN, TFT_MAGENTA, 0x9FF3);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(0xF7DF, bg);
+  tft.drawString("NEONDRIVE // RED TEAM STATUS", 6, 6);
+}
+
+static void drawModeStealth(int w, int h) {
+  const uint16_t bg = 0x0000;
+  tft.fillRect(0, 0, w, h, bg);
+  const int cx = w / 2;
+  const int cy = h / 2;
+  const int starCount = 28;
+  for (int i = 0; i < starCount; i++) {
+    const uint32_t seed = (uint32_t)(i * 1103515245UL + 12345UL);
+    int sx = (int)(seed % (uint32_t)w);
+    int sy = (int)((seed >> 9) % (uint32_t)h);
+    sx = (sx + (int)(neonPanicFrame / 6)) % w;
+    const uint16_t col = ((i & 3) == 0) ? 0x5AEB : 0x2104;
+    tft.drawPixel(sx, sy, col);
+  }
+
+  float px[16], py[16];
+  projectHypercube((float)cx, (float)cy, (float)min(w, h) * 0.24f,
+                   (float)neonPanicFrame * 0.015f,
+                   (float)neonPanicFrame * 0.011f,
+                   (float)neonPanicFrame * 0.009f, px, py);
+  drawProjectedHypercube(px, py, 1, 2, 0x7BFF, 0x780F, 0x8410);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(0xBDF7, bg);
+  tft.drawString("NEONDRIVE // STEALTH BOOT", 6, 6);
+}
+
+static void drawNeonPanicFrame() {
+  const int w = tft.width();
+  const int h = tft.height();
+  switch (neonPanicMode) {
+    case NeonPanicMode::BOOT_TUNNEL: drawModeBootTunnel(w, h); break;
+    case NeonPanicMode::BLUEPRINT_REALITY: drawModeBlueprintReality(w, h); break;
+    case NeonPanicMode::PWN_COUNTER: drawModePwnCounter(w, h); break;
+    case NeonPanicMode::STEALTH_MINIMAL: drawModeStealth(w, h); break;
+  }
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(neonPanicModeLabel(neonPanicMode), 6, h - 22);
+  tft.setTextColor(0xC618, TFT_BLACK);
+  tft.drawString("BOOT BTN: NEXT MODE  |  TOUCH: EXIT", 6, h - 10);
+}
+
+static void drawNeonPanic() {
+  neonPanicFrame = 0;
+  neonPanicLastTickMs = 0;
+  drawNeonPanicFrame();
+}
+
+static void neonPanicTick() {
+  if (screen != ScreenId::NEON_PANIC) return;
+  const uint32_t now = millis();
+  if (now - neonPanicLastTickMs < 62) return;
+  neonPanicLastTickMs = now;
+  neonPanicFrame++;
+  drawNeonPanicFrame();
+}
+
 static void drawAbout() {
   tft.fillScreen(TFT_BLACK);
-  drawHeader("About / Debug");
+  drawHeader("About / Quick Facts");
   drawUniversalBackground();
   const UiRect content = computeContentRect();
   const UiRect bottom = computeBottomBarRect();
   const bool compact = (tft.height() <= 180);
+  const int panelRight = max(content.x + 140, uiHypercubeSafeLeft() - 5);
+  const int panelW = max(120, panelRight - content.x);
+  const int x = content.x + 2;
+  int y = content.y + 4;
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(compact ? 1 : 2);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  #if defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
-  tft.drawString("NEONdrive T-Display-S3", content.x + 2, content.y + 8);
-  #elif defined(NEONDRIVE_TARGET_TEMBED)
-  tft.drawString("NEONdrive T-Embed-CC1101", content.x + 2, content.y + 8);
-  #else
-  tft.drawString("NEONdrive CYD", content.x + 2, content.y + 8);
-  #endif
+  tft.drawString(ND_PROFILE_NAME, x, y);
 
   tft.setTextSize(1);
+  y += compact ? 14 : 24;
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("Device", x, y);
+  y += 12;
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  #if defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
-  tft.drawString("ESP32-S3 | 320x170 landscape UI", content.x + 2, content.y + (compact ? 24 : 40));
-  tft.drawString("Touch:auto-detect + BTN1/BTN2 nav", content.x + 2, content.y + (compact ? 36 : 56));
-  #elif defined(NEONDRIVE_TARGET_TEMBED)
-  tft.drawString("ESP32-S3 | 320x170 landscape UI", content.x + 2, content.y + (compact ? 24 : 40));
-  tft.drawString("Encoder wheel + keys navigation", content.x + 2, content.y + (compact ? 36 : 56));
-  #else
-  tft.drawString("Landscape USB-right | Touch PRESET #5 baked", content.x + 2, content.y + (compact ? 24 : 40));
-  tft.drawString("Config: LittleFS /config.json", content.x + 2, content.y + (compact ? 36 : 56));
-  #endif
+  char line[96];
+  snprintf(line, sizeof(line), "Profile: %s", ND_PROFILE_CODE);
+  tft.drawString(line, x, y);
+  y += 12;
+  snprintf(line, sizeof(line), "Display: %dx%d", tft.width(), tft.height());
+  tft.drawString(line, x, y);
+  y += 12;
+  snprintf(line, sizeof(line), "Flash: %dMB  PSRAM: %s", ND_FLASH_MB, ND_EXPECT_PSRAM ? "expected" : "no");
+  tft.drawString(line, x, y);
+  y += 12;
+  snprintf(line, sizeof(line), "Touch:%d Nav:%d Enc:%d SD:%d CC1101:%d",
+           ND_HW_TOUCH, ND_HW_BUTTON_NAV, ND_HW_ENCODER, ND_HW_SD, ND_HW_CC1101);
+  tft.drawString(line, x, y);
+  y += 14;
 
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  char dims[48];
-  snprintf(dims, sizeof(dims), "tft: %dx%d", tft.width(), tft.height());
-  tft.drawString(dims, content.x + 2, content.y + (compact ? 48 : 74));
+  tft.drawString("Runtime", x, y);
+  y += 12;
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  int ws = WiFi.status();
+  snprintf(line, sizeof(line), "WiFi: %s", ws == WL_CONNECTED ? "Connected" : (apMode ? "AP Mode" : "Offline"));
+  tft.drawString(line, x, y);
+  y += 12;
+  snprintf(line, sizeof(line), "Web: %s  SD: %s", webServerRunning ? "ON" : "OFF", sdReady ? "Ready" : "Missing");
+  tft.drawString(line, x, y);
+  y += 12;
+  const unsigned long auditedNets = (unsigned long)YoinkEngine::getNetworkCount();
+  const unsigned long pwnedCounter =
+      (unsigned long)crackedNetworks +
+      (unsigned long)YoinkEngine::getHandshakeCount() +
+      (unsigned long)YoinkEngine::getPmkidCount();
+  snprintf(line, sizeof(line), "Networks Audited:%lu  Beacons:%lu",
+           auditedNets,
+           (unsigned long)monBeaconHits);
+  tft.drawString(line, x, y);
+  y += 12;
+  snprintf(line, sizeof(line), "Pwned Counter:%lu  Cracked:%u",
+           pwnedCounter,
+           crackedNetworks);
+  tft.drawString(line, x, y);
+  y += 12;
+  snprintf(line, sizeof(line), "Packets:%lu HS:%lu PMKID:%lu",
+           (unsigned long)sniffPacketCount,
+           (unsigned long)YoinkEngine::getHandshakeCount(),
+           (unsigned long)YoinkEngine::getPmkidCount());
+  tft.drawString(line, x, y);
+  y += 12;
+  snprintf(line, sizeof(line), "Heap:%luKB", (unsigned long)(ESP.getFreeHeap() / 1024));
+  tft.drawString(line, x, y);
+  y += 14;
+
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("Quick Reference", x, y);
+  y += 12;
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("Web UI: /, /android, /sd, /wpasec, /yoink/log", x, y);
+  y += 12;
+#if defined(NEONDRIVE_TARGET_CYD)
+  tft.drawString("Input: Touch UI (landscape, USB-right)", x, y);
+#elif defined(NEONDRIVE_TARGET_TEMBED)
+  tft.drawString("Input: Encoder rotate/press + side KEY", x, y);
+#else
+  tft.drawString("Input: BUTTON_1 next, BUTTON_2 select", x, y);
+#endif
+
+  // Keep the panel visually constrained away from the hypercube safety band.
+  tft.drawRect(content.x, content.y, panelW, max(20, bottom.y - content.y - 2), TFT_DARKGREY);
 
   btnBack = {bottom.x, bottom.y, compact ? 92 : 120, UI_BUTTON_H, "Back"};
   drawButton(btnBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
@@ -9506,6 +10850,9 @@ static void setScreen(ScreenId next) {
       reconLayoutDrawn = false;
       reconLastLogCount = 0;
       reconLastTotalEvents = 0;
+      reconLastUiTickMs = 0;
+      reconDeauthConfirmUntilMs = 0;
+      if (reconHostSelected >= reconScanner.hostCount()) reconHostSelected = -1;
       drawRecon();
       break;
     case ScreenId::BRUCE_MENU:        drawBruceMenu(); break;
@@ -9513,9 +10860,12 @@ static void setScreen(ScreenId next) {
     case ScreenId::SCOPE_GRAPH:
       scopeLayoutDrawn = false;
       scopeResetWaterfall();
+      scopeScanActive = false;
+      scopeScanStartedMs = 0;
       drawScopeGraph();
       break;
     case ScreenId::LED_CONTROL:       drawLedControl(); break;
+    case ScreenId::NEON_PANIC:        drawNeonPanic(); break;
     case ScreenId::BRUCE_MONITOR: {
       monitorLineCount = 0;
       monitorPushLine(TFT_CYAN,   "BRUCE MONITOR ONLINE");
@@ -9569,56 +10919,72 @@ static void tdisplayRedrawCurrentScreen() {
     case ScreenId::BRUCE_SET_TARGET:    drawBruceSetTarget(); break;
     case ScreenId::SCOPE_GRAPH:         drawScopeGraph(); break;
     case ScreenId::LED_CONTROL:         drawLedControl(); break;
+    case ScreenId::NEON_PANIC:          drawNeonPanic(); break;
   }
 }
 #endif
 
+static void sw1Tick() {
+  if (!sw1Enabled || PIN_SW1 < 0) return;
+  const uint32_t now = millis();
+  const bool down = (digitalRead(PIN_SW1) == LOW);
+  if (now < sw1DebounceUntilMs) {
+    sw1WasDown = down;
+    return;
+  }
+  if (down && !sw1WasDown) {
+    sw1DebounceUntilMs = now + 180;
+    neonPanicMode = (NeonPanicMode)(((uint8_t)neonPanicMode + 1U) % 4U);
+    if (screen != ScreenId::NEON_PANIC) {
+      neonPanicReturnScreen = screen;
+      setScreen(ScreenId::NEON_PANIC);
+    } else {
+      drawNeonPanic();
+    }
+    pushConsoleEvent("INFO", "BOOT", neonPanicModeLabel(neonPanicMode));
+  }
+  sw1WasDown = down;
+}
+
 // ---------- Setup / Loop ----------
 static void bumpInt(int& v, int delta, int lo, int hi) { v = clampi(v + delta, lo, hi); }
 
-void setup() {
-  Serial.begin(115200);
-  delay(100);
-  Serial.println();
-  #if defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
-  Serial.println("=== NEONDRIVE // T-Display-S3 | Milestone D ===");
-  #elif defined(NEONDRIVE_TARGET_TEMBED)
-  Serial.println("=== NEONDRIVE // T-EMBED-CC1101 | Milestone D ===");
-  #else
-  Serial.println("=== NEONDRIVE // CYD | Milestone D ===");
-  #endif
-
-#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
-  if (PIN_NAV_NEXT >= 0) pinMode(PIN_NAV_NEXT, INPUT_PULLUP);
-  if (PIN_NAV_SELECT >= 0) pinMode(PIN_NAV_SELECT, INPUT_PULLUP);
-  if (PIN_ENCODER_A >= 0) pinMode(PIN_ENCODER_A, INPUT_PULLUP);
-  if (PIN_ENCODER_B >= 0) pinMode(PIN_ENCODER_B, INPUT_PULLUP);
+static void printDeviceProfileBanner() {
+  const uint32_t flashRuntimeMB = (uint32_t)(ESP.getFlashChipSize() / (1024U * 1024U));
+  bool psramRuntime = false;
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+  psramRuntime = psramFound();
 #endif
 
-  backlightBringup();
+  Serial.println("=== NEONDRIVE Device Profile ===");
+  Serial.printf("[profile] name=%s\n", ND_PROFILE_NAME);
+  Serial.printf("[profile] code=%s display=%dx%d\n", ND_PROFILE_CODE, ND_DISPLAY_W, ND_DISPLAY_H);
+  Serial.printf("[profile] hw touch=%d nav=%d encoder=%d keyboard=%d sd=%d cc1101=%d\n",
+                ND_HW_TOUCH, ND_HW_BUTTON_NAV, ND_HW_ENCODER, ND_HW_KEYBOARD, ND_HW_SD, ND_HW_CC1101);
+  Serial.printf("[profile] limits flash_cfg=%dMB flash_runtime=%luMB psram_expected=%d psram_runtime=%d\n",
+                ND_FLASH_MB, (unsigned long)flashRuntimeMB, ND_EXPECT_PSRAM ? 1 : 0, psramRuntime ? 1 : 0);
+  Serial.printf("[profile] features web=%d scope=%d sd_capture=%d subghz=%d\n",
+                ND_FEATURE_WEB_UI, ND_FEATURE_SCOPE_WATERFALL, ND_FEATURE_SD_CAPTURE, ND_FEATURE_SUBGHZ_TOOLKIT);
+#if defined(NEONDRIVE_TARGET_CYD)
+  Serial.printf("[variant] active=%s\n", CYD_VARIANT_NAME);
+#endif
+}
 
-  // 1) SPI begin (CYD uses SPI TFT, T-Display-S3 uses 8-bit parallel TFT)
+static void display_init() {
   if (TFT_USES_SPI_BUS) {
     SPI.begin(PIN_TFT_SCLK, PIN_TFT_MISO, PIN_TFT_MOSI, PIN_TFT_CS);
   }
-
-  // 2) TFT init (LOCKED)
   tft.init();
-
-  // 3) Landscape (LOCKED)
-  tft.setRotation(1);
-
-  // 4) Inversion ON (LOCKED)
-  tft.invertDisplay(true);
-
-  // 5) Runtime dims after rotation
+  tft.setRotation(BOARD_TFT_ROTATION);
+  tft.invertDisplay(BOARD_TFT_INVERT);
   tft.fillScreen(TFT_BLACK);
   drawBorder();
 
   Serial.print("tft.width()=");  Serial.print(tft.width());
   Serial.print(" tft.height()="); Serial.println(tft.height());
+}
 
-  // Touch init (CYD only)
+static void touch_init() {
 #if defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
   if (!tdisplayTouchInit()) {
     Serial.println("[touch] no supported touch controller detected; BUTTON_1/BUTTON_2 only");
@@ -9631,16 +10997,353 @@ void setup() {
   ts.begin();
   ts.setRotation(0);
 #endif
+}
+
+#ifndef ND_TOUCH_TEST_SCREEN
+#define ND_TOUCH_TEST_SCREEN 0
+#endif
+
+static void variantBootSelfTest() {
+#if ND_TOUCH_TEST_SCREEN
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+#if defined(NEONDRIVE_TARGET_CYD)
+  tft.drawString(String("VARIANT TEST: ") + CYD_VARIANT_NAME, 8, 8, 2);
+#else
+  tft.drawString("VARIANT TEST", 8, 8, 2);
+#endif
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("Touch panel to print x/y + raw values", 8, 32, 2);
+
+  const uint32_t endMs = millis() + 3000;
+  while ((int32_t)(endMs - millis()) > 0) {
+    TouchState s = readTouch();
+    if (s.down) {
+      char line[96];
+      snprintf(line, sizeof(line), "x=%d y=%d raw=(%d,%d,%d)", s.x, s.y, s.rx, s.ry, s.z);
+      Serial.printf("[touch-test] %s\n", line);
+      tft.fillRect(8, 58, tft.width() - 16, 18, TFT_BLACK);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.drawString(line, 8, 58, 2);
+      delay(60);
+    }
+    delay(15);
+  }
+
+  tft.fillScreen(TFT_BLACK);
+  drawBorder();
+#endif
+}
+
+#if defined(NEONDRIVE_TARGET_CYD35) && !defined(NEONDRIVE_TARGET_BUTTON_NAV) && defined(ND_TOUCH_CAL_WIZARD) && (ND_TOUCH_CAL_WIZARD == 1)
+struct TouchRawPoint {
+  int x;
+  int y;
+};
+static constexpr const char* TOUCH_CAL_SD_PATH = "/touch_cal_cyd35.json";
+
+static bool captureTouchRawPoint(TouchRawPoint& out) {
+  uint32_t deadline = millis() + 12000;
+  while ((int32_t)(deadline - millis()) > 0) {
+    TS_Point p = ts.getPoint();
+    if (p.z > g_touchZMin) {
+      int sumX = 0;
+      int sumY = 0;
+      int n = 0;
+      uint32_t sampleUntil = millis() + 140;
+      while ((int32_t)(sampleUntil - millis()) > 0) {
+        TS_Point sp = ts.getPoint();
+        if (sp.z > g_touchZMin) {
+          sumX += sp.x;
+          sumY += sp.y;
+          n++;
+        }
+        delay(8);
+      }
+      if (n > 0) {
+        out.x = sumX / n;
+        out.y = sumY / n;
+      } else {
+        out.x = p.x;
+        out.y = p.y;
+      }
+      while (true) {
+        TS_Point rp = ts.getPoint();
+        if (rp.z <= g_touchZMin) break;
+        delay(10);
+      }
+      delay(80);
+      return true;
+    }
+    delay(8);
+  }
+  return false;
+}
+
+static void drawTouchCalPrompt(const char* label, int tx, int ty) {
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.drawString("TOUCH CALIBRATION (CYD35)", 8, 8, 2);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString(label, 8, 30, 2);
+
+  const int r = 10;
+  tft.drawLine(tx - 14, ty, tx + 14, ty, TFT_GREEN);
+  tft.drawLine(tx, ty - 14, tx, ty + 14, TFT_GREEN);
+  tft.drawCircle(tx, ty, r, TFT_GREEN);
+}
+
+static int absInt(int v) { return v < 0 ? -v : v; }
+
+static bool solveRawRangeFromTwoPoints(float rawA, float screenA,
+                                       float rawB, float screenB,
+                                       int screenMax,
+                                       int& outMin, int& outMax) {
+  const float dRaw = rawB - rawA;
+  if (fabsf(dRaw) < 1.0f) return false;
+  const float a = (screenB - screenA) / dRaw;  // s = a*r + b
+  if (fabsf(a) < 0.0001f) return false;
+  const float b = screenA - (a * rawA);
+  float rawMin = (0.0f - b) / a;
+  float rawMax = ((float)screenMax - b) / a;
+  if (rawMin > rawMax) {
+    const float tmp = rawMin;
+    rawMin = rawMax;
+    rawMax = tmp;
+  }
+  outMin = (int)floorf(rawMin);
+  outMax = (int)ceilf(rawMax);
+  return true;
+}
+
+static bool runCyd35TouchCalibrationWizard() {
+  const int w = tft.width();
+  const int h = tft.height();
+  TouchRawPoint tl{}, tr{}, bl{}, br{};
+  const int edgeInset = 20;
+
+  drawTouchCalPrompt("Touch TOP-LEFT target", edgeInset, edgeInset);
+  if (!captureTouchRawPoint(tl)) return false;
+  drawTouchCalPrompt("Touch TOP-RIGHT target", w - edgeInset, edgeInset);
+  if (!captureTouchRawPoint(tr)) return false;
+  drawTouchCalPrompt("Touch BOTTOM-LEFT target", edgeInset, h - edgeInset);
+  if (!captureTouchRawPoint(bl)) return false;
+  drawTouchCalPrompt("Touch BOTTOM-RIGHT target", w - edgeInset, h - edgeInset);
+  if (!captureTouchRawPoint(br)) return false;
+
+  const int nsLeft = (tl.x + bl.x) / 2;
+  const int nsRight = (tr.x + br.x) / 2;
+  const int nsTop = (tl.y + tr.y) / 2;
+  const int nsBottom = (bl.y + br.y) / 2;
+  const int nsScore = absInt(nsRight - nsLeft) + absInt(nsBottom - nsTop);
+
+  const int swLeft = (tl.y + bl.y) / 2;
+  const int swRight = (tr.y + br.y) / 2;
+  const int swTop = (tl.x + tr.x) / 2;
+  const int swBottom = (bl.x + br.x) / 2;
+  const int swScore = absInt(swRight - swLeft) + absInt(swBottom - swTop);
+
+  if (swScore > nsScore) {
+    g_touchSwapXY = true;
+    g_touchInvertX = (swLeft > swRight);
+    g_touchInvertY = (swTop > swBottom);
+  } else {
+    g_touchSwapXY = false;
+    g_touchInvertX = (nsLeft > nsRight);
+    g_touchInvertY = (nsTop > nsBottom);
+  }
+
+  const int rx_tl = g_touchSwapXY ? tl.y : tl.x;
+  const int rx_tr = g_touchSwapXY ? tr.y : tr.x;
+  const int rx_bl = g_touchSwapXY ? bl.y : bl.x;
+  const int rx_br = g_touchSwapXY ? br.y : br.x;
+
+  const int ry_tl = g_touchSwapXY ? tl.x : tl.y;
+  const int ry_tr = g_touchSwapXY ? tr.x : tr.y;
+  const int ry_bl = g_touchSwapXY ? bl.x : bl.y;
+  const int ry_br = g_touchSwapXY ? br.x : br.y;
+
+  const float rawLeft = 0.5f * (float)(rx_tl + rx_bl);
+  const float rawRight = 0.5f * (float)(rx_tr + rx_br);
+  const float rawTop = 0.5f * (float)(ry_tl + ry_tr);
+  const float rawBottom = 0.5f * (float)(ry_bl + ry_br);
+
+  const float xLeftScreen = (float)edgeInset;
+  const float xRightScreen = (float)(w - edgeInset);
+  const float yTopScreen = (float)edgeInset;
+  const float yBottomScreen = (float)(h - edgeInset);
+
+  const float xLeftPre = g_touchInvertX ? (float)((w - 1) - (int)xLeftScreen) : xLeftScreen;
+  const float xRightPre = g_touchInvertX ? (float)((w - 1) - (int)xRightScreen) : xRightScreen;
+  const float yTopPre = g_touchInvertY ? (float)((h - 1) - (int)yTopScreen) : yTopScreen;
+  const float yBottomPre = g_touchInvertY ? (float)((h - 1) - (int)yBottomScreen) : yBottomScreen;
+
+  bool okX = solveRawRangeFromTwoPoints(rawLeft, xLeftPre, rawRight, xRightPre, w - 1,
+                                        g_touchRawXMin, g_touchRawXMax);
+  bool okY = solveRawRangeFromTwoPoints(rawTop, yTopPre, rawBottom, yBottomPre, h - 1,
+                                        g_touchRawYMin, g_touchRawYMax);
+  if (!okX || !okY) return false;
+
+  g_touchRawXMin = clampi(g_touchRawXMin, 0, 4095);
+  g_touchRawXMax = clampi(g_touchRawXMax, 1, 4095);
+  g_touchRawYMin = clampi(g_touchRawYMin, 0, 4095);
+  g_touchRawYMax = clampi(g_touchRawYMax, 1, 4095);
+  if (g_touchRawXMax <= g_touchRawXMin) g_touchRawXMax = min(4095, g_touchRawXMin + 1);
+  if (g_touchRawYMax <= g_touchRawYMin) g_touchRawYMax = min(4095, g_touchRawYMin + 1);
+
+  Serial.printf("[touch-cal] swap=%d invX=%d invY=%d x=[%d,%d] y=[%d,%d]\n",
+                g_touchSwapXY ? 1 : 0,
+                g_touchInvertX ? 1 : 0,
+                g_touchInvertY ? 1 : 0,
+                g_touchRawXMin, g_touchRawXMax,
+                g_touchRawYMin, g_touchRawYMax);
+
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.drawString("Touch calibration complete", 8, 10, 2);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("Testing...", 8, 30, 2);
+  delay(350);
+  return true;
+}
+
+static bool loadCyd35TouchCalibrationFromSd() {
+  if (!sdReady) return false;
+  if (!SD.exists(TOUCH_CAL_SD_PATH)) return false;
+
+  File f = SD.open(TOUCH_CAL_SD_PATH, FILE_READ);
+  if (!f) return false;
+
+  StaticJsonDocument<256> doc;
+  DeserializationError err = deserializeJson(doc, f);
+  f.close();
+  if (err) return false;
+
+  g_touchSwapXY = doc["swap"] | g_touchSwapXY;
+  g_touchInvertX = doc["inv_x"] | g_touchInvertX;
+  g_touchInvertY = doc["inv_y"] | g_touchInvertY;
+  g_touchRawXMin = doc["x_min"] | g_touchRawXMin;
+  g_touchRawXMax = doc["x_max"] | g_touchRawXMax;
+  g_touchRawYMin = doc["y_min"] | g_touchRawYMin;
+  g_touchRawYMax = doc["y_max"] | g_touchRawYMax;
+  g_touchZMin    = doc["z_min"] | g_touchZMin;
+
+  g_touchRawXMin = clampi(g_touchRawXMin, 0, 4095);
+  g_touchRawXMax = clampi(g_touchRawXMax, 1, 4095);
+  g_touchRawYMin = clampi(g_touchRawYMin, 0, 4095);
+  g_touchRawYMax = clampi(g_touchRawYMax, 1, 4095);
+  if (g_touchRawXMax <= g_touchRawXMin) g_touchRawXMax = min(4095, g_touchRawXMin + 1);
+  if (g_touchRawYMax <= g_touchRawYMin) g_touchRawYMax = min(4095, g_touchRawYMin + 1);
+
+  Serial.printf("[touch-cal] loaded SD %s swap=%d invX=%d invY=%d x=[%d,%d] y=[%d,%d] zMin=%d\n",
+                TOUCH_CAL_SD_PATH,
+                g_touchSwapXY ? 1 : 0,
+                g_touchInvertX ? 1 : 0,
+                g_touchInvertY ? 1 : 0,
+                g_touchRawXMin, g_touchRawXMax,
+                g_touchRawYMin, g_touchRawYMax,
+                g_touchZMin);
+  return true;
+}
+
+static bool saveCyd35TouchCalibrationToSd() {
+  if (!sdReady) return false;
+
+  StaticJsonDocument<256> doc;
+  doc["version"] = 1;
+  doc["swap"] = g_touchSwapXY;
+  doc["inv_x"] = g_touchInvertX;
+  doc["inv_y"] = g_touchInvertY;
+  doc["x_min"] = g_touchRawXMin;
+  doc["x_max"] = g_touchRawXMax;
+  doc["y_min"] = g_touchRawYMin;
+  doc["y_max"] = g_touchRawYMax;
+  doc["z_min"] = g_touchZMin;
+
+  if (SD.exists(TOUCH_CAL_SD_PATH)) {
+    SD.remove(TOUCH_CAL_SD_PATH);
+  }
+  File f = SD.open(TOUCH_CAL_SD_PATH, FILE_WRITE);
+  if (!f) return false;
+  bool ok = (serializeJson(doc, f) > 0);
+  f.close();
+  if (ok) {
+    Serial.printf("[touch-cal] saved SD %s\n", TOUCH_CAL_SD_PATH);
+  }
+  return ok;
+}
+
+static void initCyd35TouchCalibrationFromSdOrWizard() {
+#if defined(ND_TOUCH_CAL_ALWAYS) && (ND_TOUCH_CAL_ALWAYS == 1)
+  Serial.println("[touch-cal] ND_TOUCH_CAL_ALWAYS=1; running wizard");
+  while (!runCyd35TouchCalibrationWizard()) {
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("Calibration timed out.", 8, 8, 2);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("Retrying...", 8, 28, 2);
+    delay(500);
+  }
+  if (!saveCyd35TouchCalibrationToSd()) {
+    Serial.println("[touch-cal] save to SD failed (SD missing or write error)");
+  }
+  return;
+#endif
+  if (loadCyd35TouchCalibrationFromSd()) return;
+  Serial.println("[touch-cal] no saved SD calibration; running wizard");
+  runCyd35TouchCalibrationWizard();
+  if (!saveCyd35TouchCalibrationToSd()) {
+    Serial.println("[touch-cal] save to SD failed (SD missing or write error)");
+  }
+}
+#endif
+
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+  Serial.println();
+  Serial.printf("=== %s | Milestone D ===\n", ND_PROFILE_NAME);
+  printDeviceProfileBanner();
+
+#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
+  if (PIN_NAV_NEXT >= 0) pinMode(PIN_NAV_NEXT, INPUT_PULLUP);
+  if (PIN_NAV_SELECT >= 0) pinMode(PIN_NAV_SELECT, INPUT_PULLUP);
+  if (PIN_ENCODER_A >= 0) pinMode(PIN_ENCODER_A, INPUT_PULLUP);
+  if (PIN_ENCODER_B >= 0) pinMode(PIN_ENCODER_B, INPUT_PULLUP);
+#endif
+  if (PIN_SW1 >= 0) {
+    if (PIN_SW1 == PIN_SD_CS) {
+      Serial.printf("[sw1] GPIO%d conflicts with SD CS; SW1 disabled\n", PIN_SW1);
+    } else {
+      pinMode(PIN_SW1, INPUT_PULLUP);
+      sw1Enabled = true;
+      Serial.printf("[sw1] SW1 enabled on GPIO%d\n", PIN_SW1);
+    }
+  }
+
+  backlightBringup();
+  display_init();
+  touch_init();
 
   // LittleFS
   if (!LittleFS.begin(true)) {
     Serial.println("[fs] LittleFS begin failed (even after format).");
   } else {
     Serial.println("[fs] LittleFS mounted.");
+    restoreEpochFromLittleFs();
   }
 
   // SD (optional but required for PCAP capture files)
   mountSdCard(true);
+
+#if defined(NEONDRIVE_TARGET_CYD35) && !defined(NEONDRIVE_TARGET_BUTTON_NAV) && defined(ND_TOUCH_CAL_WIZARD) && (ND_TOUCH_CAL_WIZARD == 1)
+  initCyd35TouchCalibrationFromSdOrWizard();
+#endif
+  variantBootSelfTest();
 
   // Create mutex for serializing WiFi driver ops
   wifiOpMutex = xSemaphoreCreateMutex();
@@ -9681,6 +11384,10 @@ void setup() {
 void loop() {
   handleSerialDebugCommands();
   bruceMenuTick();
+  timeServiceTick();
+  sw1Tick();
+  neonPanicTick();
+  touchDebugTick();
   
   // Update LED flash state (for handshake victories)
   updateLEDFlash();
@@ -9728,6 +11435,7 @@ void loop() {
 
   int tx, ty;
   if (!touchEdgeTriggered(tx, ty)) { delay(5); return; }
+  touchDebugDrawMarker(tx, ty);
   if (verboseSerial) {
     Serial.printf("[touch] screen=%s x=%d y=%d\n", screenToStr(screen), tx, ty);
   }
@@ -9735,6 +11443,13 @@ void loop() {
           screenToStr(screen),
           g_lastTouchRawX, g_lastTouchRawY, g_lastTouchRawZ,
           tx, ty);
+
+  if (screen == ScreenId::NEON_PANIC) {
+    ScreenId back = (neonPanicReturnScreen == ScreenId::NEON_PANIC) ? ScreenId::HOME : neonPanicReturnScreen;
+    setScreen(back);
+    waitTouchRelease();
+    return;
+  }
 
   // HOME
   if (screen == ScreenId::HOME) {
@@ -9893,7 +11608,8 @@ void loop() {
   if (screen == ScreenId::WIFI_SCAN) {
     const int w = tft.width();
     const int wifiListXLocal = 8;
-    const int wifiListWLocal = max(120, hypercubeBoxX - wifiListXLocal);
+    const int selectedY = (tft.height() <= 180) ? (uiHeaderBandH() + 2) : 24;
+    const int wifiListWLocal = max(120, uiRightLimitForBand(selectedY, 14) - wifiListXLocal);
 
     // Buttons
     if (hit(btnWifiBack, tx, ty)) { setScreen(ScreenId::HOME); waitTouchRelease(); return; }
@@ -10023,20 +11739,22 @@ void loop() {
     }
 
     if (hit(btnTargetSniff, tx, ty)) {
-      if (!sniffActive) {
+      const bool running = sniffActive || (autoMode != AutoMode::NONE);
+      if (running) {
+        disengageAutoMode();
+        if (sniffActive) stopSniff();
+        Serial.println("[ops] START/STOP: stopped active functions");
+      } else {
         if (!hasTarget) {
-          Serial.println("[ops] SNIFF: no target selected");
+          Serial.println("[ops] START/STOP: no target selected");
         } else {
-          if (!confirmWebRiskAction(RiskyWebAction::START_SNIFF, "Start SNIFF")) {
+          if (!confirmWebRiskAction(RiskyWebAction::START_SNIFF, "Start")) {
             waitTouchRelease();
             return;
           }
           startSniff();
-          Serial.println("[ops] SNIFF started");
+          Serial.println("[ops] START/STOP: started sniff");
         }
-      } else {
-        stopSniff();
-        Serial.println("[ops] SNIFF stopped");
       }
       drawTargetDetails();
       resetTouchLatch();
@@ -10182,34 +11900,139 @@ void loop() {
   // RECON
   if (screen == ScreenId::RECON) {
     if (hit(btnReconBack, tx, ty)) {
-      if (reconActive) {
-        DeauthHunter::stop();
-        reconActive = false;
-      }
+      stopReconDeauthHunter();
+      if (reconScanner.isRunning()) reconScanner.stop();
       setScreen(ScreenId::HOME);
       waitTouchRelease();
       return;
     }
-    if (hit(btnReconStart, tx, ty)) {
-      reconActive = !reconActive;
-      if (reconActive) {
-        DeauthHunter::start();
-      } else {
-        DeauthHunter::stop();
-      }
-      drawRecon();  // Partial redraw: stats + controls only
-      waitTouchRelease();
-      return;
-    }
-    if (hit(btnReconClear, tx, ty)) {
-      DeauthHunter::reset();
-      reconLastLogCount = 0;
-      reconLastTotalEvents = 0;
-      reconLastDrawChannel = DeauthHunter::getCurrentChannel();
-      clearReconConsoleArea();
+    if (hit(btnReconModeDeauth, tx, ty)) {
+      reconView = ReconView::DEAUTH;
       drawRecon();
       waitTouchRelease();
       return;
+    }
+    if (hit(btnReconModePort, tx, ty)) {
+      reconView = ReconView::PORT_SCAN;
+      drawRecon();
+      waitTouchRelease();
+      return;
+    }
+
+    if (reconView == ReconView::DEAUTH) {
+      if (hit(btnReconChMinus, tx, ty)) {
+        reconSelectedChannel = (reconSelectedChannel <= 1) ? 13 : (reconSelectedChannel - 1);
+        if (reconChannelLock) {
+          DeauthHunter::setChannelFilter(reconSelectedChannel);
+        }
+        drawRecon();
+        waitTouchRelease();
+        return;
+      }
+      if (hit(btnReconChPlus, tx, ty)) {
+        reconSelectedChannel = (reconSelectedChannel >= 13) ? 1 : (reconSelectedChannel + 1);
+        if (reconChannelLock) {
+          DeauthHunter::setChannelFilter(reconSelectedChannel);
+        }
+        drawRecon();
+        waitTouchRelease();
+        return;
+      }
+      if (hit(btnReconLock, tx, ty)) {
+        reconChannelLock = !reconChannelLock;
+        if (reconChannelLock) {
+          DeauthHunter::setChannelFilter(reconSelectedChannel);
+        } else {
+          DeauthHunter::clearFilters();
+        }
+        drawRecon();
+        waitTouchRelease();
+        return;
+      }
+      if (hit(btnReconStart, tx, ty)) {
+        if (!reconActive) {
+          if (reconScanner.isRunning()) reconScanner.stop();
+          bool forceDisconnect = ((int32_t)(reconDeauthConfirmUntilMs - millis()) > 0);
+          if (!startReconDeauthHunter(forceDisconnect)) {
+            drawRecon();
+            waitTouchRelease();
+            return;
+          }
+        } else {
+          stopReconDeauthHunter();
+        }
+        drawRecon();
+        waitTouchRelease();
+        return;
+      }
+      if (hit(btnReconClear, tx, ty)) {
+        DeauthHunter::reset();
+        reconLastLogCount = 0;
+        reconLastTotalEvents = 0;
+        reconLastDrawChannel = DeauthHunter::getCurrentChannel();
+        clearReconConsoleArea();
+        reconStatusLine = "Deauth counters reset";
+        drawRecon();
+        waitTouchRelease();
+        return;
+      }
+    } else {
+      if (hit(btnReconPortStartStop, tx, ty)) {
+        if (reconScanner.isRunning()) {
+          reconScanner.stop();
+          reconStatusLine = "Port scan stopped";
+        } else {
+          if (reconActive) stopReconDeauthHunter();
+          if (!wifiStaHasValidIp()) {
+            reconStatusLine = "Connect WiFi in STA mode before scanning";
+          } else if (!reconScanner.start()) {
+            reconStatusLine = reconScanner.errorMessage();
+          } else {
+            reconPortScroll = 0;
+            reconHostSelected = -1;
+            reconStatusLine = "Port scan started";
+          }
+        }
+        drawRecon();
+        waitTouchRelease();
+        return;
+      }
+      if (hit(btnReconPortExport, tx, ty)) {
+        if (!sdReady && !mountSdCard(false)) {
+          reconStatusLine = "SD not ready";
+        } else if (reconScanner.exportCsv(SD, "/recon_scan.csv")) {
+          reconStatusLine = "Exported /recon_scan.csv";
+        } else {
+          reconStatusLine = "CSV export failed";
+        }
+        drawRecon();
+        waitTouchRelease();
+        return;
+      }
+      if (hit(btnReconPortUp, tx, ty)) {
+        if (reconPortScroll > 0) reconPortScroll--;
+        drawRecon();
+        waitTouchRelease();
+        return;
+      }
+      if (hit(btnReconPortDown, tx, ty)) {
+        const int rows = max(1, reconHostListRect.h / max(1, reconHostRowH));
+        const int maxScroll = max(0, (int)reconScanner.hostCount() - rows);
+        if (reconPortScroll < maxScroll) reconPortScroll++;
+        drawRecon();
+        waitTouchRelease();
+        return;
+      }
+      if (pointInRect(tx, ty, reconHostListRect)) {
+        const int row = (ty - reconHostListRect.y) / max(1, reconHostRowH);
+        const int idx = (int)reconPortScroll + row;
+        if (idx >= 0 && idx < reconScanner.hostCount()) {
+          reconHostSelected = (int8_t)idx;
+          drawRecon();
+          waitTouchRelease();
+          return;
+        }
+      }
     }
     waitTouchRelease();
     return;
@@ -10382,14 +12205,24 @@ void loop() {
   // SCOPE_GRAPH
   if (screen == ScreenId::SCOPE_GRAPH) {
     if (hit(btnScopeBack, tx, ty)) {
+      if (scopeScanActive) {
+        WiFi.scanDelete();
+        scopeScanActive = false;
+        wifiIsScanning = false;
+      }
       setScreen(ScreenId::AUTOMATE_MENU);
       waitTouchRelease();
       return;
     }
     if (hit(btnScopeRefresh, tx, ty)) {
-      doWifiScanBlocking();
-      scopePushWaterfallFrame();
-      scopeLastScanMs = millis();
+      if (!scopeScanActive && !wifiIsScanning) {
+        scopeScanActive = startWifiScanAsync();
+        if (scopeScanActive) {
+          scopeScanStartedMs = millis();
+        } else {
+          wifiIsScanning = false;
+        }
+      }
       drawScopeGraph();
       waitTouchRelease();
       return;
@@ -10596,7 +12429,7 @@ void loop() {
 
     // Scroll down button
     if (hit(btnWifiConnectDown, tx, ty)) {
-      if ((wifiConnectScroll + 3) < apCount) {
+      if ((wifiConnectScroll + WIFI_CONNECT_VISIBLE_ROWS) < apCount) {
         wifiConnectScroll++;
         Serial.printf("[ui] WiFi list scrolled down to position %d\n", wifiConnectScroll);
         drawWifiConnect();
@@ -10605,12 +12438,12 @@ void loop() {
       return;
     }
 
-    // AP list selection (3 visible rows)
+    // AP list selection
     if (wifiConnectScanActive) {
       waitTouchRelease();
       return;
     }
-    for (int i = 0; i < 3 && (wifiConnectScroll + i) < apCount; i++) {
+    for (int i = 0; i < WIFI_CONNECT_VISIBLE_ROWS && (wifiConnectScroll + i) < apCount; i++) {
       if (hit(btnWifiConnectList[i], tx, ty)) {
         wifiConnectSelectedIdx = wifiConnectScroll + i;
         wifiConnectSsid = aps[wifiConnectSelectedIdx].ssid.isEmpty() ? "(hidden)" : aps[wifiConnectSelectedIdx].ssid;

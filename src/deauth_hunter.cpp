@@ -2,13 +2,19 @@
 #include "deauth_hunter.h"
 #include "esp_wifi_types.h"
 #include <cstring>
+#include <algorithm>
 
 // Static member initialization
 bool DeauthHunter::active = false;
+bool DeauthHunter::enabled = false;
 uint8_t DeauthHunter::currentChannel = 1;
 uint8_t DeauthHunter::channelIndex = 0;
 uint32_t DeauthHunter::lastChannelHop = 0;
 uint8_t DeauthHunter::channelFilter = 0;
+uint32_t DeauthHunter::ppsWindowCount = 0;
+uint16_t DeauthHunter::currentPps = 0;
+uint32_t DeauthHunter::lastPpsCommitMs = 0;
+int8_t DeauthHunter::lastRssi = -127;
 
 DeauthEvent* DeauthHunter::logBuffer = nullptr;  // Heap-allocated
 uint16_t DeauthHunter::logHead = 0;
@@ -45,10 +51,15 @@ void DeauthHunter::init() {
   
   // Reset all state
   active = false;
+  enabled = false;
   currentChannel = 1;
   channelIndex = 0;
   lastChannelHop = 0;
   channelFilter = 0;
+  ppsWindowCount = 0;
+  currentPps = 0;
+  lastPpsCommitMs = millis();
+  lastRssi = -127;
   logHead = 0;
   logCount = 0;
   memset(stats, 0, sizeof(DeauthStats));
@@ -59,33 +70,17 @@ void DeauthHunter::init() {
 }
 
 void DeauthHunter::start() {
-  if (active) return;
-  
-  Serial.println("[DeauthHunter] Starting...");
-  
-  // Initialize WiFi in promiscuous mode
-  WiFi.mode(WIFI_MODE_STA);
-  WiFi.disconnect();
-  delay(100);
-  
-  esp_wifi_set_promiscuous(true);
-  esp_wifi_set_promiscuous_rx_cb(&DeauthHunter::promiscuousCallback);
-  esp_wifi_set_channel(currentChannel, WIFI_SECOND_CHAN_NONE);
-  
+  if (enabled) return;
+  Serial.println("[DeauthHunter] Starting parser mode...");
+  setEnabled(true);
   if (stats) stats->session_start_time = millis();
-  active = true;
-
-  Serial.printf("[DeauthHunter] Active on channel %u\n", (unsigned)currentChannel);
+  Serial.printf("[DeauthHunter] Enabled on channel %u\n", (unsigned)currentChannel);
 }
 
 void DeauthHunter::stop() {
-  if (!active) return;
-  
-  Serial.println("[DeauthHunter] Stopping...");
-  
-  esp_wifi_set_promiscuous(false);
-  active = false;
-  
+  if (!enabled) return;
+  Serial.println("[DeauthHunter] Stopping parser mode...");
+  setEnabled(false);
   if (stats) {
     Serial.printf("[DeauthHunter] Session stats: %lu deauths, %lu disassocs\n",
                   stats->total_deauths, stats->total_disassocs);
@@ -93,10 +88,19 @@ void DeauthHunter::stop() {
 }
 
 void DeauthHunter::update() {
-  if (!active) return;
+  if (!enabled) return;
+
+  // Commit 1-second PPS windows.
+  const uint32_t now = millis();
+  if ((now - lastPpsCommitMs) >= 1000) {
+    currentPps = (ppsWindowCount > 65535U) ? 65535U : (uint16_t)ppsWindowCount;
+    ppsWindowCount = 0;
+    lastPpsCommitMs = now;
+  }
+
+  if (channelFilter != 0) return;  // Locked to a fixed channel.
   
   // Handle channel hopping
-  uint32_t now = millis();
   if (now - lastChannelHop >= CHANNEL_HOP_MS) {
     hopChannel();
     lastChannelHop = now;
@@ -110,13 +114,41 @@ void DeauthHunter::reset() {
   
   logHead = 0;
   logCount = 0;
+  ppsWindowCount = 0;
+  currentPps = 0;
+  lastPpsCommitMs = millis();
+  lastRssi = -127;
   if (stats) memset(stats, 0, sizeof(DeauthStats));
   memset(logBuffer, 0, sizeof(DeauthEvent) * MAX_LOG_ENTRIES);
   if (topAttackers) topAttackers->clear();
   
-  if (active && stats) {
+  if (enabled && stats) {
     stats->session_start_time = millis();
   }
+}
+
+void DeauthHunter::setEnabled(bool value) {
+  enabled = value;
+  active = value;
+  if (enabled) {
+    if (stats && stats->session_start_time == 0) stats->session_start_time = millis();
+    if (lastPpsCommitMs == 0) lastPpsCommitMs = millis();
+  } else {
+    ppsWindowCount = 0;
+    currentPps = 0;
+  }
+}
+
+bool DeauthHunter::isEnabled() {
+  return enabled;
+}
+
+uint16_t DeauthHunter::getPps() {
+  return currentPps;
+}
+
+int8_t DeauthHunter::getLastRssi() {
+  return lastRssi;
 }
 
 const DeauthEvent* DeauthHunter::getLogEntry(uint16_t index) {
@@ -139,6 +171,10 @@ const DeauthEvent* DeauthHunter::getLogEntry(uint16_t index) {
 void DeauthHunter::setChannelFilter(uint8_t channel) {
   channelFilter = (channel >= 1 && channel <= 13) ? channel : 0;
   if (channelFilter) {
+    currentChannel = channelFilter;
+    // Keep hop index aligned so unlocking resumes from the same channel.
+    channelIndex = currentChannel - 1;
+    esp_wifi_set_channel(currentChannel, WIFI_SECOND_CHAN_NONE);
     char chBuf[4];
     snprintf(chBuf, sizeof(chBuf), "%u", (unsigned)channelFilter);
     Serial.printf("[DeauthHunter] Channel filter: %s\n", chBuf);
@@ -152,10 +188,11 @@ void DeauthHunter::clearFilters() {
   Serial.println("[DeauthHunter] Filters cleared");
 }
 
-void DeauthHunter::promiscuousCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
+void DeauthHunter::ingestPromiscuousPacket(const wifi_promiscuous_pkt_t* pkt,
+                                           wifi_promiscuous_pkt_type_t type) {
+  if (!enabled || !pkt) return;
   if (type != WIFI_PKT_MGMT) return;
-  
-  const wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+
   const uint8_t* frame = pkt->payload;
   const uint16_t len = pkt->rx_ctrl.sig_len;
   
@@ -165,6 +202,7 @@ void DeauthHunter::promiscuousCallback(void* buf, wifi_promiscuous_pkt_type_t ty
   uint8_t frame_type = frame[0];
   uint8_t channel = pkt->rx_ctrl.channel;
   int8_t rssi = pkt->rx_ctrl.rssi;
+  lastRssi = rssi;
   
   // Check for deauth (0xC0) or disassociation (0xA0)
   if (frame_type == FRAME_TYPE_DEAUTH || frame_type == FRAME_TYPE_DISASSOC) {
@@ -174,6 +212,7 @@ void DeauthHunter::promiscuousCallback(void* buf, wifi_promiscuous_pkt_type_t ty
 }
 
 void DeauthHunter::processDeauthFrame(const uint8_t* frame, uint16_t len, int8_t rssi, uint8_t channel, bool is_disassoc) {
+  if (!enabled) return;
   // Apply channel filter if set
   if (channelFilter != 0 && channel != channelFilter) return;
   
@@ -195,6 +234,7 @@ void DeauthHunter::processDeauthFrame(const uint8_t* frame, uint16_t len, int8_t
   
   // Add to log
   addLogEntry(event);
+  ppsWindowCount++;
   
   // Update tracking
   updateAttackerTracking(event.src_mac, rssi);

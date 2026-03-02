@@ -26,14 +26,24 @@ python -m platformio device list
 | Hardware | Target Key | Chip | Fullflash Offset | App Offset |
 | --- | --- | --- | --- | --- |
 | CYD 2.4 | `cyd_2_4` | `esp32` | `0x0` | `0x10000` |
+| CYD 3.5 | `cyd_3_5` | `esp32` | `0x0` | `0x10000` |
 | LilyGO T-Display-S3 | `t_display_s3` | `esp32s3` | `0x0` | `0x10000` |
+| LilyGO T-Embed CC1101 | `t_embed_cc1101` | `esp32s3` | `0x0` | `0x10000` |
 
 Release filenames:
 
 - `neondrive_<version>_<target>_fullflash.bin`
 - `neondrive_<version>_<target>_app.bin`
+- `NEONDRIVE_<DEVICE_NAME>_<VERSION>.bin` (from `Device-Bins/`, fullflash at `0x0`)
 
 ## 3) Flash Prebuilt Binaries (Recommended)
+
+If you are using `Device-Bins/` artifacts (`NEONDRIVE_<DEVICE_NAME>_<VERSION>.bin`), flash at `0x0`:
+
+- CYD 2.4 / CYD 3.5 (`esp32`):
+  - `python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32 --port COM15 --baud 460800 write_flash 0x0 NEONDRIVE_CYD-3.5_<VERSION>.bin`
+- T-Display-S3 / T-Embed-CC1101 (`esp32s3`):
+  - `python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port COM3 --baud 460800 write_flash 0x0 NEONDRIVE_T-DisplayS3_<VERSION>.bin`
 
 ### CYD 2.4
 
@@ -47,6 +57,20 @@ Upgrade only:
 
 ```bash
 python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32 --port COM10 --baud 460800 write_flash 0x10000 neondrive_<version>_cyd_2_4_app.bin
+```
+
+### CYD 3.5
+
+Full install:
+
+```bash
+python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32 --port COM15 --baud 460800 write_flash 0x0 neondrive_<version>_cyd_3_5_fullflash.bin
+```
+
+Upgrade only:
+
+```bash
+python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32 --port COM15 --baud 460800 write_flash 0x10000 neondrive_<version>_cyd_3_5_app.bin
 ```
 
 ### LilyGO T-Display-S3
@@ -63,27 +87,47 @@ Upgrade only:
 python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port COM3 --baud 460800 write_flash 0x10000 neondrive_<version>_t_display_s3_app.bin
 ```
 
+### LilyGO T-Embed CC1101
+
+Full install:
+
+```bash
+python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port COM11 --baud 460800 write_flash 0x0 neondrive_<version>_t_embed_cc1101_fullflash.bin
+```
+
+Upgrade only:
+
+```bash
+python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port COM11 --baud 460800 write_flash 0x10000 neondrive_<version>_t_embed_cc1101_app.bin
+```
+
 ## 4) Build and Flash From Source
 
 Build:
 
 ```bash
 python -m platformio run -e firmware_cyd_2_4
+python -m platformio run -e firmware_cyd_3_5
 python -m platformio run -e firmware_t_display_s3
+python -m platformio run -e firmware_t_embed_cc1101
 ```
 
 Flash:
 
 ```bash
 python -m platformio run -e firmware_cyd_2_4 -t upload --upload-port COM10
+python -m platformio run -e firmware_cyd_3_5 -t upload --upload-port COM15
 python -m platformio run -e firmware_t_display_s3 -t upload --upload-port COM3
+python -m platformio run -e firmware_t_embed_cc1101 -t upload --upload-port COM11
 ```
 
 Windows helper scripts:
 
 ```bat
 scripts\flash_cyd.cmd COM10
+scripts\flash_cyd35.cmd COM15
 scripts\flash_tdisplay_s3.cmd COM3
+scripts\flash_tembed_cc1101.cmd COM11
 ```
 
 ## 5) Serial Monitor
@@ -92,7 +136,9 @@ Baud rate: `115200`
 
 ```bash
 python -m platformio device monitor -p COM10 -b 115200
+python -m platformio device monitor -p COM15 -b 115200
 python -m platformio device monitor -p COM3 -b 115200
+python -m platformio device monitor -p COM11 -b 115200
 ```
 
 Runtime debug commands:
@@ -101,6 +147,12 @@ Runtime debug commands:
 - `s` prints status snapshot
 
 ## 6) Boot Mode Notes
+
+### CYD 3.5 Touch Calibration
+
+- First boot on CYD 3.5 runs touch calibration and saves `/touch_cal_cyd35.json` to the SD card.
+- If touch mapping is wrong after swapping panels, delete `/touch_cal_cyd35.json` from SD and reboot to re-run calibration.
+- Runtime should print calibration lines in serial with `[touch-cal]`.
 
 - If flashing fails with connection/reset errors, put the board in download mode and retry.
 - T-Display-S3 typically uses `BOOT` + `RST` to enter ROM download mode.
