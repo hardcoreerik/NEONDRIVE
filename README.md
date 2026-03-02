@@ -1,45 +1,63 @@
-# NEONdrive Firmware (CYD 2.4 + CYD 3.5 + T-Display-S3 + T-Embed-CC1101)
+# NEONdrive Firmware
+Multi-target ESP32 firmware for CYD and LilyGO boards.
 
-NEONdrive maintains separate firmware targets per device so users can flash the correct build without guessing.
+This README is written for any machine.
+No hardcoded serial ports. You always use `<PORT>`.
 
-## Supported Hardware
+## Hardware Targets
 
-| Device | PlatformIO Env | Input Mode |
-| --- | --- | --- |
-| CYD 2.4 (ESP32-2432S024 family) | `firmware_cyd_2_4` | Touch |
-| CYD 3.5 (ESP32-3248S035R family) | `firmware_cyd_3_5` | Touch (XPT2046, one-time startup calibration) |
-| LilyGO T-Display-S3 | `firmware_t_display_s3` | Touch (if present) + hardware buttons fallback |
-| LilyGO T-Embed CC1101 | `firmware_t_embed_cc1101` | Rotary encoder + buttons |
-| M5Cardputer Advanced | planned | planned |
+| Device | PlatformIO Env | Chip | Input |
+|---|---|---|---|
+| CYD 2.4 (ESP32-2432S024) | `firmware_cyd_2_4` | `esp32` | Touch |
+| CYD 3.5 (ESP32-3248S035R) | `firmware_cyd_3_5` | `esp32` | Touch |
+| LilyGO T-Display-S3 | `firmware_t_display_s3` | `esp32s3` | Touch + button fallback |
+| LilyGO T-Embed CC1101 | `firmware_t_embed_cc1101` | `esp32s3` | Encoder + buttons |
 
-T-Display-S3 fallback controls:
-- `BUTTON_1` = Next focus
-- `BUTTON_2` = Select focused item
+## Ground Rule: Port Is Never Hardcoded
 
-T-Embed-CC1101 controls:
-- Encoder rotate = Next/Previous focus
-- Encoder press = Select focused item
-- Side key (`KEY`) = Next focus
+Use `<PORT>` in every command.
+Examples:
+- Windows: `COM7`
+- Linux: `/dev/ttyUSB0`
+- macOS: `/dev/cu.usbmodem2101`
 
-## Quick Install (Prebuilt `.bin` Files)
+Find your port:
 
-For public users, this is the easiest flow:
+```bash
+python -m platformio device list
+```
 
-1. Open GitHub Releases.
-2. Use `Device-Bins/` if you want one fullflash file per device:
-   - `NEONDRIVE_<DEVICE_NAME>_<VERSION>.bin`
-3. Or download the two release files for your target:
-   - `neondrive_<version>_<target>_app.bin`
-   - `neondrive_<version>_<target>_fullflash.bin`
-4. Flash one of these:
-   - `fullflash.bin` for first install / clean install.
-   - `app.bin` for upgrade at `0x10000`.
+## Path A: Flash Precompiled Binaries (Fastest)
 
-Detailed commands are in [docs/INSTALL.md](docs/INSTALL.md).
+Prebuilt files are in releases and `Device-Bins/`.
 
-## Build and Flash From Source
+### Device-Bins naming
 
-Build:
+`NEONDRIVE_<DEVICE_NAME>_<VERSION>.bin`
+
+### Flash one full image (offset `0x0`)
+
+For `esp32` targets (CYD 2.4 / CYD 3.5):
+
+```bash
+python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32 --port <PORT> --baud 460800 write_flash 0x0 NEONDRIVE_CYD-3.5_<VERSION>.bin
+```
+
+For `esp32s3` targets (T-Display-S3 / T-Embed):
+
+```bash
+python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port <PORT> --baud 460800 write_flash 0x0 NEONDRIVE_T-DisplayS3_<VERSION>.bin
+```
+
+## Path B: Build From Source
+
+Install PlatformIO:
+
+```bash
+python -m pip install -U platformio
+```
+
+Build all targets:
 
 ```bash
 python -m platformio run -e firmware_cyd_2_4
@@ -48,65 +66,54 @@ python -m platformio run -e firmware_t_display_s3
 python -m platformio run -e firmware_t_embed_cc1101
 ```
 
-Flash:
+Flash by target:
 
 ```bash
-python -m platformio run -e firmware_cyd_2_4 -t upload --upload-port COM10
-python -m platformio run -e firmware_cyd_3_5 -t upload --upload-port COM15
-python -m platformio run -e firmware_t_display_s3 -t upload --upload-port COM3
-python -m platformio run -e firmware_t_embed_cc1101 -t upload --upload-port COM11
+python -m platformio run -e firmware_cyd_2_4 -t upload --upload-port <PORT>
+python -m platformio run -e firmware_cyd_3_5 -t upload --upload-port <PORT>
+python -m platformio run -e firmware_t_display_s3 -t upload --upload-port <PORT>
+python -m platformio run -e firmware_t_embed_cc1101 -t upload --upload-port <PORT>
 ```
 
-Helper scripts:
-
-```bat
-scripts\flash_cyd.cmd COM10
-scripts\flash_cyd35.cmd COM15
-scripts\flash_tdisplay_s3.cmd COM3
-scripts\flash_tembed_cc1101.cmd COM11
-scripts\monitor_cyd.cmd COM10
-scripts\monitor_cyd35.cmd COM15
-scripts\monitor_tdisplay_s3.cmd COM3
-scripts\monitor_tembed_cc1101.cmd COM11
-```
-
-## Release Artifacts (Maintainers)
-
-Build release bins for all supported targets:
+Monitor serial:
 
 ```bash
-python scripts/build_release_bins.py --version v0.1.0
-python scripts/build_device_bins.py --version v0.1.0
+python -m platformio device monitor -p <PORT> -b 115200
 ```
 
-Outputs are written to:
+## CYD 3.5 Touch Calibration
 
-```text
-dist/releases/<version>/
+- First boot runs touch calibration wizard.
+- Calibration is saved to SD as `/touch_cal_cyd35.json`.
+- To force recalibration, delete `/touch_cal_cyd35.json` and reboot.
+
+## Release Packaging (Maintainers)
+
+Build release artifacts:
+
+```bash
+python scripts/build_release_bins.py --version vX.Y.Z
 ```
 
-That folder contains per-target `app.bin`, `fullflash.bin`, `release_manifest.json`, and `release_sha256.txt`.
-`Device-Bins/` contains one-click fullflash files named:
-- `NEONDRIVE_CYD-2.4_<version>.bin`
-- `NEONDRIVE_CYD-3.5_<version>.bin`
-- `NEONDRIVE_T-DisplayS3_<version>.bin`
-- `NEONDRIVE_T-Embed-CC1101_<version>.bin`
+Build user-facing `Device-Bins` package:
 
-Full release workflow is documented in [docs/RELEASES.md](docs/RELEASES.md).
+```bash
+python scripts/build_device_bins.py --version vX.Y.Z
+```
 
-## M5Cardputer Advanced / Launcher Plan
+## Troubleshooting
 
-Planned launcher-compatible packaging approach is documented in:
+- If upload fails, check cable quality (data cable required).
+- If board is not detected, press BOOT/RESET and retry.
+- If touch is wrong on CYD 3.5, remove SD calibration file and reboot.
+- If port changes after reconnect, rerun:
 
-- [docs/M5CARDPUTER_ADV_LAUNCHER_PLAN.md](docs/M5CARDPUTER_ADV_LAUNCHER_PLAN.md)
+```bash
+python -m platformio device list
+```
 
-## Docs Index
+## Docs
 
-- [docs/INSTALL.md](docs/INSTALL.md) - end-user install and flash commands
-- [docs/HARDWARE_TARGETS.md](docs/HARDWARE_TARGETS.md) - target matrix
-- [docs/RELEASES.md](docs/RELEASES.md) - maintainer release process
-- [docs/memory.md](docs/memory.md) - DRAM/memory notes
-
-## Legal
-
-Use only on infrastructure you own or are explicitly authorized to test.
+- [docs/INSTALL.md](docs/INSTALL.md)
+- [docs/HARDWARE_TARGETS.md](docs/HARDWARE_TARGETS.md)
+- [docs/RELEASES.md](docs/RELEASES.md)
