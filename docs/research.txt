@@ -1,0 +1,551 @@
+================================================================================
+  ESP32 NETWORK PORT SCANNER — RESEARCH & BEST PRACTICES
+  Phase 2 Research Compilation
+  Date: March 1, 2026
+  Project: M5PORKCHOP-CYD Full Replacement (CYD 2.4" / ESP32)
+================================================================================
+
+This document summarises everything learned across three rounds of research
+conducted before implementing the port scanner rewrite. Sources include:
+  - lwIP 2.2.x source code and documentation
+  - Marauder firmware (WiFiScan.cpp — proven production ESP32 code)
+  - AntiHunter v0.9.0 (ESP32-S3 security scanner, 332 stars)
+  - ESP32-DIV v1.5.0 (ESP32-S3 ILI9341 multi-tool, 2.6k stars)
+  - esp32-network-discovery (C++ port scanner with full source)
+  - ESP32 probe-request sniffer (ETS-PoliTO/esp32-sniffer)
+  - "Democratizing Network Security: ESP32 Packet Sniffing" (IJSTM 2025)
+  - AntiHunter production RF configuration documentation
+
+
+================================================================================
+PART 1 — HOW ARP WORKS ON THE ESP32 (lwIP 2.2.x)
+================================================================================
+
+When your ESP32 wants to know if an IP address is alive on the local network,
+the lowest-cost way is to send an ARP (Address Resolution Protocol) request.
+ARP is a Layer 2 broadcast: "Who has IP 192.168.1.50? Tell me your MAC." If
+the target device is alive and not firewalled, it replies within milliseconds.
+
+On the ESP32, lwIP owns the network stack. The relevant API call is:
+
+    etharp_request(netif_default, &ip4_addr);
+
+This queues an ARP packet for transmission. The reply — if one comes — is
+processed asynchronously by the lwIP task running on Core 0. Once processed,
+the MAC address is stored in the lwIP ARP table. You query the table with:
+
+    s8_t index = etharp_find_addr(netif_default, &ip4_addr, &eth_ret, &ip_ret);
+
+CRITICAL: etharp_find_addr() returns the TABLE INDEX (0 or higher) on success,
+and -1 on failure. It does NOT return ERR_OK (which equals 0). This is the
+single most important fact in this entire document. A check like:
+
+    if (etharp_find_addr(...) != ERR_OK)  // WRONG — returns false for index 0
+
+must be written as:
+
+    if (etharp_find_addr(...) < 0)        // CORRECT
+
+The original port scanner code used the wrong check, which meant ARP index 0
+(the first device found) was always treated as "not found." This is why the
+scanner produced zero results.
+
+
+================================================================================
+PART 2 — ARP TIMING: HOW LONG TO WAIT FOR A REPLY
+================================================================================
+
+After sending an ARP request, you must wait before querying the table.
+How long depends on the network type:
+
+  - A wired PC responds in ~1ms
+  - A modern smartphone responds in ~5-15ms
+  - A smart home IoT device (light bulb, thermostat) responds in ~30-100ms
+  - An industrial or embedded device can take up to 200ms
+  - A sleeping/power-saving device may not respond at all
+
+Production timing values found across real projects:
+
+  Source                  | Single ARP wait | Batch flush wait
+  ----------------------- | --------------- | ----------------
+  Marauder (single)       | 250ms           | —
+  Marauder (batch 10)     | 100ms per probe | 250ms final flush
+  AntiHunter "Aggressive" | 110ms dwell     | —
+  AntiHunter "Balanced"   | 160ms dwell     | —
+  AntiHunter "Relaxed"    | 300ms dwell     | —
+  esp32-network-discovery | 100ms per host  | —
+  Our original code       | 30ms            | NONE  ← too low
+
+BEST PRACTICE #1:
+  Minimum ARP wait: 100ms per host.
+  Recommended for mixed networks: 150ms.
+  Never go below 50ms — you will miss IoT devices consistently.
+
+BEST PRACTICE #2:
+  Batch strategy (faster than one-at-a-time):
+    a. Send ARP probes in groups of 8-10
+    b. Wait 200ms after the last probe in the batch
+    c. Read results for all probes in the batch
+    d. Repeat with the next batch
+  This is faster than waiting per-probe because probes can be in-flight
+  simultaneously while the wait covers the slowest responder in the batch.
+
+
+================================================================================
+PART 3 — TCP PORT SCANNING: BLOCKING VS NON-BLOCKING
+================================================================================
+
+A TCP port scan works by trying to establish a full TCP connection. If the
+target port is open, the three-way handshake completes (SYN → SYN-ACK → ACK).
+If closed, the target sends RST. If firewalled (filtered), no response comes
+and you wait until your timeout expires.
+
+On the ESP32, WiFiClient.connect() is SYNCHRONOUS AND BLOCKING. This means:
+
+  - Your entire main loop freezes during the connect() call
+  - The display freezes
+  - The watchdog timer keeps counting
+  - 50 hosts × 9 ports × 120ms timeout = ~54 seconds worst-case freeze
+  - The ESP32 watchdog fires after ~5-8 seconds → hard reboot
+
+BEST PRACTICE #3:
+  Call yield() or vTaskDelay(1) between EVERY port probe, not just between
+  hosts. This feeds the watchdog, allows the WiFi stack to process incoming
+  data, and prevents SPI bus lockups on the display.
+
+  Example inner loop pattern:
+    for each host:
+        for each port:
+            bool open = checkTcpPort(host, port);
+            delay(50);
+            yield();            // ← MANDATORY
+            esp_task_wdt_reset(); // ← safety net
+
+BEST PRACTICE #4:
+  TCP connect timeout: 100-200ms is correct for LAN scanning.
+  - Too low (< 50ms): misses slow IoT devices, false "closed" results
+  - Too high (> 500ms): scan takes forever, watchdog risk
+  - 120ms is fine. Do NOT change the timeout value, fix the yield.
+
+BEST PRACTICE #5:
+  ALWAYS call client.stop() after BOTH successful AND failed connections.
+  Leaving a client socket open is a resource leak. On Arduino-ESP32, open
+  sockets consume from a pool of ~16 maximum connections. Running out causes
+  all subsequent connects to fail immediately, making every port appear closed.
+
+BEST PRACTICE #6:
+  Retry logic per port (optional but reduces false negatives):
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (client.connect(target, port)) break;
+        if (attempt == 0) delay(50); // brief wait before retry
+    }
+  Two attempts is sufficient. More than two wastes scan time.
+
+BEST PRACTICE #7:
+  After a successful TCP connect, write a small protocol-specific probe before
+  checking client.available(). This confirms the service is actually responding
+  (not just accepting connections and RST-ing). Wait ~100ms for the response.
+  Known probe bytes:
+    - Port 80:    "HEAD / HTTP/1.1\r\nHost: [ip]\r\nConnection: close\r\n\r\n"
+    - Port 443:   (just connection is enough — TLS would require full handshake)
+    - Port 22:    (just connection — SSH banner appears within 100ms)
+    - Port 1883:  (just connection — MQTT connect packet is complex)
+    - Port 502:   {0x00,0x01,0x00,0x00,0x00,0x06,0x01,0x03,0x00,0x00,0x00,0x01}
+                  (MODBUS TCP read holding register request)
+
+
+================================================================================
+PART 4 — HOST DISCOVERY STRATEGY
+================================================================================
+
+Do not attempt TCP port scans on all 254 addresses blindly. The correct
+strategy is a two-phase approach:
+
+  PHASE 1 — DISCOVERY (ARP sweep)
+    Send ARP probes to all hosts, collect which ones respond with a MAC.
+    Only these are "alive" on the network. Typical LAN: 3-20 alive hosts.
+
+  PHASE 2 — PORT SCAN (TCP sweep of alive hosts only)
+    Only scan the N alive hosts discovered in Phase 1.
+    For a typical home network: 5 hosts × 9 ports = 45 TCP probes.
+    For a busy office: 30 hosts × 9 ports = 270 TCP probes.
+    Without Phase 1: 254 × 9 = 2286 TCP probes (worst-case ~4.5 minutes).
+
+BEST PRACTICE #8:
+  ICMP ping (Ping.ping()) as a liveness check BEFORE TCP scanning is even
+  faster than TCP-based discovery:
+    - ICMP response: ~1-50ms
+    - TCP connect to closed port with RST: ~5ms
+    - TCP connect to filtered port: up to 120ms (full timeout)
+  Marauder uses Ping.ping(ip, 1) before checkHostPort(). We should do likewise.
+  Use ARP first, ICMP fallback, TCP/80 + TCP/443 as last resort.
+
+BEST PRACTICE #9 (NEW — from esp32-network-discovery):
+  Dual-strategy discovery chain:
+    a. Try ARP (etharp_request → wait 100ms → etharp_find_addr)
+    b. If no ARP response: try UDP to port 7 (echo) — triggers OS ARP
+    c. If still no response: try TCP connect to port 80, then 443
+  This catches devices that don't respond to ARP (some IoT stacks are broken)
+  but do respond to TCP connections.
+
+
+================================================================================
+PART 5 — ADDRESS FILTERING (DO NOT SCAN THESE)
+================================================================================
+
+Before sending any probe to an IP address, validate it against these rules.
+Skipping these checks wastes probe budget and can cause crashes or errors.
+
+BEST PRACTICE #10:
+  Multi-layer address filter — reject probes to:
+    1. Subnet network address     (e.g. 192.168.1.0)
+    2. Subnet broadcast address   (e.g. 192.168.1.255)
+    3. Your own IP address        (ETH.localIP() or WiFi.localIP())
+    4. Gateway/router IP          (WiFi.gatewayIP())
+    5. Loopback range             (127.x.x.x)
+    6. Null address               (0.0.0.0)
+    7. Global broadcast           (255.255.255.255)
+    8. Multicast range            (224.x.x.x – 239.x.x.x, first octet >= 224)
+    9. Martian ranges             (first octet == 0)
+
+  Apply this filter in the PROBE GENERATION loop, not at result insertion.
+  Filtering at insertion is too late — you've already sent a wasted probe.
+
+BEST PRACTICE #11:
+  Subnet prefix guard — reject scan requests where the subnet mask would
+  cause more than 1022 hosts to be scanned (/21 or larger = > 1022 hosts):
+    - /24 (255.255.255.0): 254 hosts — OK
+    - /23 (255.255.254.0): 510 hosts — warn user, but allow
+    - /22 (255.255.252.0): 1022 hosts — warn strongly, confirm before scanning
+    - /16 (255.255.0.0): 65534 hosts — REJECT immediately
+  The CYD has no way to display 65000 results. It would run for hours.
+  Hard limit: reject any scan where host count > 1024.
+  
+  Code to check this:
+    uint32_t mask = (uint32_t)WiFi.subnetMask();
+    uint32_t hostBits = ~mask;
+    uint32_t hostCount = hostBits - 1; // exclude network + broadcast
+    if (hostCount > 1024) { /* reject */ }
+
+
+================================================================================
+PART 6 — WATCHDOG SAFETY
+================================================================================
+
+The ESP32 has two watchdog timers:
+  - Task Watchdog (TWDT): fires if any task doesn't yield within ~5 seconds
+  - Interrupt Watchdog (IWDT): fires on interrupt handler stall
+
+If your scan loop blocks for more than ~5 seconds without calling yield() or
+vTaskDelay(1), you get a forced reboot with a watchdog reset message.
+
+BEST PRACTICE #12:
+  Call esp_task_wdt_reset() explicitly every 100-200 probe attempts in your
+  scan loop. Do not rely on yield() alone. yield() feeds the WiFi stack but
+  does not always reset the TWDT (especially in tasks created with xTaskCreate).
+
+BEST PRACTICE #13:
+  If using the main Arduino loop (loop()), yield() is called automatically
+  between loop() iterations. The risk is highest inside NESTED loops
+  (for each host: for each port:) where you accumulate blocking time.
+  Breaking inner loops with a yield() at > 200ms elapsed wall-clock time
+  is a reliable strategy:
+    unsigned long t0 = millis();
+    for (int i = 0; i < numPorts; i++) {
+        scanPort(...);
+        if (millis() - t0 > 200) { yield(); t0 = millis(); }
+    }
+
+BEST PRACTICE #14:
+  Minimum stack size for a scan task: 4096 bytes.
+  WiFiClient + lwIP + local string buffers can easily consume 2-3KB of stack.
+  Use uxTaskGetStackHighWaterMark() in debug builds to verify.
+
+
+================================================================================
+PART 7 — FreeRTOS TASK ARCHITECTURE (ADVANCED)
+================================================================================
+
+The gold-standard approach for non-blocking scanning is to run the scanner
+in its own FreeRTOS task, pinned to Core 1 (leaving Core 0 for the WiFi stack
+and Core 1 for the main Arduino loop / display).
+
+Key rules when doing this:
+
+BEST PRACTICE #15:
+  Pin the scan task to Core 1:
+    xTaskCreatePinnedToCore(scanTask, "scanner", 4096, NULL, 1, &scanHandle, 1);
+  The WiFi driver runs on Core 0. If your scan task is also on Core 0, it
+  competes with the WiFi stack during TCP connect() calls, causing delays.
+
+BEST PRACTICE #16:
+  Communicate between scan task and UI (display) task using:
+    - A shared results array protected by a FreeRTOS mutex (xSemaphoreMutex)
+    - OR a FreeRTOS queue (xQueueSend/xQueueReceive) for small result structs
+  Never have the scan task directly call TFT display functions — SPI is not
+  thread-safe without explicit bus locking.
+
+BEST PRACTICE #17 (from ETS-PoliTO/esp32-sniffer):
+  WIFI_MODE_APSTA pattern: configuring the ESP32 as both Station (STA, connected
+  to your network for scanning) and Soft-AP simultaneously allows it to continue
+  receiving scan data even while doing WiFi management operations. For our use
+  case, this means the scan can continue running while the UI task is refreshing
+  the display without dropping ARP replies.
+
+
+================================================================================
+PART 8 — UI AND DISPLAY BEST PRACTICES
+================================================================================
+
+The CYD's ILI9341 uses synchronous SPI. Every fillRect() and drawString() call
+blocks the CPU for its duration. On a 240×320 display at 80MHz SPI:
+  - Full screen clear (fillScreen): ~25ms
+  - Small region clear (100×20 px): ~0.5ms
+  - One line of text: ~1-2ms
+
+BEST PRACTICE #18:
+  Use a "dirty flag" per UI region. Only redraw a region when its data has
+  actually changed:
+    static uint8_t lastHostCount = 0;
+    if (currentHostCount != lastHostCount) {
+        drawHostCount(currentHostCount);
+        lastHostCount = currentHostCount;
+    }
+  This eliminates the majority of display redraws. Never redraw on every tick.
+
+BEST PRACTICE #19:
+  Progress bar: update by changing the fill width of a rectangle, not by
+  clearing and redrawing. One fillRect() call that extends from 0 to N pixels
+  wide is faster and flicker-free:
+    tft.fillRect(barX, barY, (int)(pct * barW / 100.0f), barH, barColor);
+    // Only draw the NEW portion, not the entire bar
+
+BEST PRACTICE #20:
+  For a scrolling console/log region, draw ONE new line at the bottom by
+  scrolling the region up one line (hardware scroll if supported, or just
+  redraw the visible lines from a ring buffer). Never redraw all visible
+  lines on every new entry — the flash is visible to the human eye above ~3Hz.
+
+BEST PRACTICE #21:
+  Minimum redraw interval: 200ms between full UI refreshes.
+  At 5Hz redraw rate, each redraw cycle consumes ~150ms of CPU for a 320×240
+  display. At 10Hz it consumes ~300ms, which starves your scan loop.
+  Tie redraws to millis()-based throttling, not to scan state transitions.
+
+BEST PRACTICE #22 (from AntiHunter scan presets):
+  Expose scan speed as a named preset pair, not individual timeout values.
+  Users cannot reason about "ARP wait 100ms vs 160ms" but they understand
+  "FAST (misses slow devices) vs NORMAL (catches everything)".
+  Minimum viable presets:
+    FAST:   ARP wait 100ms, TCP timeout 80ms,  inter-probe delay 25ms
+    NORMAL: ARP wait 150ms, TCP timeout 120ms, inter-probe delay 50ms
+
+
+================================================================================
+PART 9 — MEMORY MANAGEMENT ON ESP32
+================================================================================
+
+The ESP32 has two memory regions relevant to the scanner:
+  - DRAM (internal SRAM): ~320KB total, ~100-120KB free after WiFi stack
+  - PSRAM (external, if present): 4-8MB, slower access
+
+Each ReconHostRecord struct holds:
+  - 4 bytes IP
+  - 6 bytes MAC
+  - 32 bytes vendor string
+  - 32 bytes hostname
+  - 32 bytes OS guess
+  - 4 bytes RTT
+  - 2 bytes open port count
+  - 32 bytes open port array (16 ports × 2 bytes)
+  Total: ~144 bytes per host
+
+For RECON_MAX_HOSTS = 50:  50 × 144 = 7,200 bytes — safe in DRAM.
+For RECON_MAX_HOSTS = 200: 200 × 144 = 28,800 bytes — requires PSRAM.
+
+BEST PRACTICE #23:
+  Keep RECON_MAX_HOSTS at 50 for DRAM-only builds.
+  If PSRAM is available (BOARD_HAS_PSRAM), use ps_malloc() to allocate the
+  results array and safely go up to 200+ hosts.
+
+BEST PRACTICE #24 (from IJSTM paper, AntiHunter):
+  Use a circular ring buffer for incoming results. If the scan discovers
+  more hosts than RECON_MAX_HOSTS, overwrite the oldest entry rather than
+  dropping new ones. The most recent results are always the most interesting.
+
+BEST PRACTICE #25 (from AntiHunter baseline feature):
+  Two-phase scan model (optional enhancement):
+    Phase A: Do a full ARP + port scan, store baseline.
+    Phase B: Re-scan periodically, alert on NEW devices (joined) and MISSING
+             devices (left). This turns the scanner into an intrusion detection
+             tool with no extra hardware.
+
+
+================================================================================
+PART 10 — RTT MEASUREMENT
+================================================================================
+
+Round-Trip Time (RTT) is the time from when you send a TCP SYN to when you
+receive SYN-ACK (or RST). It correlates with latency and can hint at device
+type (sub-1ms = local wired; 5-20ms = local WiFi; >50ms = VPN or remote).
+
+BEST PRACTICE #26 (from IJSTM 2025 paper):
+  Use esp_timer_get_time() for microsecond-resolution RTT measurement:
+    uint64_t t0 = esp_timer_get_time();  // microseconds
+    bool open = client.connect(target, port);
+    uint64_t rtt_us = esp_timer_get_time() - t0;
+    uint16_t rtt_ms = (uint16_t)(rtt_us / 1000);
+  Store this in ReconHostRecord.rttMs. It is free — no extra overhead.
+  millis() has only 1ms resolution; esp_timer_get_time() has 1µs resolution.
+
+
+================================================================================
+PART 11 — SERVICE NAME AND OUI DATABASE
+================================================================================
+
+BEST PRACTICE #27:
+  Service name lookup must handle our actual port list efficiently. A switch()
+  statement (compiled to a jump table) beats a linear search for ~20 entries:
+    case 21:   return "FTP";
+    case 22:   return "SSH";
+    case 23:   return "Telnet";
+    case 25:   return "SMTP";
+    case 53:   return "DNS";
+    case 80:   return "HTTP";
+    case 110:  return "POP3";
+    case 443:  return "HTTPS";
+    case 445:  return "SMB";
+    case 502:  return "MODBUS";
+    case 554:  return "RTSP";
+    case 1883: return "MQTT";
+    case 3306: return "MySQL";
+    case 3389: return "RDP";
+    case 5000: return "UPnP";
+    case 8080: return "HTTP-Alt";
+    case 8443: return "HTTPS-Alt";
+    case 47808: return "BACnet";
+    default:   return "?";
+
+BEST PRACTICE #28:
+  The OUI (vendor) lookup (already in recon_oui_db.h) is the right approach.
+  Only store the 3-byte OUI prefix, not the full MAC, to save DRAM.
+  As a fast fallback, common home network OUIs worth hardcoding:
+    DC:A6:32 = Raspberry Pi
+    B8:27:EB = Raspberry Pi
+    18:FE:34 = Espressif Systems
+    24:62:AB = Espressif Systems
+    D8:3A:DD = Espressif Systems
+  These catch 80% of DIY IoT devices on home networks immediately.
+
+
+================================================================================
+PART 12 — BUGS IDENTIFIED IN ORIGINAL CODE (SUMMARY)
+================================================================================
+
+For reference: the specific bugs found in the original recon_port_scanner.cpp
+before any fixes were applied.
+
+  BUG #1 [CRITICAL] — recon_port_scanner.cpp:182
+    if (etharp_find_addr(...) != ERR_OK || !eth) return false;
+    FIX: change != ERR_OK  to  < 0
+    IMPACT: Scanner produced ZERO results on any network. ARP index 0 (first
+    device) was always treated as not found.
+
+  BUG #2 [CRITICAL] — main.cpp (absent)
+    ReconPortScanner was never instantiated. tick() was never called.
+    FIX: Add static instance, call tick() from main loop.
+    IMPACT: Even with all other bugs fixed, scanner never ran.
+
+  BUG #3 [CRITICAL] — main.cpp:7920
+    ScreenId::RECON draws the DeauthHunter screen, not the port scanner.
+    FIX: Create ScreenId::PORT_SCANNER and route it to a new draw function.
+    IMPACT: Port scanner had no UI whatsoever.
+
+  BUG #4 [HIGH] — recon_port_scanner.cpp:221 (PORT_SCAN state)
+    checkTcpPort() blocks 120ms per probe, no yield(), no watchdog reset.
+    With 50 hosts × 9 ports = 450 probes = 54 seconds → watchdog fires.
+    FIX: Add yield() and esp_task_wdt_reset() in the inner probe loop.
+
+  BUG #5 [MEDIUM] — recon_port_scanner.cpp:299
+    ARP reply wait = 30ms. Misses all IoT/embedded devices.
+    FIX: Change to 100ms minimum.
+
+  BUG #6 [MEDIUM] — (absent)
+    No subnet prefix guard. On a /16 network, scanner would attempt 65534 hosts.
+    FIX: Reject scans where host count > 1024.
+
+  BUG #7 [LOW] — (absent)
+    Gateway IP not excluded from scan. Router gets port-scanned on every run.
+    FIX: Add WiFi.gatewayIP() to the address exclusion filter.
+
+  BUG #8 [LOW] — main.cpp:8096
+    Stats panel redraws with fillRect() clear on every event regardless of
+    whether data changed. Causes visible flicker.
+    FIX: Dirty-flag pattern — only redraw on value change.
+
+
+================================================================================
+PART 13 — RECOMMENDED PORT LIST
+================================================================================
+
+The original RECON_MAX_SCAN_PORTS = 24, but the code only defined 9 ports.
+Based on the research, this is the recommended set for a home/office LAN scan
+that catches the most interesting services in minimum scan time:
+
+  Priority 1 (always scan — highest value, common):
+    22   SSH        — Linux/embedded management
+    80   HTTP       — Any web interface
+    443  HTTPS      — Secure web interface
+    8080 HTTP-Alt   — Cameras, NAS, printers
+    1883 MQTT       — IoT message brokers
+
+  Priority 2 (scan if time allows):
+    21   FTP        — Old NAS and cameras
+    23   Telnet     — Very old devices
+    445  SMB        — Windows file sharing
+    3389 RDP        — Windows remote desktop
+    554  RTSP       — IP cameras, video streams
+    5000 UPnP       — Smart TVs, routers
+    3306 MySQL      — Exposed databases (rare but notable)
+
+  Do NOT include by default:
+    47808 BACnet   — Only relevant in building automation environments
+    502   MODBUS   — Only relevant in industrial environments
+    53    DNS      — Nearly every router responds; not interesting for discovery
+
+  Optimal default list (11 ports, ~1.3s per host at 120ms timeout):
+    22, 80, 443, 445, 554, 1883, 3389, 5000, 8080, 8443, 23
+
+
+================================================================================
+SOURCES CONSULTED
+================================================================================
+
+1.  lwIP 2.2.x source — lwip/etharp.h, etharp.c
+      etharp_find_addr() return type: s8_t (signed 8-bit integer, -1 = not found)
+
+2.  Marauder firmware (Juscifer9/ESP32Marauder)
+      WiFiScan.cpp — fullARP(), singleARP(), checkHostPort()
+      ARP timing: 250ms single / 100ms+250ms batch
+
+3.  AntiHunter v0.9.0 (github.com/lukeswitz/AntiHunter)
+      ESP32-S3 PlatformIO, scan preset table, OUI watchlist, two-phase baseline
+
+4.  ESP32-DIV v1.5.0 (github.com/cifertech/ESP32-DIV)
+      ILI9341 + ESP32-S3, multi-screen architecture, 2.6k stars
+
+5.  esp32-network-discovery (github.com/makeitworkok/esp32-network-discovery)
+      Full C++ port_scanner.cpp + network_scanner.cpp source reviewed
+      yield() per probe, retry logic, banner probing, address filtering
+
+6.  ETS-PoliTO/esp32-sniffer (via dasuntheekshanagit fork)
+      Dual-task mutex pattern, WIFI_MODE_APSTA design
+
+7.  Sanantagraha & Mahadewi (IJSTM Vol.6 No.5, Sep 2025)
+      DOI: 10.46729/ijstm.v6i5.1351
+      Circular buffer patterns, dual-core assignment for WiFi vs user tasks,
+      esp_timer_get_time() for microsecond RTT measurement
+
+================================================================================
+END OF DOCUMENT
+================================================================================

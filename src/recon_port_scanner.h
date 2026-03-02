@@ -48,7 +48,7 @@ class ReconPortScanner {
 public:
   ReconPortScanner();
 
-  bool start();
+  bool start(bool deep = false);
   void stop();
   void tick();
 
@@ -64,7 +64,7 @@ public:
   bool exportCsv(fs::FS& fs, const char* path = "/recon_scan.csv") const;
 
 private:
-  bool startInternal(const IPAddress& ip, const IPAddress& mask, const IPAddress& gateway);
+  bool startInternal(const IPAddress& ip, const IPAddress& mask, const IPAddress& gateway, bool deep);
   void setError(const char* msg);
   bool checkTcpPort(const IPAddress& ip, uint16_t port, uint16_t timeoutMs, uint16_t& elapsedMs) const;
   bool sendArpProbe(const IPAddress& ip);

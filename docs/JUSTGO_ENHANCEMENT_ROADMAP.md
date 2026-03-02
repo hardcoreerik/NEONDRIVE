@@ -18,7 +18,7 @@
 
 ## Available But Unused Attack Functions
 
-### 1. **BEACON SPAM** (BACON Mode - src_original/modes/bacon.h)
+### 1. **BEACON SPAM** (BACON Mode)
 **What It Does:**
 - Broadcasts fake beacon frames on specific channel
 - Spoofs AP fingerprints with vendor IE (OUI: 0x50:0x52:0x4B "PRK")
@@ -104,7 +104,7 @@ DEAUTH_FLOOD (45s) → RAW (45s)  [Skip Y0INK/JAMMIT]
 ---
 
 ### 4. **PASSIVE RECON** (DONOHAM Mode - Enhanced Scanning)
-**What It Does from src_original:**
+**What It Does:**
 - Adaptive channel hopping based on activity
 - Tracks incomplete handshakes across sessions
 - Stores PMKID/handshake references

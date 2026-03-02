@@ -95,7 +95,7 @@ ReconPortScanner::ReconPortScanner() {
   clearHosts();
 }
 
-bool ReconPortScanner::start() {
+bool ReconPortScanner::start(bool deep) {
   IPAddress ip;
   IPAddress mask;
   IPAddress gateway;
@@ -105,10 +105,10 @@ bool ReconPortScanner::start() {
     running_ = false;
     return false;
   }
-  return startInternal(ip, mask, gateway);
+  return startInternal(ip, mask, gateway, deep);
 }
 
-bool ReconPortScanner::startInternal(const IPAddress& ip, const IPAddress& mask, const IPAddress& gateway) {
+bool ReconPortScanner::startInternal(const IPAddress& ip, const IPAddress& mask, const IPAddress& gateway, bool deep) {
   localIp_ = ip;
   subnetMask_ = mask;
   gatewayIp_ = gateway;
@@ -116,10 +116,21 @@ bool ReconPortScanner::startInternal(const IPAddress& ip, const IPAddress& mask,
   memset(errorMessage_, 0, sizeof(errorMessage_));
 
   static const uint16_t kDefaultPorts[] = {21, 22, 23, 80, 443, 445, 8080, 502, 47808};
+  static const uint16_t kDeepExtra[]   = {25, 53, 110, 143, 3306, 3389, 5900,
+                                         8081, 8888, 9200, 27017, 11211,
+                                         1234, 161, 5000, 8000, 9000, 10000};
   portCount_ = 0;
+  // always add default ports first
   for (size_t i = 0; i < sizeof(kDefaultPorts) / sizeof(kDefaultPorts[0]); ++i) {
     if (portCount_ >= RECON_MAX_SCAN_PORTS) break;
     portList_[portCount_++] = kDefaultPorts[i];
+  }
+  // if deep scan requested, append extra ports until capacity
+  if (deep) {
+    for (size_t i = 0; i < sizeof(kDeepExtra) / sizeof(kDeepExtra[0]); ++i) {
+      if (portCount_ >= RECON_MAX_SCAN_PORTS) break;
+      portList_[portCount_++] = kDeepExtra[i];
+    }
   }
 
   subnetBaseU32_ = reconSubnetBaseFromU32(reconIpToU32(localIp_), reconIpToU32(subnetMask_));
@@ -127,6 +138,15 @@ bool ReconPortScanner::startInternal(const IPAddress& ip, const IPAddress& mask,
   subnetPrefix_ = reconPrefixLengthFromMaskU32(reconIpToU32(subnetMask_));
   firstHostU32_ = subnetBaseU32_ + 1U;
   lastHostU32_ = broadcastU32_ - 1U;
+
+  uint32_t hostBits = ~reconIpToU32(subnetMask_);
+  uint32_t hostCount = (hostBits > 1U) ? (hostBits - 1U) : 0U;
+  if (hostCount > 1024U) {
+    setError("Subnet too large (max /22)");
+    state_ = ReconScanState::ERROR;
+    running_ = false;
+    return false;
+  }
 
   if (firstHostU32_ > lastHostU32_) {
     setError("Invalid subnet");
@@ -187,7 +207,7 @@ bool ReconPortScanner::readArpEntry(const IPAddress& ip, uint8_t outMac[6]) cons
   IP4_ADDR(&addr, ip[0], ip[1], ip[2], ip[3]);
   struct eth_addr* eth = nullptr;
   const ip4_addr_t* ipRet = nullptr;
-  if (etharp_find_addr(netif_default, &addr, &eth, &ipRet) != ERR_OK || !eth) return false;
+  if (etharp_find_addr(netif_default, &addr, &eth, &ipRet) < 0 || !eth) return false;
   memcpy(outMac, eth->addr, 6);
   return true;
 #else
@@ -276,13 +296,17 @@ void ReconPortScanner::tick() {
         currentHostU32_++;
         return;
       }
+      if (probeIp == gatewayIp_) {
+        currentHostU32_++;
+        return;
+      }
       sendArpProbe(probeIp);
       probeSentAtMs_ = now;
       state_ = ReconScanState::DISCOVER_WAIT;
       return;
     }
     case ReconScanState::DISCOVER_WAIT: {
-      if ((now - probeSentAtMs_) < 30U) return;
+      if ((now - probeSentAtMs_) < 100U) return;
       state_ = ReconScanState::DISCOVER_READ;
       return;
     }
@@ -323,6 +347,8 @@ void ReconPortScanner::tick() {
         host.open[host.openCount++] = ReconOpenPort{port, reconServiceName(port)};
       }
       if (elapsedMs > host.rttMs) host.rttMs = elapsedMs;
+      yield();
+      delay(25);
       scanPortIndex_++;
       return;
     }
