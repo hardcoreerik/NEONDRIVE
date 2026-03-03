@@ -10,6 +10,8 @@ Each release must include:
 
 - `neondrive_<version>_cyd_2_4_app.bin`
 - `neondrive_<version>_cyd_2_4_fullflash.bin`
+- `neondrive_<version>_cyd_2_8_app.bin`
+- `neondrive_<version>_cyd_2_8_fullflash.bin`
 - `neondrive_<version>_cyd_3_5_app.bin`
 - `neondrive_<version>_cyd_3_5_fullflash.bin`
 - `neondrive_<version>_t_display_s3_app.bin`
@@ -17,6 +19,7 @@ Each release must include:
 - `neondrive_<version>_t_embed_cc1101_app.bin`
 - `neondrive_<version>_t_embed_cc1101_fullflash.bin`
 - `Device-Bins/NEONDRIVE_CYD-2.4_<version>.bin`
+- `Device-Bins/NEONDRIVE_CYD-2.8_<version>.bin`
 - `Device-Bins/NEONDRIVE_CYD-3.5_<version>.bin`
 - `Device-Bins/NEONDRIVE_T-DisplayS3_<version>.bin`
 - `Device-Bins/NEONDRIVE_T-Embed-CC1101_<version>.bin`
@@ -76,6 +79,7 @@ git push origin v0.1.0
 | Target | Bootloader | Partitions | boot_app0 | App |
 | --- | --- | --- | --- | --- |
 | `cyd_2_4` | `0x1000` | `0x8000` | `0xE000` | `0x10000` |
+| `cyd_2_8` | `0x1000` | `0x8000` | `0xE000` | `0x10000` |
 | `cyd_3_5` | `0x1000` | `0x8000` | `0xE000` | `0x10000` |
 | `t_display_s3` | `0x0000` | `0x8000` | `0xE000` | `0x10000` |
 | `t_embed_cc1101` | `0x0000` | `0x8000` | `0xE000` | `0x10000` |
