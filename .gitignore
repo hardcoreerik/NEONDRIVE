@@ -24,3 +24,14 @@ tmp_video_frames/
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# Binary/generated assets not part of firmware source
+include/*.ico
+docs/just_go_mock.png
+docs/mockups/*.png
+
+# Android companion build outputs
+CYDCompanion/app/build/
+CYDCompanion/build/
+CYDCompanion/.gradle/
+CYDCompanion/local.properties
