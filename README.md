@@ -130,6 +130,13 @@ Drop screenshots into `docs/mockups/` and reference them here. Example markdown:
 
 If you want, I can add screenshots to the README once you add images to `docs/mockups/`.
 
+Example screenshots (added):
+
+![NEONDRIVE — Main status screen](docs/mockups/screenshot1.svg)
+
+![NEONDRIVE — Menu and details](docs/mockups/screenshot2.svg)
+
+
 
 ## License & Credits
 

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="480" viewBox="0 0 800 480">
+  <rect width="100%" height="100%" fill="#0b1020"/>
+  <rect x="20" y="20" width="760" height="120" rx="8" fill="#0f1724" stroke="#1f2937" />
+  <text x="40" y="70" font-family="Segoe UI,Roboto,Arial" font-size="28" fill="#7dd3fc">NEONDRIVE</text>
+  <text x="40" y="102" font-family="Segoe UI,Roboto,Arial" font-size="14" fill="#94a3b8">Example: main status screen — WiFi, scan, log</text>
+  <g transform="translate(40,160)">
+    <rect width="720" height="260" rx="6" fill="#081226" stroke="#111827"/>
+    <text x="18" y="36" font-size="16" fill="#c7d2fe">Scan results</text>
+    <rect x="18" y="52" width="680" height="4" fill="#1e293b"/>
+    <text x="18" y="100" font-size="12" fill="#9ca3af">00:11:22:33:44:55  - ExampleAP  - -40dBm</text>
+    <text x="18" y="128" font-size="12" fill="#9ca3af">11:22:33:44:55:66  - AnotherNet - -72dBm</text>
+  </g>
+</svg>

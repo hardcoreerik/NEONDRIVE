@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="480" viewBox="0 0 800 480">
+  <rect width="100%" height="100%" fill="#071022"/>
+  <text x="40" y="60" font-family="Segoe UI,Roboto,Arial" font-size="22" fill="#60a5fa">Menu</text>
+  <g transform="translate(40,90)">
+    <rect width="220" height="320" rx="6" fill="#0b1220" stroke="#122032"/>
+    <text x="18" y="36" font-size="14" fill="#cbd5e1">1. Start scan</text>
+    <text x="18" y="72" font-size="14" fill="#cbd5e1">2. Saved captures</text>
+    <text x="18" y="108" font-size="14" fill="#cbd5e1">3. WiFi settings</text>
+    <text x="18" y="144" font-size="14" fill="#cbd5e1">4. Calibration</text>
+    <text x="18" y="180" font-size="14" fill="#9ca3af">5. Advanced...</text>
+  </g>
+  <g transform="translate(300,90)">
+    <rect width="420" height="320" rx="6" fill="#081226" stroke="#0f1724"/>
+    <text x="18" y="36" font-size="16" fill="#c7d2fe">Details</text>
+    <text x="18" y="72" font-size="12" fill="#9ca3af">No active scans. Press 'Start scan' to begin.</text>
+  </g>
+</svg>
