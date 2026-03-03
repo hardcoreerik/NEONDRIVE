@@ -1,17 +1,40 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="800" height="480" viewBox="0 0 800 480">
-  <rect width="100%" height="100%" fill="#071022"/>
-  <text x="40" y="60" font-family="Segoe UI,Roboto,Arial" font-size="22" fill="#60a5fa">Menu</text>
-  <g transform="translate(40,90)">
-    <rect width="220" height="320" rx="6" fill="#0b1220" stroke="#122032"/>
-    <text x="18" y="36" font-size="14" fill="#cbd5e1">1. Start scan</text>
-    <text x="18" y="72" font-size="14" fill="#cbd5e1">2. Saved captures</text>
-    <text x="18" y="108" font-size="14" fill="#cbd5e1">3. WiFi settings</text>
-    <text x="18" y="144" font-size="14" fill="#cbd5e1">4. Calibration</text>
-    <text x="18" y="180" font-size="14" fill="#9ca3af">5. Advanced...</text>
+  <!-- Target Ops mockup matching drawTargetDetails() style -->
+  <rect width="100%" height="100%" fill="#000000"/>
+  <rect x="0" y="0" width="800" height="36" fill="#071430" />
+  <text x="16" y="24" font-family="Segoe UI, Roboto, Arial" font-size="18" fill="#60a5fa">Target Ops</text>
+
+  <!-- HUD / details area -->
+  <g transform="translate(16,56)">
+    <rect width="760" height="320" rx="6" fill="#071226" stroke="#111827"/>
+    <text x="18" y="28" font-family="Segoe UI, Roboto" font-size="14" fill="#c7d2fe">Target: ExampleAP</text>
+    <text x="18" y="52" font-family="Segoe UI, Roboto" font-size="12" fill="#9ca3af">SSID: ExampleAP</text>
+    <text x="18" y="68" font-family="Segoe UI, Roboto" font-size="12" fill="#9ca3af">CH: 6  RSSI: -40dBm  SEC: WPA2</text>
+
+    <!-- Small HUD boxes -->
+    <rect x="520" y="18" width="208" height="48" rx="6" fill="#08182a" stroke="#122238"/>
+    <text x="540" y="44" font-family="Segoe UI, Roboto" font-size="12" fill="#60a5fa">Sniff: OFF</text>
   </g>
-  <g transform="translate(300,90)">
-    <rect width="420" height="320" rx="6" fill="#081226" stroke="#0f1724"/>
-    <text x="18" y="36" font-size="16" fill="#c7d2fe">Details</text>
-    <text x="18" y="72" font-size="12" fill="#9ca3af">No active scans. Press 'Start scan' to begin.</text>
+
+  <!-- Action rail on the left -->
+  <g transform="translate(16,140)">
+    <rect x="0" y="0" width="92" height="180" rx="6" fill="#05060a" stroke="#111827"/>
+    <text x="12" y="28" font-family="Segoe UI, Roboto" font-size="12" fill="#cbd5e1">Start Scan</text>
+    <text x="12" y="58" font-family="Segoe UI, Roboto" font-size="12" fill="#cbd5e1">Saved captures</text>
+    <text x="12" y="88" font-family="Segoe UI, Roboto" font-size="12" fill="#cbd5e1">WiFi settings</text>
+    <text x="12" y="118" font-family="Segoe UI, Roboto" font-size="12" fill="#cbd5e1">Calibration</text>
+  </g>
+
+  <!-- Footer hint and confirm buttons -->
+  <g transform="translate(16,420)">
+    <rect x="0" y="0" width="760" height="44" rx="6" fill="#05060a" stroke="#111827"/>
+    <text x="18" y="28" font-family="Segoe UI, Roboto" font-size="12" fill="#94a3b8">Tap Yes to proceed with the selected target</text>
+
+    <!-- Yes / No buttons on right -->
+    <rect x="560" y="6" width="96" height="32" rx="6" fill="#0b2f2b" stroke="#0f1724" />
+    <text x="608" y="28" font-family="Segoe UI, Roboto" font-size="14" fill="#ffffff" text-anchor="middle">Yes</text>
+
+    <rect x="664" y="6" width="96" height="32" rx="6" fill="#3b1414" stroke="#0f1724" />
+    <text x="712" y="28" font-family="Segoe UI, Roboto" font-size="14" fill="#ffffff" text-anchor="middle">No</text>
   </g>
 </svg>
