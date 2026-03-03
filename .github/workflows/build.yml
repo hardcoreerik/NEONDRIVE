@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [ main, develop, personality_disorder_innit ]
+    branches: [ main, develop ]
   pull_request:
     branches: [ main ]
 
@@ -27,6 +27,7 @@ jobs:
       - name: Build firmware
         run: |
           pio run -e firmware_cyd_2_4
+          pio run -e firmware_cyd_2_8
           pio run -e firmware_cyd_3_5
           pio run -e firmware_t_display_s3
           pio run -e firmware_t_embed_cc1101
@@ -37,6 +38,7 @@ jobs:
           name: firmware-bins
           path: |
             .pio/build/firmware_cyd_2_4/firmware.bin
+            .pio/build/firmware_cyd_2_8/firmware.bin
             .pio/build/firmware_cyd_3_5/firmware.bin
             .pio/build/firmware_t_display_s3/firmware.bin
             .pio/build/firmware_t_embed_cc1101/firmware.bin
