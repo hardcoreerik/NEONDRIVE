@@ -25,6 +25,9 @@
 #if !defined(NEONDRIVE_TARGET_BUTTON_NAV)
 #include <XPT2046_Touchscreen.h>
 #endif
+#if defined(NEONDRIVE_TARGET_CYD28)
+#include <XPT2046_Bitbang.h>
+#endif
 #include <LittleFS.h>
 #include <SD.h>
 using fs::File;
@@ -149,6 +152,19 @@ static constexpr int PIN_TFT_MOSI = CYD_PIN_TFT_MOSI;
 static constexpr int PIN_TFT_CS   = CYD_PIN_TFT_CS;
 
 static constexpr int PIN_TOUCH_CS = CYD_PIN_TOUCH_CS;
+#if defined(NEONDRIVE_TARGET_CYD28)
+static constexpr bool TOUCH_USES_SEPARATE_SPI = CYD_TOUCH_SEPARATE_SPI;
+static constexpr int PIN_TOUCH_SPI_SCLK = CYD_PIN_TOUCH_SPI_SCLK;
+static constexpr int PIN_TOUCH_SPI_MISO = CYD_PIN_TOUCH_SPI_MISO;
+static constexpr int PIN_TOUCH_SPI_MOSI = CYD_PIN_TOUCH_SPI_MOSI;
+static constexpr int PIN_TOUCH_IRQ = CYD_PIN_TOUCH_IRQ;
+#else
+static constexpr bool TOUCH_USES_SEPARATE_SPI = false;
+static constexpr int PIN_TOUCH_SPI_SCLK = -1;
+static constexpr int PIN_TOUCH_SPI_MISO = -1;
+static constexpr int PIN_TOUCH_SPI_MOSI = -1;
+static constexpr int PIN_TOUCH_IRQ = -1;
+#endif
 static constexpr int PIN_SD_SCLK  = CYD_PIN_SD_SCLK;
 static constexpr int PIN_SD_MISO  = CYD_PIN_SD_MISO;
 static constexpr int PIN_SD_MOSI  = CYD_PIN_SD_MOSI;
@@ -201,6 +217,10 @@ static int g_touchZMin = 80;
 TFT_eSPI tft;
 #if !defined(NEONDRIVE_TARGET_BUTTON_NAV)
 XPT2046_Touchscreen ts(PIN_TOUCH_CS);
+#endif
+#if defined(NEONDRIVE_TARGET_CYD28)
+XPT2046_Bitbang cyd28Touch(PIN_TOUCH_SPI_MOSI, PIN_TOUCH_SPI_MISO, PIN_TOUCH_SPI_SCLK, PIN_TOUCH_CS,
+                           (uint16_t)ND_DISPLAY_W, (uint16_t)ND_DISPLAY_H);
 #endif
 static uint32_t g_touchDebounceUntilMs = 0;
 
@@ -551,6 +571,16 @@ static bool tdisplayTouchInit() {
 }
 #endif
 
+#if defined(NEONDRIVE_TARGET_CYD28)
+static bool cyd28TouchReadRaw(int& outX, int& outY, int& outZ) {
+  TouchPoint p = cyd28Touch.getTouch();
+  outX = p.xRaw;
+  outY = p.yRaw;
+  outZ = p.zRaw;
+  return (outZ > g_touchZMin);
+}
+#endif
+
 static bool touch_read_point(TouchState& s) {
   s = TouchState{};
   s.down = false;
@@ -577,6 +607,36 @@ static bool touch_read_point(TouchState& s) {
   g_lastTouchRawX = s.rx;
   g_lastTouchRawY = s.ry;
   g_lastTouchRawZ = s.z;
+  return true;
+#elif defined(NEONDRIVE_TARGET_CYD28)
+  int rx = -1;
+  int ry = -1;
+  int rz = 0;
+  if (!cyd28TouchReadRaw(rx, ry, rz)) {
+    return false;
+  }
+
+  s.rx = rx;
+  s.ry = ry;
+  s.z = rz;
+  g_lastTouchRawX = s.rx;
+  g_lastTouchRawY = s.ry;
+  g_lastTouchRawZ = s.z;
+
+  int rawX = s.rx;
+  int rawY = s.ry;
+  if (g_touchSwapXY) {
+    const int tmp = rawX;
+    rawX = rawY;
+    rawY = tmp;
+  }
+  int mx = mapRawToRange(rawX, g_touchRawXMin, g_touchRawXMax, display_get_width());
+  int my = mapRawToRange(rawY, g_touchRawYMin, g_touchRawYMax, display_get_height());
+  if (g_touchInvertX) mx = (display_get_width() - 1) - mx;
+  if (g_touchInvertY) my = (display_get_height() - 1) - my;
+
+  s.x = clampi(mx, 0, display_get_width() - 1);
+  s.y = clampi(my, 0, display_get_height() - 1);
   return true;
 #elif defined(NEONDRIVE_TARGET_TEMBED)
   // T-Embed uses encoder/buttons only; no touch controller.
@@ -11032,6 +11092,16 @@ static void touch_init() {
   }
 #elif defined(NEONDRIVE_TARGET_TEMBED)
   Serial.println("[input] encoder + button navigation enabled (no touch)");
+#elif defined(NEONDRIVE_TARGET_CYD28)
+  if (TOUCH_USES_SEPARATE_SPI) {
+    cyd28Touch.begin();
+    if (PIN_TOUCH_IRQ >= 0) pinMode(PIN_TOUCH_IRQ, INPUT_PULLUP);
+    Serial.printf("[touch] CYD28 bitbang touch SCLK=%d MISO=%d MOSI=%d CS=%d IRQ=%d\n",
+                  PIN_TOUCH_SPI_SCLK, PIN_TOUCH_SPI_MISO, PIN_TOUCH_SPI_MOSI, PIN_TOUCH_CS, PIN_TOUCH_IRQ);
+  } else {
+    ts.begin();
+    ts.setRotation(0);
+  }
 #else
   ts.begin();
   ts.setRotation(0);

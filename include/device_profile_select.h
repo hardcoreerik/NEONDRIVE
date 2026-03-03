@@ -7,6 +7,8 @@
   #include "device_profiles/profile_t_display_s3.h"
 #elif defined(NEONDRIVE_TARGET_CYD35)
   #include "device_profiles/profile_cyd_3_5.h"
+#elif defined(NEONDRIVE_TARGET_CYD28)
+  #include "device_profiles/profile_cyd_2_8.h"
 #else
   #include "device_profiles/profile_cyd_2_4.h"
 #endif

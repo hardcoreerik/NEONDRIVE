@@ -1,2 +1,25 @@
 #pragma once
-// Placeholder profile for upcoming CYD-2.8 target.
+
+// NEONDRIVE // CYD-2.8 profile (ESP32, 4MB flash)
+// Hardware baseline matches CYD-2.4 today (ILI9341 + XPT2046).
+#define ND_PROFILE_CODE "cyd_2_8"
+#define ND_PROFILE_NAME "NEONDRIVE // CYD-2.8"
+#define ND_HOME_HEADER  "NEONDRIVE // CYD"
+
+#define ND_DISPLAY_W 320
+#define ND_DISPLAY_H 240
+
+#define ND_HW_TOUCH 1
+#define ND_HW_BUTTON_NAV 0
+#define ND_HW_ENCODER 0
+#define ND_HW_KEYBOARD 0
+#define ND_HW_CC1101 0
+#define ND_HW_SD 1
+
+#define ND_FLASH_MB 4
+#define ND_EXPECT_PSRAM 0
+
+#define ND_FEATURE_WEB_UI 1
+#define ND_FEATURE_SCOPE_WATERFALL 1
+#define ND_FEATURE_SD_CAPTURE 1
+#define ND_FEATURE_SUBGHZ_TOOLKIT 0
