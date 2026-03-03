@@ -31,7 +31,9 @@ static void test_service_labels(void) {
   TEST_ASSERT_EQUAL_STRING("HTTP", reconServiceName(80));
   TEST_ASSERT_EQUAL_STRING("HTTPS", reconServiceName(443));
   TEST_ASSERT_EQUAL_STRING("SMB", reconServiceName(445));
+  TEST_ASSERT_EQUAL_STRING("RTSP", reconServiceName(554));
   TEST_ASSERT_EQUAL_STRING("MODBUS", reconServiceName(502));
+  TEST_ASSERT_EQUAL_STRING("UPnP", reconServiceName(5000));
   TEST_ASSERT_EQUAL_STRING("BACnet", reconServiceName(47808));
   TEST_ASSERT_EQUAL_STRING("Unknown", reconServiceName(65000));
 }
@@ -45,4 +47,3 @@ int main(int argc, char** argv) {
   RUN_TEST(test_service_labels);
   return UNITY_END();
 }
-

@@ -2958,7 +2958,8 @@ static Button btnReconBack, btnReconModeDeauth, btnReconModePort;
 static Button btnReconStart, btnReconClear;
 static Button btnReconChMinus, btnReconChPlus, btnReconLock;
 static Button btnReconPortStartStop, btnReconPortExport;
-static Button btnPSBack, btnPSStart, btnPSExport, btnPSClr, btnPSFiles;
+static Button btnPSBack, btnPSStart, btnPSExport, btnPSClr, btnPSFiles, btnPSDeep;
+static Button btnPSScrollUp, btnPSScrollDown;
 static Button btnReconHomeDeauth, btnReconHomeNetScan, btnReconHomeAnalyze, btnReconHomeBack;
 static Button btnReconPortUp, btnReconPortDown;
 static Button btnScopeBack, btnScopeRefresh;
@@ -3295,6 +3296,7 @@ static bool     psLayoutDrawn     = false;
 static uint8_t  psLastHostCount   = 0;
 static uint8_t  psLastPct         = 0;
 static uint8_t  psLastState       = 0;
+static bool     psDeepScanEnabled = false;
 static uint32_t psLastDrawMs      = 0;
 static uint8_t  psScrollOffset    = 0;
 static int16_t  psSelectedRow     = -1;
@@ -3571,6 +3573,9 @@ static void tdisplayNavBuild() {
     case ScreenId::PORT_SCANNER:
       tdisplayNavPush(btnPSBack);
       tdisplayNavPush(btnPSStart);
+      tdisplayNavPush(btnPSDeep);
+      tdisplayNavPush(btnPSScrollUp);
+      tdisplayNavPush(btnPSScrollDown);
       tdisplayNavPush(btnPSExport);
       tdisplayNavPush(btnPSClr);
       tdisplayNavPush(btnPSFiles);
@@ -9158,6 +9163,12 @@ static constexpr int PS_COLHDR_Y = 35;
 static constexpr int PS_LIST_Y   = 45;
 static constexpr int PS_ROW_H    = 18;
 static constexpr int PS_STATS_Y  = 189;
+static constexpr int PS_SCROLL_BTN_X = 0;
+static constexpr int PS_SCROLL_BTN_W = 12;
+static constexpr int PS_SCROLL_BTN_H = 12;
+static constexpr int PS_SCROLLBAR_X = 4;
+static constexpr int PS_SCROLLBAR_W = 4;
+static constexpr int PS_HOST_TEXT_X = 14;
 
 static void psSaveToSD() {
   String ssid  = WiFi.SSID();
@@ -9233,22 +9244,35 @@ static void drawPortScanner() {
   tft.setTextDatum(TL_DATUM); tft.setTextSize(1);
   tft.setTextColor(TFT_CYAN, tft.color565(10,10,30));
   tft.drawString("NET SCAN", safeRight+4, 6);
+  btnPSDeep = {safeRight + 76, 4, 82, 18, psDeepScanEnabled ? "[x] DEEP" : "[ ] DEEP"};
+  drawButton(btnPSDeep,
+             psDeepScanEnabled ? tft.color565(0, 60, 0) : TFT_BLACK,
+             TFT_CYAN,
+             TFT_WHITE);
   const ReconScanState st = portScanner.state();
   const char* stStr = (st==ReconScanState::IDLE)?"IDLE":(st==ReconScanState::DONE)?"DONE":(st==ReconScanState::ERROR)?"ERR":"SCAN";
   tft.setTextColor(TFT_YELLOW, tft.color565(10,10,30));
-  tft.drawString(stStr, tft.width()-32, 6);
+  tft.setTextDatum(TR_DATUM);
+  tft.drawString(stStr, tft.width()-4, 6);
+  tft.setTextDatum(TL_DATUM);
   const int pct = (int)portScanner.progressPct();
   tft.fillRect(0, 28, tft.width(), 6, tft.color565(20,20,40));
   if (pct > 0) tft.fillRect(0, 28, tft.width()*pct/100, 6, TFT_CYAN);
   tft.fillRect(0, PS_COLHDR_Y, tft.width(), PS_LIST_Y-PS_COLHDR_Y, tft.color565(15,15,35));
   tft.setTextSize(1); tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_CYAN, tft.color565(15,15,35));
-  tft.drawString("HOST", 4, PS_COLHDR_Y+1);
+  tft.drawString("HOST", PS_HOST_TEXT_X, PS_COLHDR_Y+1);
   tft.drawString("DETAIL", PS_SPLIT+4, PS_COLHDR_Y+1);
   tft.drawFastVLine(PS_SPLIT, PS_COLHDR_Y, PS_STATS_Y-PS_COLHDR_Y, TFT_CYAN);
   tft.fillRect(0, PS_LIST_Y, PS_SPLIT, PS_STATS_Y-PS_LIST_Y, TFT_BLACK);
+  btnPSScrollUp = {PS_SCROLL_BTN_X, PS_LIST_Y, PS_SCROLL_BTN_W, PS_SCROLL_BTN_H, "^"};
+  btnPSScrollDown = {PS_SCROLL_BTN_X, PS_STATS_Y - PS_SCROLL_BTN_H, PS_SCROLL_BTN_W, PS_SCROLL_BTN_H, "v"};
+  drawButton(btnPSScrollUp, TFT_BLACK, TFT_CYAN, TFT_WHITE);
+  drawButton(btnPSScrollDown, TFT_BLACK, TFT_CYAN, TFT_WHITE);
   const int visible = (PS_STATS_Y-PS_LIST_Y)/PS_ROW_H;
   const uint8_t total = portScanner.hostCount();
+  const int maxScroll = max(0, (int)total - visible);
+  if ((int)psScrollOffset > maxScroll) psScrollOffset = (uint8_t)maxScroll;
   for (int r = 0; r < visible; r++) {
     const int idx = psScrollOffset + r;
     if (idx >= (int)total) break;
@@ -9258,14 +9282,13 @@ static void drawPortScanner() {
     const int ry = PS_LIST_Y + r*PS_ROW_H;
     bool sel = (idx == psSelectedRow);
     uint16_t rowBg = sel ? tft.color565(0,40,60) : TFT_BLACK;
-    tft.fillRect(1, ry, PS_SPLIT-2, PS_ROW_H-1, rowBg);
-    String ipStr2 = h2.ip.toString();
-    int dot2 = ipStr2.lastIndexOf('.');
-    int dot1 = (dot2>0) ? ipStr2.lastIndexOf('.', dot2-1) : -1;
-    const char* shortIp = (dot1>=0) ? ipStr2.c_str()+dot1+1 : ipStr2.c_str();
+    tft.fillRect(PS_HOST_TEXT_X - 2, ry, PS_SPLIT - PS_HOST_TEXT_X - 1, PS_ROW_H-1, rowBg);
+    char ipBuf[16];
+    snprintf(ipBuf, sizeof(ipBuf), "%u.%u.%u.%u",
+             h2.ip[0], h2.ip[1], h2.ip[2], h2.ip[3]);
     tft.setTextDatum(TL_DATUM); tft.setTextSize(1);
     tft.setTextColor(sel ? TFT_WHITE : TFT_GREEN, rowBg);
-    tft.drawString(shortIp, 3, ry+4);
+    tft.drawString(ipBuf, PS_HOST_TEXT_X, ry+4);
     if (h2.openCount > 0) {
       char pc[4]; snprintf(pc, sizeof(pc), "%u", h2.openCount);
       tft.fillRoundRect(PS_SPLIT-22, ry+4, 18, 10, 3, TFT_GREEN);
@@ -9274,19 +9297,22 @@ static void drawPortScanner() {
       tft.drawString(pc, PS_SPLIT-13, ry+9);
     }
   }
+  const int listH = PS_STATS_Y-PS_LIST_Y;
+  const int scrollTrackY = PS_LIST_Y + PS_SCROLL_BTN_H + 1;
+  const int scrollTrackH = max(8, listH - ((PS_SCROLL_BTN_H * 2) + 2));
+  tft.fillRect(PS_SCROLLBAR_X, scrollTrackY, PS_SCROLLBAR_W, scrollTrackH, tft.color565(20,20,30));
   if ((int)total > visible) {
-    const int listH = PS_STATS_Y-PS_LIST_Y;
-    const int sH = max(6, listH*visible/(int)total);
-    const int sY = PS_LIST_Y + (listH-sH)*psScrollOffset/max(1,(int)total-visible);
-    tft.fillRect(PS_SPLIT-4, PS_LIST_Y, 3, listH, tft.color565(20,20,30));
-    tft.fillRect(PS_SPLIT-4, sY, 3, sH, TFT_CYAN);
+    const int sH = max(6, scrollTrackH*visible/(int)total);
+    const int sY = scrollTrackY + (scrollTrackH-sH)*psScrollOffset/max(1,(int)total-visible);
+    tft.fillRect(PS_SCROLLBAR_X, sY, PS_SCROLLBAR_W, sH, TFT_CYAN);
   }
   psDrawDetailPanel(psSelectedRow);
   tft.fillRect(0, PS_STATS_Y, tft.width(), 13, tft.color565(10,10,25));
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_CYAN, tft.color565(10,10,25));
   tft.setTextSize(1);
-  char statStr[40]; snprintf(statStr, sizeof(statStr), "Hosts:%u  %u%%", total, pct);
+  char statStr[48]; snprintf(statStr, sizeof(statStr), "Hosts:%u  %u%%  %s",
+                             total, pct, psDeepScanEnabled ? "Deep" : "Fast");
   tft.drawString(statStr, 4, PS_STATS_Y+2);
   const int bw  = (tft.width()-10)/5;
   const int bx0 = 5;
@@ -9310,12 +9336,20 @@ static void portScannerTick() {
   const uint8_t pct     = portScanner.progressPct();
   const uint8_t stateU8 = (uint8_t)portScanner.state();
   if (!portScanner.isRunning() && psActive) psActive = false;
-  const uint32_t now = millis();
-  bool needRedraw = !psLayoutDrawn || total!=psLastHostCount || pct!=psLastPct
-    || stateU8!=psLastState || (now-psLastDrawMs)>500;
+  const int visible = max(1, (PS_STATS_Y - PS_LIST_Y) / PS_ROW_H);
+  const int maxScroll = max(0, (int)total - visible);
+  bool needRedraw = !psLayoutDrawn || total!=psLastHostCount || pct!=psLastPct || stateU8!=psLastState;
+  if ((int)psScrollOffset > maxScroll) {
+    psScrollOffset = (uint8_t)maxScroll;
+    needRedraw = true;
+  }
   if (!portScanner.isRunning() && total>0 && psSelectedRow<0) psSelectedRow=0;
+  if (psSelectedRow >= (int16_t)total) psSelectedRow = (total > 0) ? (int16_t)(total - 1) : -1;
   if (psSelectedRow != psLastSelectedRow) { psLastSelectedRow=psSelectedRow; needRedraw=true; }
-  if (needRedraw) { drawPortScanner(); psLastDrawMs=now; }
+  if (needRedraw) {
+    drawPortScanner();
+    psLastDrawMs=millis();
+  }
 }
 
 // ---------- Recon Home Screen ----------
@@ -12154,9 +12188,17 @@ void loop() {
       if (psActive) { portScanner.stop(); psActive = false; }
       setScreen(ScreenId::RECON_HOME); waitTouchRelease(); return;
     }
+    if (hit(btnPSDeep, tx, ty)) {
+      if (!portScanner.isRunning()) {
+        psDeepScanEnabled = !psDeepScanEnabled;
+      }
+      drawPortScanner();
+      waitTouchRelease();
+      return;
+    }
     if (hit(btnPSStart, tx, ty)) {
       if (psActive) { portScanner.stop(); psActive = false; }
-      else { if (portScanner.start()) psActive = true; }
+      else { if (portScanner.start(psDeepScanEnabled)) psActive = true; }
       drawPortScanner(); waitTouchRelease(); return;
     }
     if (hit(btnPSExport, tx, ty)) { psSaveToSD(); waitTouchRelease(); return; }
@@ -12171,6 +12213,45 @@ void loop() {
       monitorReturnScreen = ScreenId::PORT_SCANNER;
       monitorLoadFileDir("/captures");
       setScreen(ScreenId::MONITOR); waitTouchRelease(); return;
+    }
+    if (hit(btnPSScrollUp, tx, ty)) {
+      if (psScrollOffset > 0) {
+        psScrollOffset--;
+        drawPortScanner();
+      }
+      waitTouchRelease();
+      return;
+    }
+    if (hit(btnPSScrollDown, tx, ty)) {
+      const int total = (int)portScanner.hostCount();
+      const int visible = max(1, (PS_STATS_Y - PS_LIST_Y) / PS_ROW_H);
+      const int maxScroll = max(0, total - visible);
+      if ((int)psScrollOffset < maxScroll) {
+        psScrollOffset++;
+        drawPortScanner();
+      }
+      waitTouchRelease();
+      return;
+    }
+    const int scrollTrackY = PS_LIST_Y + PS_SCROLL_BTN_H + 1;
+    const int scrollTrackH = max(8, (PS_STATS_Y - PS_LIST_Y) - ((PS_SCROLL_BTN_H * 2) + 2));
+    if (tx >= PS_SCROLLBAR_X && tx < (PS_SCROLLBAR_X + PS_SCROLLBAR_W) &&
+        ty >= scrollTrackY && ty < (scrollTrackY + scrollTrackH)) {
+      const int total = (int)portScanner.hostCount();
+      const int visible = max(1, (PS_STATS_Y - PS_LIST_Y) / PS_ROW_H);
+      const int maxScroll = max(0, total - visible);
+      if (maxScroll > 0) {
+        const int handleH = max(6, scrollTrackH * visible / total);
+        int relY = ty - scrollTrackY - (handleH / 2);
+        relY = constrain(relY, 0, max(0, scrollTrackH - handleH));
+        const int nextScroll = (relY * maxScroll) / max(1, scrollTrackH - handleH);
+        if (nextScroll != (int)psScrollOffset) {
+          psScrollOffset = (uint8_t)nextScroll;
+          drawPortScanner();
+        }
+      }
+      waitTouchRelease();
+      return;
     }
     if (tx < PS_SPLIT && ty >= PS_LIST_Y && ty < PS_STATS_Y) {
       const int r = (ty-PS_LIST_Y)/PS_ROW_H;

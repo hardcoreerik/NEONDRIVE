@@ -39,8 +39,10 @@ const char* reconServiceName(uint16_t port) {
     case 161: return "SNMP";
     case 443: return "HTTPS";
     case 445: return "SMB";
+    case 554: return "RTSP";
     case 502: return "MODBUS";
     case 1883: return "MQTT";
+    case 5000: return "UPnP";
     case 3306: return "MySQL";
     case 3389: return "RDP";
     case 5432: return "PostgreSQL";
@@ -115,17 +117,15 @@ bool ReconPortScanner::startInternal(const IPAddress& ip, const IPAddress& mask,
   clearHosts();
   memset(errorMessage_, 0, sizeof(errorMessage_));
 
-  static const uint16_t kDefaultPorts[] = {21, 22, 23, 80, 443, 445, 8080, 502, 47808};
-  static const uint16_t kDeepExtra[]   = {25, 53, 110, 143, 3306, 3389, 5900,
-                                         8081, 8888, 9200, 27017, 11211,
-                                         1234, 161, 5000, 8000, 9000, 10000};
+  static const uint16_t kPriorityPorts[] = {22, 80, 443, 8080, 8443, 1883};
+  static const uint16_t kDeepExtra[] = {21, 23, 445, 3389, 554, 5000, 3306};
   portCount_ = 0;
-  // always add default ports first
-  for (size_t i = 0; i < sizeof(kDefaultPorts) / sizeof(kDefaultPorts[0]); ++i) {
+  // Always include the fast/high-value baseline profile.
+  for (size_t i = 0; i < sizeof(kPriorityPorts) / sizeof(kPriorityPorts[0]); ++i) {
     if (portCount_ >= RECON_MAX_SCAN_PORTS) break;
-    portList_[portCount_++] = kDefaultPorts[i];
+    portList_[portCount_++] = kPriorityPorts[i];
   }
-  // if deep scan requested, append extra ports until capacity
+  // Deep scan adds expanded service coverage used in older/legacy networks.
   if (deep) {
     for (size_t i = 0; i < sizeof(kDeepExtra) / sizeof(kDeepExtra[0]); ++i) {
       if (portCount_ >= RECON_MAX_SCAN_PORTS) break;
