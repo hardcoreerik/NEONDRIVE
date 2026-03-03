@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="480" viewBox="0 0 800 480">
+  <!-- Network / AP Scan mockup (webserver / scan results style) -->
+  <rect width="100%" height="100%" fill="#000"/>
+  <rect x="0" y="0" width="800" height="36" fill="#071430"/>
+  <text x="16" y="24" font-family="Segoe UI, Roboto" font-size="18" fill="#60a5fa">Network Scan</text>
+
+  <g transform="translate(16,56)">
+    <rect width="520" height="360" rx="6" fill="#071226" stroke="#111827"/>
+    <text x="18" y="28" font-size="14" fill="#c7d2fe">Scan results</text>
+    <rect x="18" y="48" width="484" height="2" fill="#122131"/>
+    <text x="18" y="84" font-size="12" fill="#cbd5e1">00:11:22:33:44:55  ExampleAP   CH6  -40dBm</text>
+    <text x="18" y="110" font-size="12" fill="#cbd5e1">AA:BB:CC:DD:EE:FF  CoffeeShopWiFi  CH11  -55dBm</text>
+    <text x="18" y="136" font-size="12" fill="#cbd5e1">(hidden)  (hidden)  CH1  -90dBm</text>
+  </g>
+
+  <g transform="translate(552,56)">
+    <rect width="232" height="180" rx="6" fill="#06121a" stroke="#0f1724"/>
+    <text x="18" y="30" font-size="13" fill="#cbd5e1">Filters</text>
+    <text x="18" y="56" font-size="12" fill="#9ca3af">Show hidden: Yes</text>
+    <text x="18" y="80" font-size="12" fill="#9ca3af">Min RSSI: -90dBm</text>
+  </g>
+</svg>

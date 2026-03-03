@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="480" viewBox="0 0 800 480">
+  <!-- Webserver UI mockup (AP + web interface) -->
+  <rect width="100%" height="100%" fill="#000"/>
+  <rect x="0" y="0" width="800" height="36" fill="#071430"/>
+  <text x="16" y="24" font-family="Segoe UI, Roboto" font-size="18" fill="#60a5fa">Web Server</text>
+
+  <g transform="translate(16,56)">
+    <rect width="760" height="360" rx="6" fill="#071226" stroke="#111827"/>
+    <text x="18" y="28" font-size="14" fill="#c7d2fe">Access point: NEONDRIVE_1234</text>
+    <text x="18" y="52" font-size="12" fill="#9ca3af">Open: http://192.168.4.1</text>
+    <rect x="18" y="72" width="720" height="240" rx="6" fill="#061326" stroke="#0f1724"/>
+    <text x="28" y="104" font-size="12" fill="#cbd5e1">/status</text>
+    <text x="28" y="128" font-size="12" fill="#cbd5e1">/scan</text>
+    <text x="28" y="152" font-size="12" fill="#cbd5e1">/download</text>
+  </g>
+</svg>

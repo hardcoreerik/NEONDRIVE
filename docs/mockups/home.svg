@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="480" viewBox="0 0 800 480">
+  <!-- Home / Main menu mockup -->
+  <rect width="100%" height="100%" fill="#000"/>
+  <rect x="0" y="0" width="800" height="36" fill="#071430"/>
+  <text x="16" y="24" font-family="Segoe UI, Roboto" font-size="18" fill="#60a5fa">NEONDRIVE</text>
+
+  <!-- Grid of main actions -->
+  <g transform="translate(24,64)">
+    <rect x="0" y="0" width="232" height="120" rx="8" fill="#071226" stroke="#0f1724"/>
+    <text x="116" y="64" font-size="18" fill="#cbd5e1" text-anchor="middle">WiFi Scan</text>
+
+    <rect x="256" y="0" width="232" height="120" rx="8" fill="#071226" stroke="#0f1724"/>
+    <text x="372" y="64" font-size="18" fill="#cbd5e1" text-anchor="middle">Target Ops</text>
+
+    <rect x="512" y="0" width="232" height="120" rx="8" fill="#071226" stroke="#0f1724"/>
+    <text x="628" y="64" font-size="18" fill="#cbd5e1" text-anchor="middle">Settings</text>
+
+    <rect x="0" y="144" width="232" height="120" rx="8" fill="#071226" stroke="#0f1724"/>
+    <text x="116" y="204" font-size="18" fill="#cbd5e1" text-anchor="middle">Saved Captures</text>
+
+    <rect x="256" y="144" width="232" height="120" rx="8" fill="#071226" stroke="#0f1724"/>
+    <text x="372" y="204" font-size="18" fill="#cbd5e1" text-anchor="middle">Web Server</text>
+
+    <rect x="512" y="144" width="232" height="120" rx="8" fill="#071226" stroke="#0f1724"/>
+    <text x="628" y="204" font-size="18" fill="#cbd5e1" text-anchor="middle">Tools</text>
+  </g>
+</svg>
