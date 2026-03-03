@@ -31,7 +31,4 @@ docs/just_go_mock.png
 docs/mockups/*.png
 
 # Android companion build outputs
-CYDCompanion/app/build/
-CYDCompanion/build/
-CYDCompanion/.gradle/
-CYDCompanion/local.properties
+# (inner CYDCompanion/.gitignore handles build/, .gradle/, local.properties)

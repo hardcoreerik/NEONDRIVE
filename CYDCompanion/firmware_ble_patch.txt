@@ -1,0 +1,148 @@
+// REPLACE YOUR BluetoothSerial sections with this BLE-integrated logic
+// This matches your Android app's BleConstants and FileTransferProtocol exactly.
+
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
+// UUIDs matching BleConstants.kt
+#define SERVICE_FTS_UUID    "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+#define CHAR_CONTROL_UUID   "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
+#define CHAR_DATA_UUID      "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+#define CHAR_STATUS_UUID    "6e400004-b5a3-f393-e0a9-e50e24dcca9e"
+
+BLEServer* pBleServer = NULL;
+BLECharacteristic* pCharControl = NULL;
+BLECharacteristic* pCharData = NULL;
+BLECharacteristic* pCharStatus = NULL;
+bool bleAppConnected = false;
+
+// File transfer session state
+File ftsActiveFile;
+int ftsSessionId = -1;
+uint16_t ftsSeq = 0;
+bool ftsTransferActive = false;
+
+void sendStatusMsg(const char* msg) {
+    if (!bleAppConnected) return;
+    JsonDocument doc;
+    doc["msg"] = msg;
+    char buf[128];
+    serializeJson(doc, buf);
+    pCharStatus->setValue((uint8_t*)buf, strlen(buf));
+    pCharStatus->notify();
+}
+
+void processBleControl(String json) {
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, json);
+    if (err) return;
+
+    const char* cmd = doc["cmd"];
+    if (strcmp(cmd, "OPEN") == 0) {
+        const char* path = doc["path"];
+        if (ftsActiveFile) ftsActiveFile.close();
+
+        // Try SD then LittleFS
+        if (SD.exists(path)) ftsActiveFile = SD.open(path, "r");
+        else if (LittleFS.exists(path)) ftsActiveFile = LittleFS.open(path, "r");
+
+        if (ftsActiveFile && !ftsActiveFile.isDirectory()) {
+            ftsSessionId = random(1, 250);
+            ftsSeq = 0;
+            ftsTransferActive = false;
+
+            JsonDocument resp;
+            resp["type"] = "OPEN_OK";
+            resp["session"] = ftsSessionId;
+            resp["size"] = ftsActiveFile.size();
+            char buf[128];
+            serializeJson(resp, buf);
+            strcat(buf, "\n");
+            pCharControl->setValue((uint8_t*)buf, strlen(buf));
+            pCharControl->notify();
+            Serial.printf("[ble] File opened: %s (%d bytes)\n", path, (int)ftsActiveFile.size());
+        } else {
+            sendStatusMsg("File not found or is directory");
+        }
+    } else if (strcmp(cmd, "START") == 0) {
+        int sid = doc["session"] | -1;
+        if (sid == ftsSessionId && ftsActiveFile) {
+            ftsTransferActive = true;
+            Serial.println("[ble] Transfer started");
+        }
+    }
+}
+
+class ControlCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pChar) {
+        std::string val = pChar->getValue();
+        if (val.length() > 0) {
+            processBleControl(String(val.c_str()));
+        }
+    }
+};
+
+class ServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+        bleAppConnected = true;
+    }
+    void onDisconnect(BLEServer* pServer) {
+        bleAppConnected = false;
+        ftsTransferActive = false;
+        if (ftsActiveFile) ftsActiveFile.close();
+        BLEDevice::startAdvertising();
+    }
+};
+
+void initBleFts() {
+    BLEDevice::init("CYDCompanion-CYD");
+    pBleServer = BLEDevice::createServer();
+    pBleServer->setCallbacks(new ServerCallbacks());
+
+    BLEService *pService = pBleServer->createService(SERVICE_FTS_UUID);
+
+    pCharControl = pService->createCharacteristic(CHAR_CONTROL_UUID,
+        BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY);
+    pCharControl->setCallbacks(new ControlCallbacks());
+    pCharControl->addDescriptor(new BLE2902());
+
+    pCharData = pService->createCharacteristic(CHAR_DATA_UUID, BLECharacteristic::PROPERTY_NOTIFY);
+    pCharData->addDescriptor(new BLE2902());
+
+    pCharStatus = pService->createCharacteristic(CHAR_STATUS_UUID, BLECharacteristic::PROPERTY_NOTIFY);
+    pCharStatus->addDescriptor(new BLE2902());
+
+    pService->start();
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(SERVICE_FTS_UUID);
+    pAdvertising->setScanResponse(true);
+    BLEDevice::startAdvertising();
+    Serial.println("[ble] FTS Service started");
+}
+
+void handleBleTransferTick() {
+    if (!ftsTransferActive || !ftsActiveFile || !bleAppConnected) return;
+
+    // Send in chunks (adjusted for BLE MTU)
+    uint8_t chunk[240]; // typical MTU-safe size
+    chunk[0] = (uint8_t)ftsSessionId;
+    chunk[1] = ftsSeq & 0xFF;
+    chunk[2] = (ftsSeq >> 8) & 0xFF;
+
+    int bytesRead = ftsActiveFile.read(chunk + 3, sizeof(chunk) - 3);
+    if (bytesRead > 0) {
+        pCharData->setValue(chunk, bytesRead + 3);
+        pCharData->notify();
+        ftsSeq++;
+    } else {
+        ftsTransferActive = false;
+        ftsActiveFile.close();
+        sendStatusMsg("Transfer Complete");
+        Serial.println("[ble] Transfer complete");
+    }
+}
+
+// IN YOUR setup(): call initBleFts();
+// IN YOUR loop(): call handleBleTransferTick();

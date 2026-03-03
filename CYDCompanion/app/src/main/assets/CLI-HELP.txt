@@ -1,0 +1,58 @@
+CYD COMPANION CLI HELP
+Version: 2.0 (WiFi-Only)
+Scope: Active WiFi control surfaces for NEONDRIVE CYD + guardrails for RF coexistence.
+
+========================================================================
+1) TRANSPORT
+========================================================================
+WiFi HTTP API (port 8080) is the ONLY active transport in this app build.
+
+Why:
+- ESP32 CYD resource conflicts can occur when BLE/Bluetooth and intensive WiFi/sniffing run together.
+- This app intentionally avoids BLE/BT paths to reduce instability and reconnect failures.
+
+Future BLE placeholder (disabled by policy):
+- Re-enable only after explicit coexistence testing proves stable under:
+  - WiFi connect/disconnect
+  - AP mode + web server
+  - sniff/monitor packet load
+
+========================================================================
+2) WIFI HTTP API
+========================================================================
+Base URL:
+  http://<CYD_IP>:8080
+
+Core endpoints:
+- GET  /api/status
+- GET  /api/console?since=<seq>&limit=<n>
+- GET  /api/packets?since=<seq>&limit=<n>
+- GET  /api/list?fs=sd|lfs&path=/path
+- POST /api/control
+- GET  /download?fs=sd|lfs&path=/file
+- GET  /browse?fs=sd|lfs&path=/dir
+- GET  /delete?fs=sd|lfs&path=/file
+- POST /upload?fs=sd|lfs&path=/dir
+- POST /ota
+- GET  /android
+- GET  /android.apk
+
+========================================================================
+3) /api/control COMMANDS
+========================================================================
+PING
+REBOOT
+SET_BRIGHT
+SET_CONFIG
+SET_MODE
+SET_WIFI
+
+Use LIVE tab to observe /api/console and /api/packets streams while testing.
+
+========================================================================
+4) SAFETY + LIMITS
+========================================================================
+- Authorized testing only.
+- WiFi packet capture + web UI can be bandwidth/CPU intensive.
+- If connectivity degrades, reduce polling rates and avoid concurrent heavy operations.
+- BLE/BT control is intentionally disabled in this Android build.

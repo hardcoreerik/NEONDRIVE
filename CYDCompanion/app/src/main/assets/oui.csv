@@ -1,0 +1,117 @@
+# CYD Companion OUI seed database
+# Format: XX:XX:XX,Vendor Name
+# Source: IEEE MA-L — https://regauth.standards.ieee.org/standards-ra-web/pub/view.html#registries
+# This seed covers common WiFi AP/router/client chipset vendors.
+# Replace with the full ~5 MB IEEE CSV for complete coverage.
+#
+# --- Qualcomm / Atheros ---
+00:03:7F,Atheros Communications
+00:0F:B5,Atheros Communications
+28:E0:2C,Qualcomm
+40:A3:6B,Qualcomm
+54:A7:03,Qualcomm
+D8:0D:17,Qualcomm
+74:DA:88,Qualcomm Atheros
+5C:F9:38,Qualcomm Atheros
+00:1C:BF,Qualcomm Atheros
+A0:EC:80,Qualcomm
+# --- Broadcom ---
+00:90:4C,Broadcom
+D8:C4:E9,Broadcom
+00:23:14,Broadcom
+AC:22:0B,Broadcom
+90:E2:BA,Broadcom
+FC:F5:28,Broadcom
+# --- MediaTek / Ralink ---
+00:0C:E7,Ralink Technology
+00:50:7F,Ralink Technology
+EC:08:6B,MediaTek
+C4:E9:84,MediaTek
+D4:6E:5C,MediaTek
+# --- Intel ---
+00:0E:8E,Intel Corporate
+8C:8D:28,Intel Corporate
+C4:9D:ED,Intel Corporate
+A4:C3:F0,Intel Corporate
+34:02:86,Intel Corporate
+00:1B:21,Intel Corporate
+# --- Realtek ---
+00:E0:4C,Realtek Semiconductor
+00:1A:EF,Realtek Semiconductor
+44:D9:E7,Realtek Semiconductor
+C8:3A:35,Realtek Semiconductor
+# --- Espressif (ESP32 / CYD itself) ---
+AC:67:B2,Espressif Inc.
+A4:CF:12,Espressif Inc.
+24:62:AB,Espressif Inc.
+C8:F0:9E,Espressif Inc.
+30:AE:A4,Espressif Inc.
+70:03:9F,Espressif Inc.
+84:CC:A8,Espressif Inc.
+B4:E6:2D,Espressif Inc.
+18:FE:34,Espressif Inc.
+24:0A:C4,Espressif Inc.
+4C:11:AE,Espressif Inc.
+58:BF:25,Espressif Inc.
+# --- TP-Link ---
+E8:DE:27,TP-LINK Technologies
+F8:1A:67,TP-LINK Technologies
+50:C7:BF,TP-LINK Technologies
+00:1D:0F,TP-LINK Technologies
+C4:6E:1F,TP-LINK Technologies
+54:AF:97,TP-LINK Technologies
+# --- Netgear ---
+00:09:5B,NETGEAR
+20:4E:7F,NETGEAR
+C4:04:15,NETGEAR
+A0:40:A0,NETGEAR
+9C:3D:CF,NETGEAR
+# --- ASUS ---
+00:0C:6E,ASUS
+10:7B:44,ASUSTek
+2C:4D:54,ASUSTek
+40:16:7E,ASUSTek
+50:46:5D,ASUSTek
+# --- Apple ---
+00:17:F2,Apple
+18:D6:C7,Apple
+70:EC:E4,Apple
+A8:BE:27,Apple
+AC:DE:48,Apple
+28:F0:76,Apple
+# --- Cisco ---
+00:1A:A1,Cisco Systems
+00:26:99,Cisco Systems
+08:CC:68,Cisco Systems
+70:F3:5A,Cisco Systems
+00:23:04,Cisco Systems
+# --- Ubiquiti ---
+FC:EC:DA,Ubiquiti Networks
+00:27:22,Ubiquiti Networks
+80:2A:A8,Ubiquiti Networks
+70:A7:41,Ubiquiti Networks
+44:D9:E7,Ubiquiti Networks
+# --- Mikrotik ---
+4C:5E:0C,MikroTik
+00:0C:42,MikroTik
+E4:8D:8C,MikroTik
+# --- D-Link ---
+00:05:5D,D-Link
+1C:7E:E5,D-Link
+14:D6:4D,D-Link
+# --- Linksys / Belkin ---
+00:0F:66,Linksys
+20:AA:4B,Belkin International
+94:10:3E,Belkin International
+# --- Samsung ---
+00:12:47,Samsung Electronics
+2C:44:01,Samsung Electronics
+F4:7B:5E,Samsung Electronics
+# --- Raspberry Pi Foundation ---
+B8:27:EB,Raspberry Pi Foundation
+DC:A6:32,Raspberry Pi Trading
+E4:5F:01,Raspberry Pi Trading
+# --- Google ---
+54:60:09,Google
+F4:F5:E8,Google
+3C:5A:B4,Google
