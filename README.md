@@ -1,120 +1,119 @@
-# NEONdrive Firmware
-Multi-target ESP32 firmware for CYD and LilyGO boards.
+# NEONDRIVE
 
-This README is written for any machine.
-No hardcoded serial ports. You always use `<PORT>`.
+NEONDRIVE is a multi-target ESP32 firmware project for CYD and select LilyGO boards. It's built for hands-on hardware hackers: people who like to tinker, improve, and share.
 
-## Hardware Targets
+This project grew from a love of hacker culture — the curiosity, the late-night debugging, and the generous sharing of ideas. Special thanks and inspiration to the Marauder project, M5porkchop, and Bruce for lighting the way.
 
-| Device | PlatformIO Env | Chip | Input | Status |
-|---|---|---|---|---|
-| CYD 2.4 (ESP32-2432S024) | `firmware_cyd_2_4` | `esp32` | Touch | ✅ Stable |
-| CYD 2.8 (ESP32-2432S028) | `firmware_cyd_2_8` | `esp32` | Touch | ✅ Stable |
-| CYD 3.5 (ESP32-3248S035R) | `firmware_cyd_3_5` | `esp32` | Touch | ✅ Stable |
-| LilyGO T-Display-S3 | `firmware_t_display_s3` | `esp32s3` | Touch + button fallback | ⚠️ Beta |
-| LilyGO T-Embed CC1101 | `firmware_t_embed_cc1101` | `esp32s3` | Encoder + buttons | 🚧 Untested |
+What you'll find here:
 
-## Ground Rule: Port Is Never Hardcoded
+- Firmware sources for CYD 2.4 / 2.8 / 3.5 and select LilyGO devices
+- PlatformIO build environments and helper scripts
+- Release packaging that produces friendly `Device-Bins` for users
 
-Use `<PORT>` in every command.
-Examples:
-- Windows: `COM7`
-- Linux: `/dev/ttyUSB0`
-- macOS: `/dev/cu.usbmodem2101`
+---
 
-Find your port:
+**Quick Start**
 
-```bash
-python -m platformio device list
-```
+- Flash a prebuilt image from `Device-Bins/` or the Releases page.
+- Build locally with PlatformIO (example):
 
-## Path A: Flash Precompiled Binaries (Fastest)
-
-Prebuilt files are in releases and `Device-Bins/`.
-
-### Device-Bins naming
-
-`NEONDRIVE_<DEVICE_NAME>_<VERSION>.bin`
-
-### Flash one full image (offset `0x0`)
-
-For `esp32` targets (CYD 2.4 / CYD 3.5):
-
-```bash
-python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32 --port <PORT> --baud 460800 write_flash 0x0 NEONDRIVE_CYD-3.5_<VERSION>.bin
-```
-
-For `esp32s3` targets (T-Display-S3 / T-Embed):
-
-```bash
-python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port <PORT> --baud 460800 write_flash 0x0 NEONDRIVE_T-DisplayS3_<VERSION>.bin
-```
-
-## Path B: Build From Source
-
-Install PlatformIO:
-
-```bash
+```powershell
 python -m pip install -U platformio
-```
-
-Build all targets:
-
-```bash
-python -m platformio run -e firmware_cyd_2_4
 python -m platformio run -e firmware_cyd_3_5
-python -m platformio run -e firmware_t_display_s3
-python -m platformio run -e firmware_t_embed_cc1101
-```
-
-Flash by target:
-
-```bash
-python -m platformio run -e firmware_cyd_2_4 -t upload --upload-port <PORT>
 python -m platformio run -e firmware_cyd_3_5 -t upload --upload-port <PORT>
-python -m platformio run -e firmware_t_display_s3 -t upload --upload-port <PORT>
-python -m platformio run -e firmware_t_embed_cc1101 -t upload --upload-port <PORT>
 ```
 
-Monitor serial:
+Replace `<PORT>` with your serial port (Windows `COMx`, Linux `/dev/ttyUSBx`, macOS `/dev/cu.*`). Use `python -m platformio device list` to discover ports.
 
-```bash
-python -m platformio device monitor -p <PORT> -b 115200
-```
+---
 
-## CYD 3.5 Touch Calibration
+## Why this project feels "hacker"
 
-- First boot runs touch calibration wizard.
-- Calibration is saved to SD as `/touch_cal_cyd35.json`.
-- To force recalibration, delete `/touch_cal_cyd35.json` and reboot.
+NEONDRIVE emphasizes reproducible, tweakable firmware over polished, opaque binaries. We favor:
 
-## Release Packaging (Maintainers)
+- Clear build steps so anyone can reproduce a firmware image.
+- Small, focused changes with well-described commits.
+- Sharing credit — many ideas here were inspired by Marauder, M5porkchop, and Bruce.
 
-Build release artifacts:
+If that sounds like your kind of project, jump in.
 
-```bash
-python scripts/build_release_bins.py --version vX.Y.Z
-```
+---
 
-Build user-facing `Device-Bins` package:
+## Supported Hardware (overview)
 
-```bash
-python scripts/build_device_bins.py --version vX.Y.Z
-```
+See `docs/HARDWARE_TARGETS.md` for full details. Primary targets include:
 
-## Troubleshooting
+- CYD 2.4 / CYD 2.8 / CYD 3.5 (ESP32 variants)
+- LilyGO T-Display-S3 (ESP32-S3)
+- LilyGO T-Embed CC1101 (ESP32-S3 + radio)
 
-- If upload fails, check cable quality (data cable required).
-- If board is not detected, press BOOT/RESET and retry.
-- If touch is wrong on CYD 3.5, remove SD calibration file and reboot.
-- If port changes after reconnect, rerun:
+## Workflow — build, test, release
 
-```bash
-python -m platformio device list
-```
+1. Setup
 
-## Docs
+   - Install PlatformIO and toolchain as in `docs/INSTALL.md`.
+
+2. Build
+
+   - Build a single target:
+
+   ```powershell
+   python -m platformio run -e firmware_cyd_3_5
+   ```
+
+   - Build and flash in one step:
+
+   ```powershell
+   python -m platformio run -e firmware_cyd_3_5 -t upload --upload-port <PORT>
+   ```
+
+3. Test
+
+   - Monitor serial output:
+
+   ```powershell
+   python -m platformio device monitor -p <PORT> -b 115200
+   ```
+
+4. Release
+
+   - Use helper scripts to produce release artifacts:
+
+   ```powershell
+   python scripts/build_release_bins.py --version vX.Y.Z
+   python scripts/build_device_bins.py --version vX.Y.Z
+   ```
+
+---
+
+## Branching & Contributions
+
+- Use feature branches and open PRs against `main`.
+- Keep commits focused and include clear descriptions.
+- Open an issue before larger changes (new hardware, major refactors) so we can coordinate.
+
+See `CONTRIBUTING.md` for details.
+
+---
+
+## Troubleshooting (short)
+
+- Use a data-capable USB cable.
+- If flashing fails, try holding BOOT or toggling RESET during upload.
+- If CYD 3.5 touch is off, remove the SD calibration file (`/touch_cal_cyd35.json`) and reboot.
+
+---
+
+## License & Credits
+
+This project is licensed under `LICENSE` in this repo.
+
+Thanks to the broader maker community for inspiration — especially Marauder, M5porkchop, and Bruce.
+
+---
+
+See also:
 
 - [docs/INSTALL.md](docs/INSTALL.md)
 - [docs/HARDWARE_TARGETS.md](docs/HARDWARE_TARGETS.md)
-- [docs/RELEASES.md](docs/RELEASES.md)
+- [Device-Bins/](Device-Bins/)
