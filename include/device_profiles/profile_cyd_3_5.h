@@ -1,6 +1,7 @@
 #pragma once
 
 // NEONDRIVE // CYD-3.5 profile (ESP32, 4MB flash)
+#define ND_PROFILE_STATUS "stable"
 #define ND_PROFILE_CODE "cyd_3_5"
 #define ND_PROFILE_NAME "NEONDRIVE // CYD-3.5"
 #define ND_HOME_HEADER  "NEONDRIVE // CYD 3.5"

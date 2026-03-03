@@ -1,7 +1,8 @@
 #pragma once
 
 // NEONDRIVE // CYD-2.8 profile (ESP32, 4MB flash)
-// Hardware baseline matches CYD-2.4 today (ILI9341 + XPT2046).
+// Touch: XPT2046 on dedicated bitbang SPI pins (differs from CYD-2.4 shared SPI).
+#define ND_PROFILE_STATUS "stable"
 #define ND_PROFILE_CODE "cyd_2_8"
 #define ND_PROFILE_NAME "NEONDRIVE // CYD-2.8"
 #define ND_HOME_HEADER  "NEONDRIVE // CYD"

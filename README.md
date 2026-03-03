@@ -6,12 +6,13 @@ No hardcoded serial ports. You always use `<PORT>`.
 
 ## Hardware Targets
 
-| Device | PlatformIO Env | Chip | Input |
-|---|---|---|---|
-| CYD 2.4 (ESP32-2432S024) | `firmware_cyd_2_4` | `esp32` | Touch |
-| CYD 3.5 (ESP32-3248S035R) | `firmware_cyd_3_5` | `esp32` | Touch |
-| LilyGO T-Display-S3 | `firmware_t_display_s3` | `esp32s3` | Touch + button fallback |
-| LilyGO T-Embed CC1101 | `firmware_t_embed_cc1101` | `esp32s3` | Encoder + buttons |
+| Device | PlatformIO Env | Chip | Input | Status |
+|---|---|---|---|---|
+| CYD 2.4 (ESP32-2432S024) | `firmware_cyd_2_4` | `esp32` | Touch | ✅ Stable |
+| CYD 2.8 (ESP32-2432S028) | `firmware_cyd_2_8` | `esp32` | Touch | ✅ Stable |
+| CYD 3.5 (ESP32-3248S035R) | `firmware_cyd_3_5` | `esp32` | Touch | ✅ Stable |
+| LilyGO T-Display-S3 | `firmware_t_display_s3` | `esp32s3` | Touch + button fallback | ⚠️ Beta |
+| LilyGO T-Embed CC1101 | `firmware_t_embed_cc1101` | `esp32s3` | Encoder + buttons | 🚧 Untested |
 
 ## Ground Rule: Port Is Never Hardcoded
 

@@ -1,9 +1,11 @@
 #pragma once
 
 // NEONDRIVE // T-Display S3 profile (ESP32-S3, 16MB flash + PSRAM)
+// ⚠️ STATUS: BETA — builds and boots; not all features validated on hardware.
+#define ND_PROFILE_STATUS "beta"
 #define ND_PROFILE_CODE "t_display_s3"
-#define ND_PROFILE_NAME "NEONDRIVE // T-Display S3"
-#define ND_HOME_HEADER  "NEONDRIVE // T-DISPLAY-S3"
+#define ND_PROFILE_NAME "NEONDRIVE // T-Display S3 [BETA]"
+#define ND_HOME_HEADER  "NEONDRIVE // T-DISPLAY-S3 [BETA]"
 
 #define ND_DISPLAY_W 320
 #define ND_DISPLAY_H 170
