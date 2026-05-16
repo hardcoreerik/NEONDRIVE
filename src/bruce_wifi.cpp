@@ -1,4 +1,5 @@
 #include "bruce_wifi.h"
+#if !defined(NEONDRIVE_TARGET_M5TAB5)
 #include <esp_wifi.h>
 #include <cstring>
 #include <freertos/FreeRTOS.h>
@@ -584,3 +585,5 @@ void bruceMenuTick() {
     // Attack loop
     bruceAttackTick();
 }
+
+#endif // !NEONDRIVE_TARGET_M5TAB5

@@ -3,6 +3,20 @@
 // to allow transmission of management frames (deauth, disassoc, etc.)
 #pragma once
 
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+// ESP32-P4 delegates WiFi to the ESP32-C6 co-processor.
+// ieee80211_raw_frame_sanity_check and esp_wifi_80211_tx are not available
+// via the same libnet80211 path as classic ESP32/S3. Provide no-ops.
+#include <esp_err.h>
+namespace WSLBypasser {
+  inline bool isActive() { return false; }
+  inline esp_err_t sendDeauthFrame(const uint8_t*, const uint8_t*, uint8_t) { return ESP_ERR_NOT_SUPPORTED; }
+  inline esp_err_t sendDisassocFrame(const uint8_t*, const uint8_t*, uint8_t) { return ESP_ERR_NOT_SUPPORTED; }
+  inline void sendDeauthBurst(const uint8_t*, const uint8_t*, uint8_t) {}
+  inline void randomizeMAC() {}
+}
+#else
+
 #include <Arduino.h>
 #include <esp_wifi.h>
 
@@ -30,3 +44,5 @@ void sendDeauthBurst(const uint8_t* bssid, const uint8_t* station, uint8_t count
 void randomizeMAC();
 
 }  // namespace WSLBypasser
+
+#endif // NEONDRIVE_TARGET_M5TAB5

@@ -2,6 +2,11 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <Wire.h>
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+// M5Tab5: M5Unified handles MIPI-DSI display init and GT911 touch via I²C.
+// M5.Lcd (M5GFX) is aliased to 'tft' so all draw call sites are unchanged.
+#include <M5Unified.h>
+#else
 #include <TFT_eSPI.h>
 
 #if defined(NEONDRIVE_TARGET_TDISPLAY_S3) || defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
@@ -28,6 +33,7 @@
 #if defined(NEONDRIVE_TARGET_CYD28)
 #include <XPT2046_Bitbang.h>
 #endif
+#endif // NEONDRIVE_TARGET_M5TAB5
 #include <LittleFS.h>
 #include <SD.h>
 using fs::File;
@@ -68,7 +74,36 @@ using fs::File;
     intentionally disabled until explicit coexistence validation is completed on CYD.
 */
 
-#if defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+// M5Stack Tab5 — ESP32-P4 (dual-core RISC-V @ 400 MHz, 32 MB PSRAM, 16 MB Flash)
+//               + ESP32-C6 co-processor (WiFi 6 / BT 5).
+// Display:  5" 1280×720 IPS MIPI-DSI, driver auto-configured by M5GFX.
+// Touch:    Goodix GT911 multi-touch (I²C), read via M5GFX getTouch().
+// No SPI TFT bus; backlighting and LED are managed internally by M5GFX/M5Unified.
+static constexpr bool BOARD_HAS_TOUCH = true;
+static constexpr bool BOARD_HAS_SD    = true;
+static constexpr bool TFT_USES_SPI_BUS = false;
+static constexpr int PIN_LCD_POWER_ON = -1;
+static constexpr int PIN_TFT_SCLK = -1;
+static constexpr int PIN_TFT_MISO = -1;
+static constexpr int PIN_TFT_MOSI = -1;
+static constexpr int PIN_TFT_CS   = -1;
+static constexpr int PIN_TOUCH_CS  = -1;
+static constexpr int PIN_TOUCH_SDA = -1;
+static constexpr int PIN_TOUCH_SCL = -1;
+static constexpr int PIN_TOUCH_INT = -1;
+static constexpr int PIN_TOUCH_RST = -1;
+static constexpr int PIN_SD_SCLK   = -1;
+static constexpr int PIN_SD_MISO   = -1;
+static constexpr int PIN_SD_MOSI   = -1;
+static constexpr int PIN_SD_CS     = -1;
+// Backlight and RGB LED managed by M5GFX; no discrete PWM pins exposed here.
+static constexpr int BL_PINS[] = {-1};
+static constexpr uint8_t BL_PWM_CHANNELS[] = {4};
+static constexpr int LED_PINS[] = {-1, -1, -1};
+static constexpr uint8_t LED_PWM_CHANNELS[] = {0, 1, 2};
+
+#elif defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH) || defined(ARDUINO_LILYGO_T_DISPLAY_S3)
 static constexpr bool BOARD_HAS_TOUCH = false;
 static constexpr bool BOARD_HAS_SD = false;
 static constexpr bool TFT_USES_SPI_BUS = false;
@@ -218,6 +253,11 @@ static bool g_touchInvertY = false;
 static int g_touchZMin = 80;
 #endif
 
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+// M5.Lcd is an M5GFX member of the global M5Unified instance.
+// The reference alias lets every tft.xxx() call site compile unchanged.
+static M5GFX& tft = M5.Lcd;
+#else
 TFT_eSPI tft;
 #if !defined(NEONDRIVE_TARGET_BUTTON_NAV)
 XPT2046_Touchscreen ts(PIN_TOUCH_CS);
@@ -226,7 +266,18 @@ XPT2046_Touchscreen ts(PIN_TOUCH_CS);
 XPT2046_Bitbang cyd28Touch(PIN_TOUCH_SPI_MOSI, PIN_TOUCH_SPI_MISO, PIN_TOUCH_SPI_SCLK, PIN_TOUCH_CS,
                            (uint16_t)ND_DISPLAY_W, (uint16_t)ND_DISPLAY_H);
 #endif
+#endif // NEONDRIVE_TARGET_M5TAB5
+
 static uint32_t g_touchDebounceUntilMs = 0;
+
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+// Arduino-ESP32 v3.x (pioarduino/ESP-IDF 5.x) deprecated the channel-based LEDC
+// API (ledcSetup + ledcAttachPin) in favour of ledcAttach(pin, freq, res).
+// On Tab5 all BL_PINS and LED_PINS are -1 so these functions are never actually
+// called; the stubs exist only to satisfy the compiler.
+static inline void ledcSetup(uint8_t, uint32_t, uint8_t) {}
+static inline void ledcAttachPin(int, uint8_t) {}
+#endif // NEONDRIVE_TARGET_M5TAB5
 
 #ifndef ND_TOUCH_VISUAL_DEBUG
 #define ND_TOUCH_VISUAL_DEBUG 0
@@ -589,7 +640,26 @@ static bool touch_read_point(TouchState& s) {
   s = TouchState{};
   s.down = false;
 
-#if defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  // GT911 via M5GFX — tft.getTouch() reads hardware directly and applies the
+  // current display rotation transform, avoiding M5Unified state-machine gaps.
+  // M5.update() is still called in loop() to keep the M5 subsystem ticked.
+  {
+    int32_t tx = 0, ty = 0;
+    if (tft.getTouch(&tx, &ty)) {
+      s.down = true;
+      s.x = (int)tx;
+      s.y = (int)ty;
+      s.z = 1;
+      s.rx = s.x;
+      s.ry = s.y;
+      g_lastTouchRawX = s.rx;
+      g_lastTouchRawY = s.ry;
+      g_lastTouchRawZ = 1;
+    }
+  }
+  return s;
+#elif defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
   int rx = -1;
   int ry = -1;
   int rz = 0;
@@ -2589,6 +2659,8 @@ static constexpr int HOME_BTN_ROWS = 3;
 static constexpr int HOME_BTN_COUNT = 9;
 #if defined(NEONDRIVE_TARGET_BUTTON_NAV)
 static constexpr uint8_t UI_BUTTON_TEXT_SIZE = 1;
+#elif defined(NEONDRIVE_TARGET_M5TAB5)
+static constexpr uint8_t UI_BUTTON_TEXT_SIZE = 4;
 #else
 static constexpr uint8_t UI_BUTTON_TEXT_SIZE = 2;
 #endif
@@ -2825,7 +2897,11 @@ static void drawHeaderTitleOverlay() {
   if (!currentHeaderTitle || currentHeaderTitle[0] == '\0') return;
   layoutActionDockBox();
   tft.setTextDatum(TL_DATUM);
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  tft.setTextSize(4);
+#else
   tft.setTextSize((tft.height() <= 180) ? 1 : 2);
+#endif
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   String headerTitle = String(currentHeaderTitle);
   const int maxTitleW = uiActionDockSafeLeft() - 8;
@@ -3718,14 +3794,26 @@ static void layoutHome() {
   const int w = tft.width();
   const int h = tft.height();
   const bool compact = (h <= 180);
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  // Tab5 is 1280×720 — scale padding, gaps, and button height proportionally.
+  const int pad = 24;
+  const int gapH = 20;
+  const int gapV = 20;
+  const int gridBtnH = 140;
+#else
   const int pad = 8;
   const int gapH = compact ? 6 : 8;
   const int gapV = compact ? 4 : 8;
   const int gridBtnH = compact ? 30 : 46;
+#endif
   const int gridBtnW = (w - (pad * 2) - ((HOME_BTN_COLS - 1) * gapH)) / HOME_BTN_COLS;
 
   // Top row buttons match the same size as all other Home buttons.
-  const int topBtnY = compact ? (uiHeaderBandH() + 2) : 28;
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  const int topBtnY = hypercubeReservedBottomY + 8;
+#else
+  const int topBtnY = compact ? (hypercubeReservedBottomY + 2) : 28;
+#endif
   homeBtns[0] = {pad,                          topBtnY, gridBtnW, gridBtnH, "Just Go"};
   homeBtns[1] = {pad + gridBtnW + gapH,        topBtnY, gridBtnW, gridBtnH, "WiFi"};
   homeBtns[8] = {pad + (gridBtnW + gapH) * 2,  topBtnY, gridBtnW, gridBtnH, "Wardrive"};
@@ -12099,10 +12187,22 @@ void setup() {
     }
   }
 
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  {
+    auto cfg = M5.config();
+    M5.begin(cfg);
+  }
+  tft.setRotation(1);
+  tft.fillScreen(TFT_BLACK);
+  drawBorder();
+  Serial.printf("[tab5] display %dx%d\n", tft.width(), tft.height());
+  Serial.println("[tab5] touch: GT911 via M5Unified");
+#else
   backlightBringup();
   display_init();
   HypercubeWidget::begin(tft);
   touch_init();
+#endif // NEONDRIVE_TARGET_M5TAB5
 
   // LittleFS
   if (!LittleFS.begin(true)) {
@@ -12165,6 +12265,9 @@ void setup() {
 }
 
 void loop() {
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  M5.update();  // polls GT911 touch; must be called before readTouch()
+#endif
   handleSerialDebugCommands();
   bruceMenuTick();
   timeServiceTick();

@@ -29,6 +29,7 @@ python -m platformio device list
 | CYD 3.5 | `cyd_3_5` | `esp32` | `0x0` | `0x10000` |
 | LilyGO T-Display-S3 | `t_display_s3` | `esp32s3` | `0x0` | `0x10000` |
 | LilyGO T-Embed CC1101 | `t_embed_cc1101` | `esp32s3` | `0x0` | `0x10000` |
+| M5Stack Tab5 | `m5tab5` | `esp32p4` | `0x0` | `0x10000` |
 
 Release filenames:
 
@@ -44,6 +45,8 @@ If you are using `Device-Bins/` artifacts (`NEONDRIVE_<DEVICE_NAME>_<VERSION>.bi
   - `python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32 --port COM15 --baud 460800 write_flash 0x0 NEONDRIVE_CYD-3.5_<VERSION>.bin`
 - T-Display-S3 / T-Embed-CC1101 (`esp32s3`):
   - `python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port COM3 --baud 460800 write_flash 0x0 NEONDRIVE_T-DisplayS3_<VERSION>.bin`
+- M5Stack Tab5 (`esp32p4`):
+  - `python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32p4 --port COM17 --baud 1500000 write_flash 0x0 NEONDRIVE_Tab5_<VERSION>.bin`
 
 ### CYD 2.4
 
@@ -101,6 +104,22 @@ Upgrade only:
 python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port COM11 --baud 460800 write_flash 0x10000 neondrive_<version>_t_embed_cc1101_app.bin
 ```
 
+### M5Stack Tab5
+
+Boot mode: hold **RESET** ~2 s until internal green LED blinks rapidly, then release.
+
+Full install:
+
+```bash
+python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32p4 --port COM17 --baud 1500000 write_flash 0x0 neondrive_<version>_m5tab5_fullflash.bin
+```
+
+Upgrade only:
+
+```bash
+python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32p4 --port COM17 --baud 1500000 write_flash 0x10000 neondrive_<version>_m5tab5_app.bin
+```
+
 ## 4) Build and Flash From Source
 
 Build:
@@ -110,6 +129,7 @@ python -m platformio run -e firmware_cyd_2_4
 python -m platformio run -e firmware_cyd_3_5
 python -m platformio run -e firmware_t_display_s3
 python -m platformio run -e firmware_t_embed_cc1101
+python -m platformio run -e firmware_m5tab5
 ```
 
 Flash:
@@ -119,6 +139,7 @@ python -m platformio run -e firmware_cyd_2_4 -t upload --upload-port COM10
 python -m platformio run -e firmware_cyd_3_5 -t upload --upload-port COM15
 python -m platformio run -e firmware_t_display_s3 -t upload --upload-port COM3
 python -m platformio run -e firmware_t_embed_cc1101 -t upload --upload-port COM11
+python -m platformio run -e firmware_m5tab5 -t upload --upload-port COM17
 ```
 
 Windows helper scripts:
@@ -128,6 +149,7 @@ scripts\flash_cyd.cmd COM10
 scripts\flash_cyd35.cmd COM15
 scripts\flash_tdisplay_s3.cmd COM3
 scripts\flash_tembed_cc1101.cmd COM11
+scripts\flash_m5tab5.cmd COM17
 ```
 
 ## 5) Serial Monitor
@@ -139,6 +161,7 @@ python -m platformio device monitor -p COM10 -b 115200
 python -m platformio device monitor -p COM15 -b 115200
 python -m platformio device monitor -p COM3 -b 115200
 python -m platformio device monitor -p COM11 -b 115200
+python -m platformio device monitor -p COM17 -b 115200
 ```
 
 Runtime debug commands:
@@ -156,4 +179,5 @@ Runtime debug commands:
 
 - If flashing fails with connection/reset errors, put the board in download mode and retry.
 - T-Display-S3 typically uses `BOOT` + `RST` to enter ROM download mode.
+- Tab5: hold RESET ~2 s until internal green LED blinks rapidly.
 - Keep board-specific USB drivers up to date on Windows.
