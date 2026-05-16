@@ -27,6 +27,7 @@ python -m platformio device list
 | --- | --- | --- | --- | --- |
 | CYD 2.4 | `cyd_2_4` | `esp32` | `0x0` | `0x10000` |
 | LilyGO T-Display-S3 | `t_display_s3` | `esp32s3` | `0x0` | `0x10000` |
+| M5Stack Tab5 | `m5tab5` | `esp32p4` | `0x0` | `0x10000` |
 
 Release filenames:
 
@@ -63,6 +64,22 @@ Upgrade only:
 python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port COM3 --baud 460800 write_flash 0x10000 neondrive_<version>_t_display_s3_app.bin
 ```
 
+### M5Stack Tab5
+
+Boot mode: hold **RESET** ~2 s until internal green LED blinks rapidly, then release.
+
+Full install:
+
+```bash
+python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32p4 --port COM17 --baud 1500000 write_flash 0x0 neondrive_<version>_m5tab5_fullflash.bin
+```
+
+Upgrade only:
+
+```bash
+python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32p4 --port COM17 --baud 1500000 write_flash 0x10000 neondrive_<version>_m5tab5_app.bin
+```
+
 ## 4) Build and Flash From Source
 
 Build:
@@ -70,6 +87,7 @@ Build:
 ```bash
 python -m platformio run -e firmware_cyd_2_4
 python -m platformio run -e firmware_t_display_s3
+python -m platformio run -e firmware_m5tab5
 ```
 
 Flash:
@@ -77,6 +95,7 @@ Flash:
 ```bash
 python -m platformio run -e firmware_cyd_2_4 -t upload --upload-port COM10
 python -m platformio run -e firmware_t_display_s3 -t upload --upload-port COM3
+python -m platformio run -e firmware_m5tab5 -t upload --upload-port COM17
 ```
 
 Windows helper scripts:
@@ -84,6 +103,7 @@ Windows helper scripts:
 ```bat
 scripts\flash_cyd.cmd COM10
 scripts\flash_tdisplay_s3.cmd COM3
+scripts\flash_m5tab5.cmd COM17
 ```
 
 ## 5) Serial Monitor

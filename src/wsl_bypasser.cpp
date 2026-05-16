@@ -1,6 +1,7 @@
 // WSL Bypasser — Frame injection enabler for ESP32
 // Override of ieee80211_raw_frame_sanity_check requires -Wl,-zmuldefs in build_flags
 #include "wsl_bypasser.h"
+#if !defined(NEONDRIVE_TARGET_M5TAB5)
 
 // ===================================================================
 // CRITICAL: This overrides the WiFi library's internal sanity check.
@@ -90,6 +91,8 @@ void sendDeauthBurst(const uint8_t* bssid, const uint8_t* station, uint8_t count
         }
     }
 }
+
+#endif // !NEONDRIVE_TARGET_M5TAB5
 
 void randomizeMAC() {
     uint8_t mac[6];

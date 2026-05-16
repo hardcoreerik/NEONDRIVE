@@ -6,8 +6,9 @@ NEONdrive maintains separate firmware targets per device so users can flash the 
 
 | Device | PlatformIO Env | Input Mode |
 | --- | --- | --- |
-| CYD 2.4 (ESP32-2432S024 family) | `firmware_cyd_2_4` | Touch |
-| LilyGO T-Display-S3 | `firmware_t_display_s3` | Touch (if present) + hardware buttons fallback |
+| CYD 2.4 (ESP32-2432S024 family) | `firmware_cyd_2_4` | Touch (XPT2046) |
+| LilyGO T-Display-S3 | `firmware_t_display_s3` | Touch (CST816/CST328) + hardware buttons fallback |
+| M5Stack Tab5 (ESP32-P4 + C6) | `firmware_m5tab5` | Touch (GT911 via M5GFX) |
 | M5Cardputer Advanced | planned | planned |
 
 T-Display-S3 fallback controls:
@@ -42,6 +43,7 @@ Flash:
 ```bash
 python -m platformio run -e firmware_cyd_2_4 -t upload --upload-port COM10
 python -m platformio run -e firmware_t_display_s3 -t upload --upload-port COM3
+python -m platformio run -e firmware_m5tab5 -t upload --upload-port COM17
 ```
 
 Helper scripts:
@@ -49,8 +51,10 @@ Helper scripts:
 ```bat
 scripts\flash_cyd.cmd COM10
 scripts\flash_tdisplay_s3.cmd COM3
+scripts\flash_m5tab5.cmd COM17
 scripts\monitor_cyd.cmd COM10
 scripts\monitor_tdisplay_s3.cmd COM3
+scripts\monitor_m5tab5.cmd COM17
 ```
 
 ## Release Artifacts (Maintainers)
