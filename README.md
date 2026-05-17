@@ -2,26 +2,18 @@
 
 NEONDRIVE is a multi-target ESP32 firmware + companion workflow project for authorized wireless assessment labs. It supports CYD and select LilyGO hardware, reproducible PlatformIO builds, and release-ready device binaries.
 
-## Why NEONDRIVE
+## What Makes This Different
 
-- Multi-device firmware targeting one operational workflow
-- Reproducible build + flash steps with explicit board environments
-- Hardware-focused iteration with practical release packaging
+- One repo supports multiple real hardware families (CYD + LilyGO) through explicit PlatformIO environments.
+- Firmware releases are packaged for operators, not just developers (`Device-Bins/` plus release artifacts).
+- Documentation includes target matrix, install guides, telemetry notes, and companion protocol references.
 
-## Feature Highlights
+## Core Engineering Surface
 
-- CYD and LilyGO target environments in `platformio.ini`
-- Prebuilt firmware distribution via `Device-Bins/` and releases
-- Hardware and install references in `docs/`
-- Companion tooling and protocol docs in `CYDCompanion/` and `docs/`
-
-## Repository Structure
-
-- `platformio.ini` - build environments and target definitions
-- `Device-Bins/` - packaged binaries by hardware target
-- `docs/` - install, hardware matrix, architecture, and release notes
-- `CYDCompanion/` - companion app/documentation
-- `test/` - test-specific docs and supporting references
+- Multi-target build orchestration in `platformio.ini`
+- Hardware-specific documentation in `docs/HARDWARE_TARGETS.md`
+- Release packaging in `Device-Bins/`
+- Companion protocol and sync references in `docs/` and `CYDCompanion/`
 
 ## Quick Start
 
@@ -40,9 +32,13 @@ python -m platformio run -e firmware_cyd_3_5 -t upload --upload-port COM5
 
 Use `python -m platformio device list` to discover serial ports.
 
-## Hardware Support
+## Supported Targets
 
-See [docs/HARDWARE_TARGETS.md](docs/HARDWARE_TARGETS.md) for the current matrix, status, and target-specific notes.
+See [docs/HARDWARE_TARGETS.md](docs/HARDWARE_TARGETS.md) for the current target matrix and support status.
+
+## CI and Quality Bar
+
+The GitHub Actions workflow builds all major firmware environments on pull requests to prevent target regressions before merge.
 
 ## Security and Responsible Use
 
