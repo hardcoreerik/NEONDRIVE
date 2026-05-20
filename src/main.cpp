@@ -3810,9 +3810,9 @@ static void layoutHome() {
 
   // Top row buttons match the same size as all other Home buttons.
 #if defined(NEONDRIVE_TARGET_M5TAB5)
-  const int topBtnY = hypercubeReservedBottomY + 8;
+  const int topBtnY = uiHeaderBandH() + 8;
 #else
-  const int topBtnY = compact ? (hypercubeReservedBottomY + 2) : 28;
+  const int topBtnY = compact ? (uiHeaderBandH() + 2) : 28;
 #endif
   homeBtns[0] = {pad,                          topBtnY, gridBtnW, gridBtnH, "Just Go"};
   homeBtns[1] = {pad + gridBtnW + gapH,        topBtnY, gridBtnW, gridBtnH, "WiFi"};
