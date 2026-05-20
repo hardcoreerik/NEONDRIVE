@@ -15,10 +15,27 @@ struct AppConfig {
   String wifi_savedPassword[MAX_SAVED_WIFI];
   String wpasec_apikey         = "";
 
-  bool display_showStats = true;
-  int  display_timeout   = 30;
+  String wigle_apiname         = "";
+  String wigle_apitoken        = "";
+
+  String dropbox_token         = "";
+  String dropbox_folder        = "/WardriveAnalyzerSync";
+
+  String webhook_url           = "";
+  String ntfy_topic            = "";
+
+  String mqtt_broker           = "";
+  int    mqtt_port             = 1883;
+  String mqtt_topic_prefix     = "neondrive";
+  String mqtt_username         = "";
+  String mqtt_password         = "";
+
+  bool display_showStats  = true;
+  int  display_timeout    = 30;
+  bool ui_hypercube       = true;
 
   bool startup_autoReconnectPrompt = true;
+  bool startup_webserver           = false;
   bool wifi_defaultLockChannel     = false;
   int  telemetry_monitorIntervalMs = 500;
   bool telemetry_verboseSerial     = false;

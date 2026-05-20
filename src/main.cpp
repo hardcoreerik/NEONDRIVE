@@ -39,6 +39,7 @@ using fs::File;
 #include <esp_wifi.h>
 #include <esp_timer.h>
 #include <esp_heap_caps.h>
+#include <esp_task_wdt.h>
 
 #include <ctype.h>
 #include <math.h>
@@ -47,6 +48,9 @@ using fs::File;
 #include <freertos/semphr.h>
 #include "deauth_hunter.h"
 #include "bruce_wifi.h"
+#include "dropbox_client.h"
+#include "gps_service.h"
+#include "hypercube_widget.h"
 #include "wpasec_client.h"
 #include "yoink_engine.h"
 #include "wsl_bypasser.h"
@@ -2041,6 +2045,8 @@ enum class ScreenId : uint8_t {
   NEON_PANIC,
   PORT_SCANNER,
   RECON_HOME,
+  WARDRIVE,
+  SYNC,
 };
 static ScreenId screen = ScreenId::HOME;
 
@@ -2070,6 +2076,8 @@ static const char* screenToStr(ScreenId s) {
     case ScreenId::NEON_PANIC: return "NEON_PANIC";
     case ScreenId::PORT_SCANNER: return "PORT_SCANNER";
     case ScreenId::RECON_HOME:   return "RECON_HOME";
+    case ScreenId::WARDRIVE:     return "WARDRIVE";
+    case ScreenId::SYNC:         return "SYNC";
     default: return "UNKNOWN";
   }
 }
@@ -2578,7 +2586,7 @@ static bool hit(const Button& b, int px, int py) {
 // home‑screen geometry constants
 static constexpr int HOME_BTN_COLS = 3;
 static constexpr int HOME_BTN_ROWS = 3;
-static constexpr int HOME_BTN_COUNT = 8;
+static constexpr int HOME_BTN_COUNT = 9;
 #if defined(NEONDRIVE_TARGET_BUTTON_NAV)
 static constexpr uint8_t UI_BUTTON_TEXT_SIZE = 1;
 #else
@@ -2937,7 +2945,9 @@ static Button btnWebserverBack, btnWebserverStartAP, btnWebserverStartServer;
 static Button btnWebserverStopServer;
 static Button btnWebserverWpaSecSync, btnWebserverDownloadResults;
 static Button btnCfgWifiConnect, btnCfgWebserver, btnCfgLed;
-static Button btnCfgStartup, btnCfgTelemetry;
+static Button btnCfgStartup, btnCfgTelemetry, btnCfgSync;
+static Button btnSyncDropbox, btnSyncWpasec, btnSyncWigle;
+static char   syncDropboxStatus[20] = {};
 
 static int wifiListTopY = 92;
 static int wifiListBottomY = 200;
@@ -2951,7 +2961,7 @@ static Button btnScanMinus, btnScanPlus;
 static Button btnDeauthToggle;
 static Button btnWifiDefaultLockToggle;
 static Button btnCfgWifi;
-static Button btnStartupAutoReconnect, btnStartupDefaultLockToggle;
+static Button btnStartupAutoReconnect, btnStartupDefaultLockToggle, btnStartupHypercube, btnStartupWebserver;
 static Button btnTelemetryMinus, btnTelemetryPlus, btnTelemetryVerboseToggle;
 static Button btnMonitorTab1, btnMonitorTab2;
 static Button btnReconBack, btnReconModeDeauth, btnReconModePort;
@@ -3716,8 +3726,9 @@ static void layoutHome() {
 
   // Top row buttons match the same size as all other Home buttons.
   const int topBtnY = compact ? (uiHeaderBandH() + 2) : 28;
-  homeBtns[0] = {pad, topBtnY, gridBtnW, gridBtnH, "Just Go"};
-  homeBtns[1] = {pad + gridBtnW + gapH, topBtnY, gridBtnW, gridBtnH, "WiFi"};
+  homeBtns[0] = {pad,                          topBtnY, gridBtnW, gridBtnH, "Just Go"};
+  homeBtns[1] = {pad + gridBtnW + gapH,        topBtnY, gridBtnW, gridBtnH, "WiFi"};
+  homeBtns[8] = {pad + (gridBtnW + gapH) * 2,  topBtnY, gridBtnW, gridBtnH, "Wardrive"};
 
   // Main grid (2 rows x 3 cols): Logs / Targets / Recon / Config / About / BRUCE.
   // Anchor the bottom row ~10px above the footer text baseline.
@@ -3741,13 +3752,12 @@ static void drawHomeReconnectPromptOverlay();
 static void layoutActionDockBox() {
   const int w = tft.width();
   const int h = tft.height();
-  const int size = (h <= 180) ? 24 : 30;
-  ActionDockBoxW = size;
-  ActionDockBoxH = size;
-  ActionDockBoxX = w - ActionDock_CLEARANCE_PX - size;
-  ActionDockBoxY = uiHeaderBandH() + 2;
-  ActionDockBoxX = clampi(ActionDockBoxX, ActionDock_CLEARANCE_PX, max(ActionDock_CLEARANCE_PX, w - ActionDock_CLEARANCE_PX - size));
-  ActionDockBoxY = clampi(ActionDockBoxY, ActionDock_CLEARANCE_PX, max(ActionDock_CLEARANCE_PX, h - ActionDock_CLEARANCE_PX - size));
+  ActionDockBoxW = HypercubeWidget::REGION_W;
+  ActionDockBoxH = HypercubeWidget::REGION_H;
+  ActionDockBoxX = w - HypercubeWidget::REGION_PAD - ActionDockBoxW;
+  ActionDockBoxY = HypercubeWidget::REGION_PAD;
+  ActionDockBoxX = clampi(ActionDockBoxX, ActionDock_CLEARANCE_PX, max(ActionDock_CLEARANCE_PX, w - ActionDock_CLEARANCE_PX - ActionDockBoxW));
+  ActionDockBoxY = clampi(ActionDockBoxY, 0, max(0, h - ActionDockBoxH));
 }
 
 static void drawCyberBackdrop() {
@@ -5340,21 +5350,21 @@ static void drawConfig() {
   // Keep y > threshold so global top-button Y shift never applies on this screen.
   const int gridLeft = content.x;
   const int gapX = 10;
-  const int gapY = 10;
-  const int gridTop = max(panelY + panelH + 10, UI_TOP_BUTTON_SHIFT_THRESHOLD_Y + 4);
+  const int gapY = 8;
+  const int gridTop = max(panelY + panelH + 8, UI_TOP_BUTTON_SHIFT_THRESHOLD_Y + 4);
   const int gridBottom = bottom.y - 8;
-  const int spanH = max(72, gridBottom - gridTop);
-  int bh = (spanH - (gapY * 2)) / 3;
-  bh = clampi(bh, 24, 40);
-  const int usedH = (bh * 3) + (gapY * 2);
+  const int spanH = max(96, gridBottom - gridTop);
+  int bh = (spanH - (gapY * 3)) / 4;
+  bh = clampi(bh, 22, 36);
+  const int usedH = (bh * 4) + (gapY * 3);
   const int y0 = gridTop + max(0, (spanH - usedH) / 2);
   const int y1 = y0 + bh + gapY;
   const int y2 = y1 + bh + gapY;
-  const int rowRight0 = uiRightLimitForBand(y0, bh);
-  const int rowRight1 = uiRightLimitForBand(y1, bh);
-  const int rowRight2 = uiRightLimitForBand(y2, bh);
-  const int gridRight = min(w - content.x, min(rowRight0, min(rowRight1, rowRight2)));
-  const int bw = max(56, ((gridRight - gridLeft) - gapX) / 2);
+  const int y3 = y2 + bh + gapY;
+  const int rowRightAll = min({uiRightLimitForBand(y0, bh), uiRightLimitForBand(y1, bh),
+                               uiRightLimitForBand(y2, bh), uiRightLimitForBand(y3, bh),
+                               w - content.x});
+  const int bw = max(56, (rowRightAll - gridLeft - gapX) / 2);
   const int x0 = gridLeft;
   const int x1 = gridLeft + bw + gapX;
 
@@ -5373,8 +5383,11 @@ static void drawConfig() {
   btnCfgTelemetry = {x0, y2, bw, bh, "Telemetry"};
   drawButton(btnCfgTelemetry, 0x022F, 0x7D7C, TFT_WHITE);
 
-  btnCfgLed = {x1, y2, bw, bh, "LED Control"};
+  btnCfgLed = {x1, y2, bw, bh, "LED"};
   drawButton(btnCfgLed, 0x4A49, TFT_CYAN, TFT_WHITE);
+
+  btnCfgSync = {x0, y3, bw, bh, "Sync"};
+  drawButton(btnCfgSync, 0x0228, TFT_GREEN, TFT_WHITE);
 
   uiLogLayout("drawConfig(CYD)", content, bottom);
   uiLogButtonRect("Config.Back", btnBack);
@@ -5440,6 +5453,75 @@ static void drawConfig() {
 #endif
 }
 
+static void drawSync() {
+  tft.fillScreen(TFT_BLACK);
+  drawHeader("Sync");
+  drawUniversalBackground();
+
+  const UiRect content = computeContentRect();
+  const UiRect bottom  = computeBottomBarRect();
+  const int w = tft.width();
+
+  btnBack = {bottom.x, bottom.y, 92, UI_BUTTON_H, "Back"};
+  drawButton(btnBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
+
+  const int btnW = w - content.x - 12;
+  const int btnH = 36;
+  const int gap  = 8;
+  const int lblX = content.x + 4;
+  int y = content.y + 4;
+
+  // ── Dropbox ──────────────────────────────────────────────────────────────
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(0x07FF, TFT_BLACK);
+  tft.drawString("Dropbox", lblX, y);
+  y += 12;
+
+  btnSyncDropbox = {content.x, y, btnW, btnH, "Sync all files to Dropbox"};
+  drawButton(btnSyncDropbox, cfg.dropbox_token.isEmpty() ? TFT_DARKGREY : 0x0228, TFT_WHITE, TFT_WHITE);
+  y += btnH + 4;
+
+  tft.setTextSize(1);
+  tft.setTextColor(strncmp(syncDropboxStatus, "OK", 2) == 0 ? TFT_GREEN : TFT_DARKGREY, TFT_BLACK);
+  const char* dbLine = syncDropboxStatus[0] ? syncDropboxStatus
+                       : cfg.dropbox_folder.isEmpty() ? "No folder set"
+                       : cfg.dropbox_folder.c_str();
+  tft.drawString(String(dbLine).substring(0, 38), lblX, y);
+  y += 14 + gap;
+
+  // ── WPA-SEC ──────────────────────────────────────────────────────────────
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("WPA-SEC", lblX, y);
+  y += 12;
+
+  btnSyncWpasec = {content.x, y, btnW, btnH, "Upload captures to WPA-SEC"};
+  drawButton(btnSyncWpasec, cfg.wpasec_apikey.isEmpty() ? TFT_DARKGREY : TFT_BLUE, TFT_WHITE, TFT_WHITE);
+  y += btnH + 4;
+
+  tft.setTextSize(1);
+  tft.setTextColor(wpasecSyncStatus.startsWith("Uploaded") ? TFT_GREEN :
+                   wpasecSyncStatus.startsWith("API") ? TFT_RED : TFT_DARKGREY, TFT_BLACK);
+  String wpaLine = wpasecSyncStatus.isEmpty() ? "Scans /captures for .pcap & .22000" : wpasecSyncStatus;
+  tft.drawString(wpaLine.substring(0, 38), lblX, y);
+  y += 14 + gap;
+
+  // ── Wigle ────────────────────────────────────────────────────────────────
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.drawString("Wigle.net", lblX, y);
+  y += 12;
+
+  btnSyncWigle = {content.x, y, btnW, btnH, "Upload wardrive to Wigle"};
+  drawButton(btnSyncWigle, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+  y += btnH + 4;
+
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.drawString("Use web UI: /wigle", lblX, y);
+
+  drawBorder();
+}
+
 static void drawStartupConfig() {
   tft.fillScreen(TFT_BLACK);
   drawHeader("Startup");
@@ -5453,24 +5535,27 @@ static void drawStartupConfig() {
   btnBack = {bottom.x, bottom.y, 92, UI_BUTTON_H, "Back"};
   drawButton(btnBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
 
-  const int row1Y = compact ? (content.y + 4) : (content.y + 28);
-  const int row2Y = compact ? (content.y + 34) : (content.y + 82);
-  const int btnY1 = compact ? (content.y + 2) : (content.y + 20);
-  const int btnY2 = compact ? (content.y + 32) : (content.y + 74);
+  const int row1Y = compact ? (content.y + 4)  : (content.y + 16);
+  const int row2Y = compact ? (content.y + 34) : (content.y + 56);
+  const int row3Y = compact ? (content.y + 64) : (content.y + 96);
+  const int row4Y = compact ? (content.y + 94) : (content.y + 136);
+  const int btnY1 = compact ? (content.y + 2)  : (content.y + 8);
+  const int btnY2 = compact ? (content.y + 32) : (content.y + 48);
+  const int btnY3 = compact ? (content.y + 62) : (content.y + 88);
+  const int btnY4 = compact ? (content.y + 92) : (content.y + 128);
   const int btnW = compact ? 90 : 114;
-  const int btnH = compact ? 26 : 34;
+  const int btnH = compact ? 26 : 32;
   const int btnX = w - (btnW + 12);
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Reconnect prompt on boot", content.x + 4, row1Y);
+  tft.drawString("Reconnect on boot", content.x + 4, row1Y);
 
   btnStartupAutoReconnect = {btnX, btnY1, btnW, btnH, cfg.startup_autoReconnectPrompt ? "ON" : "OFF"};
   drawButton(btnStartupAutoReconnect,
              cfg.startup_autoReconnectPrompt ? TFT_DARKGREEN : TFT_MAROON,
-             TFT_CYAN,
-             TFT_WHITE);
+             TFT_CYAN, TFT_WHITE);
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
@@ -5480,14 +5565,33 @@ static void drawStartupConfig() {
   btnStartupDefaultLockToggle = {btnX, btnY2, btnW, btnH, cfg.wifi_defaultLockChannel ? "ON" : "OFF"};
   drawButton(btnStartupDefaultLockToggle,
              cfg.wifi_defaultLockChannel ? TFT_DARKGREEN : TFT_MAROON,
-             TFT_MAGENTA,
-             TFT_WHITE);
+             TFT_MAGENTA, TFT_WHITE);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("Corner cube widget", content.x + 4, row3Y);
+
+  btnStartupHypercube = {btnX, btnY3, btnW, btnH, cfg.ui_hypercube ? "ON" : "OFF"};
+  drawButton(btnStartupHypercube,
+             cfg.ui_hypercube ? TFT_DARKGREEN : TFT_MAROON,
+             TFT_YELLOW, TFT_WHITE);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("Auto-start webserver", content.x + 4, row4Y);
+
+  btnStartupWebserver = {btnX, btnY4, btnW, btnH, cfg.startup_webserver ? "ON" : "OFF"};
+  drawButton(btnStartupWebserver,
+             cfg.startup_webserver ? TFT_DARKGREEN : TFT_MAROON,
+             0x07FF, TFT_WHITE);  // cyan accent
 
   if (!compact) {
     tft.setTextDatum(TL_DATUM);
     tft.setTextSize(1);
     tft.setTextColor(TFT_CYAN, TFT_BLACK);
-    tft.drawString("Saved to /config.json", content.x + 4, content.y + 138);
+    tft.drawString("Saved to /config.json", content.x + 4, content.y + 172);
   }
 
   uiLogLayout("drawStartupConfig", content, bottom);
@@ -6314,6 +6418,7 @@ static String neonPageStart(const String& title,
   html += neonNavLink("/sd", "SD Manager", activeNav);
   html += neonNavLink("/wpasec", "WPA-SEC", activeNav);
   html += neonNavLink("/yoink/log", "YOINK Log", activeNav);
+  html += neonNavLink("/keys/config", "API Keys", activeNav);
   html += "</nav></header><main class='nd-main'>";
   return html;
 }
@@ -6676,6 +6781,19 @@ static void startWebServer() {
     String html = neonPageStart("SD File Manager",
                                 "Inspect, upload, download, and remove SD files.",
                                 "/sd");
+
+    // Dropbox status banner
+    html += "<section class='nd-panel'>";
+    if (cfg.dropbox_token.isEmpty()) {
+      html += "<p><span class='nd-status nd-bad'>Dropbox not configured</span> &mdash; "
+              "<a href='/keys/config'>Add token in API Keys</a> to enable upload.</p>";
+    } else {
+      html += "<p><span class='nd-status nd-ok'>Dropbox ready</span> &mdash; "
+              "Files upload to <b>" + escapeHtml(cfg.dropbox_folder) + "</b> in your Dropbox. "
+              "<a href='/keys/config'>Edit token</a></p>";
+    }
+    html += "</section>";
+
     html += "<section class='nd-panel'><p>Current path: <b>" + escapeHtml(path) + "</b></p>";
     html += "<div class='nd-actions'><a class='nd-btn-ghost' href='/'>Home</a><a class='nd-btn-ghost' href='/android'>Android</a>";
     if (path != "/") {
@@ -6688,6 +6806,7 @@ static void startWebServer() {
     html += "<input type='file' name='file' required> ";
     html += "<div class='nd-actions'><button class='nd-btn' type='submit'>Upload</button></div></form></section>";
 
+    bool dropboxReady = !cfg.dropbox_token.isEmpty();
     html += "<section class='nd-panel'><h3>Directory Entries</h3>";
     html += "<table class='nd-table'><tr><th>Name</th><th>Type</th><th>Size</th><th>Actions</th></tr>";
     while (true) {
@@ -6706,11 +6825,15 @@ static void startWebServer() {
 
       html += "<tr><td>" + escapeHtml(baseName) + "</td>";
       html += isDir ? "<td>dir</td>" : "<td>file</td>";
-      html += "<td>" + String(size) + "</td><td>";
+      html += "<td>" + (isDir ? String("-") : String(size)) + "</td><td class='nd-actions-cell'>";
       if (isDir) {
         html += "<a class='nd-btn-ghost' href='/sd?path=" + urlEncodeSimple(fullPath) + "'>Open</a> ";
       } else {
-        html += "<a class='nd-btn-ghost' href='/sd/get?path=" + urlEncodeSimple(fullPath) + "'>View/Download</a> ";
+        html += "<a class='nd-btn-ghost' href='/sd/get?path=" + urlEncodeSimple(fullPath) + "'>Download</a> ";
+        if (dropboxReady) {
+          html += "<button class='nd-btn-ghost' type='button' "
+                  "onclick='dbUpload(this,\"" + escapeHtml(fullPath) + "\")'>&#8599; Dropbox</button> ";
+        }
       }
       html += "<form class='nd-inline' method='POST' action='/sd/delete' onsubmit='return confirm(\"Delete " + escapeHtml(baseName) + "?\")'>";
       html += "<input type='hidden' name='path' value='" + escapeHtml(fullPath) + "'>";
@@ -6720,6 +6843,25 @@ static void startWebServer() {
     }
     dir.close();
     html += "</table></section>";
+    html += R"JS(<script>
+function dbUpload(btn, path) {
+  btn.disabled = true;
+  btn.textContent = 'Uploading...';
+  fetch('/sd/dropbox/upload', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'path=' + encodeURIComponent(path)
+  }).then(r => r.json()).then(d => {
+    btn.textContent = d.ok ? '✓ Uploaded' : '✗ ' + (d.error || 'failed');
+    btn.style.color = d.ok ? '#0f0' : '#f44';
+    if (!d.ok) btn.disabled = false;
+  }).catch(e => {
+    btn.textContent = '✗ Error';
+    btn.style.color = '#f44';
+    btn.disabled = false;
+  });
+}
+</script>)JS";
     html += neonPageEnd();
     webServer.send(200, "text/html", html);
   });
@@ -6835,6 +6977,43 @@ static void startWebServer() {
       if (androidApkUploadFile) androidApkUploadFile.close();
       sdUploadOk = false;
     }
+  });
+
+  // ── Dropbox file upload from SD ──────────────────────────────────────────
+  webServer.on("/sd/dropbox/upload", HTTP_POST, [](){
+    if (cfg.dropbox_token.isEmpty()) {
+      webServer.send(400, "application/json", "{\"ok\":false,\"error\":\"Dropbox token not configured\"}");
+      return;
+    }
+    bool sdOk = sdReady || mountSdCard(false);
+    if (!sdOk) {
+      webServer.send(503, "application/json", "{\"ok\":false,\"error\":\"SD not available\"}");
+      return;
+    }
+    String path = normalizeSdWebPath(webServer.arg("path"));
+    if (path.isEmpty() || path == "/" || path.indexOf("..") >= 0) {
+      webServer.send(400, "application/json", "{\"ok\":false,\"error\":\"Invalid path\"}");
+      return;
+    }
+    if (!SD.exists(path)) {
+      webServer.send(404, "application/json", "{\"ok\":false,\"error\":\"File not found\"}");
+      return;
+    }
+    // Build remote path: strip trailing slash from folder, prepend to SD path.
+    String remotePath = cfg.dropbox_folder;
+    if (remotePath.endsWith("/")) remotePath.remove(remotePath.length() - 1);
+    if (!path.startsWith("/")) remotePath += "/";
+    remotePath += path;
+    Serial.printf("[dropbox] uploading %s -> %s\n", path.c_str(), remotePath.c_str());
+    auto res = DropboxClient::uploadFile(SD, path.c_str(), cfg.dropbox_token.c_str(), remotePath.c_str());
+    JsonDocument doc;
+    doc["ok"]         = res.ok;
+    doc["httpCode"]   = res.httpCode;
+    doc["remotePath"] = res.remotePath;
+    if (!res.ok) doc["error"] = res.error;
+    String out; serializeJson(doc, out);
+    Serial.printf("[dropbox] result: ok=%d code=%d %s\n", res.ok, res.httpCode, res.error);
+    webServer.send(res.ok ? 200 : 500, "application/json", out);
   });
 
   webServer.on("/wpasec", HTTP_GET, [](){
@@ -7208,6 +7387,169 @@ function startSync() {
 </script>)JS";
     html += neonPageEnd();
     webServer.send(200, "text/html", html);
+  });
+
+  // ── API Keys config ─────────────────────────────────────────────────────
+  webServer.on("/api/config/keys", HTTP_GET, [](){
+    JsonDocument doc;
+    doc["wigle_apiname_set"]  = !cfg.wigle_apiname.isEmpty();
+    doc["wigle_apitoken_set"] = !cfg.wigle_apitoken.isEmpty();
+    doc["dropbox_token_set"]  = !cfg.dropbox_token.isEmpty();
+    doc["dropbox_folder"]     = cfg.dropbox_folder;
+    doc["webhook_url_set"]    = !cfg.webhook_url.isEmpty();
+    doc["ntfy_topic_set"]     = !cfg.ntfy_topic.isEmpty();
+    doc["mqtt_broker_set"]    = !cfg.mqtt_broker.isEmpty();
+    doc["mqtt_port"]          = cfg.mqtt_port;
+    doc["mqtt_topic_prefix"]  = cfg.mqtt_topic_prefix;
+    String out; serializeJson(doc, out);
+    webServer.send(200, "application/json", out);
+  });
+
+  webServer.on("/api/config/keys", HTTP_POST, [](){
+    bool changed = false;
+    if (webServer.hasArg("wigle_apiname"))  { cfg.wigle_apiname  = webServer.arg("wigle_apiname");  changed = true; }
+    if (webServer.hasArg("wigle_apitoken")) { cfg.wigle_apitoken = webServer.arg("wigle_apitoken"); changed = true; }
+    if (webServer.hasArg("dropbox_token"))  { cfg.dropbox_token  = webServer.arg("dropbox_token");  changed = true; }
+    if (webServer.hasArg("dropbox_folder")) { cfg.dropbox_folder = webServer.arg("dropbox_folder"); changed = true; }
+    if (webServer.hasArg("webhook_url"))    { cfg.webhook_url    = webServer.arg("webhook_url");    changed = true; }
+    if (webServer.hasArg("ntfy_topic"))     { cfg.ntfy_topic     = webServer.arg("ntfy_topic");     changed = true; }
+    if (webServer.hasArg("mqtt_broker"))    { cfg.mqtt_broker    = webServer.arg("mqtt_broker");    changed = true; }
+    if (webServer.hasArg("mqtt_port"))      { cfg.mqtt_port      = webServer.arg("mqtt_port").toInt(); changed = true; }
+    if (webServer.hasArg("mqtt_prefix"))    { cfg.mqtt_topic_prefix = webServer.arg("mqtt_prefix"); changed = true; }
+    if (webServer.hasArg("mqtt_username"))  { cfg.mqtt_username  = webServer.arg("mqtt_username");  changed = true; }
+    if (webServer.hasArg("mqtt_password"))  { cfg.mqtt_password  = webServer.arg("mqtt_password");  changed = true; }
+    if (changed) saveConfig(cfg);
+    JsonDocument doc;
+    doc["ok"] = true;
+    doc["message"] = changed ? "Keys saved" : "Nothing to save";
+    String out; serializeJson(doc, out);
+    webServer.send(200, "application/json", out);
+  });
+
+  webServer.on("/keys/config", HTTP_GET, [](){
+    String html = neonPageStart("API Keys", "Configure service integrations.", "/keys/config");
+    html += R"HTML(
+<section class='nd-panel'>
+  <h2>Wigle.net</h2>
+  <p>Upload wardriving CSVs. Get credentials from <a href='https://wigle.net/account' target='_blank' rel='noopener'>wigle.net/account</a> → API Token.</p>
+  <label>API Name</label><input type='text' id='wigle_apiname' placeholder='Your Wigle username'>
+  <label>API Token</label><input type='password' id='wigle_apitoken' placeholder='wigle API token'>
+</section>
+<section class='nd-panel'>
+  <h2>Dropbox</h2>
+  <p>Auto-upload captures. App must have <b>Full Dropbox</b> access (not App Folder) to write to arbitrary paths. Generate a token from <a href='https://www.dropbox.com/developers/apps' target='_blank' rel='noopener'>Dropbox App Console</a>.</p>
+  <label>Access Token</label><input type='password' id='dropbox_token' placeholder='sl.xxxxxxx...'>
+  <label>Target Folder</label><input type='text' id='dropbox_folder' placeholder='/Apps/WardriverSync'>
+  <small style='color:#94a3b8'>Absolute Dropbox path where files are uploaded. Example: /Apps/WardriverSync</small>
+</section>
+<section class='nd-panel'>
+  <h2>Webhook / IFTTT <span class='nd-help'>(placeholder)</span></h2>
+  <p>POST to this URL on capture events (handshake caught, scan complete, etc).</p>
+  <label>Webhook URL</label><input type='text' id='webhook_url' placeholder='https://maker.ifttt.com/trigger/...'>
+</section>
+<section class='nd-panel'>
+  <h2>Ntfy Push Notifications <span class='nd-help'>(placeholder)</span></h2>
+  <p>Send push alerts to your phone via <a href='https://ntfy.sh' target='_blank' rel='noopener'>ntfy.sh</a>.</p>
+  <label>Topic</label><input type='text' id='ntfy_topic' placeholder='my-neondrive-alerts'>
+</section>
+<section class='nd-panel'>
+  <h2>MQTT Broker <span class='nd-help'>(placeholder)</span></h2>
+  <p>Stream events to Home Assistant, Node-RED, or any MQTT subscriber.</p>
+  <label>Broker Host</label><input type='text' id='mqtt_broker' placeholder='192.168.1.x or mqtt.example.com'>
+  <label>Port</label><input type='number' id='mqtt_port' placeholder='1883' value='1883' min='1' max='65535'>
+  <label>Topic Prefix</label><input type='text' id='mqtt_prefix' placeholder='neondrive'>
+  <label>Username <span class='nd-help'>(optional)</span></label><input type='text' id='mqtt_username' placeholder=''>
+  <label>Password <span class='nd-help'>(optional)</span></label><input type='password' id='mqtt_password' placeholder=''>
+</section>
+<div class='nd-actions'>
+  <button class='nd-btn' type='button' onclick='saveKeys()'>Save All</button>
+  <a class='nd-btn-ghost' href='/'>Back</a>
+</div>
+<p id='keys-status' class='nd-help'></p>
+)HTML";
+    html += R"JS(<script>
+function setStatus(id, msg, level) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = msg;
+  el.className = level === 'ok' ? 'nd-status nd-ok' : (level === 'bad' ? 'nd-status nd-bad' : 'nd-help');
+}
+window.onload = function() {
+  fetch('/api/config/keys').then(r => r.json()).then(d => {
+    if (d.dropbox_folder) { const el = document.getElementById('dropbox_folder'); if (el) el.value = d.dropbox_folder; }
+    if (d.wigle_apiname)  { const el = document.getElementById('wigle_apiname');  if (el) el.placeholder = '(configured)'; }
+  }).catch(() => {});
+};
+function saveKeys() {
+  setStatus('keys-status', 'Saving...', 'info');
+  const fields = ['wigle_apiname','wigle_apitoken','dropbox_token','dropbox_folder','webhook_url',
+                  'ntfy_topic','mqtt_broker','mqtt_port','mqtt_prefix','mqtt_username','mqtt_password'];
+  const parts = fields
+    .filter(f => { const el = document.getElementById(f); return el && el.value.trim() !== ''; })
+    .map(f => encodeURIComponent(f) + '=' + encodeURIComponent(document.getElementById(f).value.trim()));
+  if (!parts.length) { setStatus('keys-status', 'Nothing entered.', 'bad'); return; }
+  fetch('/api/config/keys', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: parts.join('&')
+  }).then(r => r.json()).then(d => {
+    setStatus('keys-status', d.ok ? 'SUCCESS: ' + d.message : 'ERROR: ' + (d.error || 'unknown'), d.ok ? 'ok' : 'bad');
+  }).catch(e => setStatus('keys-status', 'ERROR: ' + e.message, 'bad'));
+}
+</script>)JS";
+    html += neonPageEnd();
+    webServer.send(200, "text/html", html);
+  });
+
+  // ── Screenshot endpoint ───────────────────────────────────────────────────
+  webServer.on("/screenshot", HTTP_GET, [](){
+    const int W = tft.width();
+    const int H = tft.height();
+    // BMP file header + DIB header = 54 bytes; pixel data = W*H*3 bytes (24-bit BGR)
+    const uint32_t rowStride = ((W * 3 + 3) & ~3);
+    const uint32_t pixelBytes = rowStride * H;
+    const uint32_t fileSize = 54 + pixelBytes;
+
+    uint8_t header[54] = {};
+    header[0] = 'B'; header[1] = 'M';
+    header[2] = fileSize & 0xFF; header[3] = (fileSize >> 8) & 0xFF;
+    header[4] = (fileSize >> 16) & 0xFF; header[5] = (fileSize >> 24) & 0xFF;
+    header[10] = 54;                           // pixel data offset
+    header[14] = 40;                           // DIB header size
+    header[18] = W & 0xFF; header[19] = (W >> 8) & 0xFF;
+    // Negative height = top-down row order
+    int32_t negH = -H;
+    memcpy(&header[22], &negH, 4);
+    header[26] = 1;                            // color planes
+    header[28] = 24;                           // bits per pixel
+    header[34] = pixelBytes & 0xFF; header[35] = (pixelBytes >> 8) & 0xFF;
+    header[36] = (pixelBytes >> 16) & 0xFF; header[37] = (pixelBytes >> 24) & 0xFF;
+
+    webServer.setContentLength(fileSize);
+    webServer.send(200, "image/bmp", "");
+    WiFiClient client = webServer.client();
+    client.write(header, 54);
+
+    // Read rows in strips to stay within heap budget
+    const int STRIP = 8;
+    uint16_t buf565[320 * STRIP];
+    uint8_t  rowBuf[320 * 3 + 3];
+    for (int y = 0; y < H; y += STRIP) {
+      int rows = min(STRIP, H - y);
+      tft.readRect(0, y, W, rows, buf565);
+      for (int r = 0; r < rows; r++) {
+        int pad = (int)rowStride - W * 3;
+        for (int x = 0; x < W; x++) {
+          uint16_t px = buf565[r * W + x];
+          rowBuf[x * 3 + 0] = (px & 0x001F) << 3;           // B
+          rowBuf[x * 3 + 1] = ((px >> 5) & 0x003F) << 2;    // G
+          rowBuf[x * 3 + 2] = ((px >> 11) & 0x001F) << 3;   // R
+        }
+        memset(rowBuf + W * 3, 0, pad);
+        client.write(rowBuf, rowStride);
+      }
+    }
+    Serial.println("[screenshot] served BMP");
   });
 
   webServer.on("/yoink/file", HTTP_GET, [](){
@@ -7759,6 +8101,107 @@ static void drawWifiConnect() {
 
   drawBorder();
 }
+
+// ── Dropbox: upload all capture-relevant files from SD ────────────────────────
+
+// True if a root-level filename matches a NEONDRIVE-generated file pattern.
+static bool isNeondriveRootFile(const char* name) {
+  // Exact matches
+  if (strcasecmp(name, "recon_scan.csv")   == 0) return true;
+  if (strcasecmp(name, "yoink_session.log") == 0) return true;
+
+  const char* ext = strrchr(name, '.');
+  if (!ext) return false;
+
+  // .22000 handshake files anywhere at root
+  if (strcasecmp(ext, ".22000") == 0) return true;
+
+  // Prefix + .log patterns
+  if (strcasecmp(ext, ".log") == 0) {
+    if (strncasecmp(name, "wardrive_",         9)  == 0) return true;
+    if (strncasecmp(name, "station_wardrive_", 17) == 0) return true;
+    return false;
+  }
+
+  // Prefix + .pcap patterns
+  if (strcasecmp(ext, ".pcap") == 0) {
+    if (strncasecmp(name, "raw_",    4) == 0) return true;
+    if (strncasecmp(name, "beacon_", 7) == 0) return true;
+    if (strncasecmp(name, "probe_",  6) == 0) return true;
+    if (strncasecmp(name, "ap_sta_", 7) == 0) return true;
+    if (strncasecmp(name, "ap_",     3) == 0) return true;
+    if (strncasecmp(name, "deauth_", 7) == 0) return true;
+    return false;
+  }
+
+  return false;
+}
+
+static void syncAllDropbox() {
+  if (cfg.dropbox_token.isEmpty()) { strncpy(syncDropboxStatus, "No token", sizeof(syncDropboxStatus)-1); return; }
+  if (!sdReady && !mountSdCard(false)) { strncpy(syncDropboxStatus, "No SD", sizeof(syncDropboxStatus)-1); return; }
+
+  strncpy(syncDropboxStatus, "Syncing...", sizeof(syncDropboxStatus) - 1);
+
+  auto uploadOne = [&](const char* sdPath, int& done, int& errs) {
+    String remote = cfg.dropbox_folder;
+    if (remote.endsWith("/")) remote.remove(remote.length() - 1);
+    remote += sdPath;
+    auto res = DropboxClient::uploadFile(SD, sdPath, cfg.dropbox_token.c_str(), remote.c_str());
+    if (res.ok) { done++; }
+    else { errs++; Serial.printf("[sync] fail: %s %s\n", sdPath, res.error); }
+  };
+
+  int done = 0, errors = 0;
+  char nameBuf[64];
+
+  // ── Root-level NEONDRIVE files ─────────────────────────────────────────────
+  {
+    File root = SD.open("/");
+    if (root) {
+      while (true) {
+        File e = root.openNextFile();
+        if (!e) break;
+        bool isDir = e.isDirectory();
+        strncpy(nameBuf, e.name(), sizeof(nameBuf) - 1);
+        nameBuf[sizeof(nameBuf) - 1] = '\0';
+        e.close();
+        if (isDir || !isNeondriveRootFile(nameBuf)) continue;
+        char sdPath[68];
+        snprintf(sdPath, sizeof(sdPath), "/%s", nameBuf);
+        uploadOne(sdPath, done, errors);
+      }
+      root.close();
+    }
+  }
+
+  // ── /captures/ directory — .pcap and .22000 files ─────────────────────────
+  {
+    File capDir = SD.open("/captures");
+    if (capDir && capDir.isDirectory()) {
+      while (true) {
+        File e = capDir.openNextFile();
+        if (!e) break;
+        bool isDir = e.isDirectory();
+        strncpy(nameBuf, e.name(), sizeof(nameBuf) - 1);
+        nameBuf[sizeof(nameBuf) - 1] = '\0';
+        e.close();
+        if (isDir) continue;
+        const char* ext = strrchr(nameBuf, '.');
+        if (!ext) continue;
+        if (strcasecmp(ext, ".pcap") != 0 && strcasecmp(ext, ".22000") != 0) continue;
+        char sdPath[80];
+        snprintf(sdPath, sizeof(sdPath), "/captures/%s", nameBuf);
+        uploadOne(sdPath, done, errors);
+      }
+      capDir.close();
+    }
+  }
+
+  snprintf(syncDropboxStatus, sizeof(syncDropboxStatus), "OK %d e:%d", done, errors);
+}
+
+static void drawSync();  // forward
 
 static void syncWithWPASec() {
   if (wpasecSyncInProgress) {
@@ -9350,6 +9793,102 @@ static void portScannerTick() {
     drawPortScanner();
     psLastDrawMs=millis();
   }
+}
+
+// ---------- Wardrive Screen ----------
+static void setScreen(ScreenId next);  // forward declaration
+static bool wardriveActive = false;
+
+static void drawWardrive() {
+  const int w = tft.width();
+  const int h = tft.height();
+  tft.fillScreen(TFT_BLACK);
+  drawHeader("// WARDRIVE");
+  drawUniversalBackground();
+
+  const GpsFix& g = GpsService::fix();
+  const int pad = 8;
+  int y = uiHeaderBandH() + 10;
+  const int lineH = 18;
+
+  // GPS status row
+  tft.setTextSize(1);
+  tft.setTextDatum(TL_DATUM);
+  if (!GpsService::isRunning()) {
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("GPS: NOT STARTED", pad, y);
+  } else if (!g.valid) {
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.drawString("GPS: SEARCHING...", pad, y);
+    tft.drawString(String("Sats: ") + g.satellites, pad + 170, y);
+  } else {
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString("GPS: LOCKED", pad, y);
+    tft.drawString(String("Sats: ") + g.satellites, pad + 170, y);
+  }
+  y += lineH + 2;
+
+  // Coordinates
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  if (g.valid) {
+    char buf[48];
+    snprintf(buf, sizeof(buf), "LAT  %.6f", g.lat);
+    tft.drawString(buf, pad, y); y += lineH;
+    snprintf(buf, sizeof(buf), "LON  %.6f", g.lon);
+    tft.drawString(buf, pad, y); y += lineH;
+    snprintf(buf, sizeof(buf), "SPD  %.1f km/h   ALT %.0fm", GpsService::speedKmh(), g.altMeters);
+    tft.drawString(buf, pad, y); y += lineH;
+  } else {
+    tft.drawString("LAT  --", pad, y); y += lineH;
+    tft.drawString("LON  --", pad, y); y += lineH;
+    tft.drawString("SPD  --   ALT  --", pad, y); y += lineH;
+  }
+  y += 4;
+
+  // Wardrive status
+  tft.setTextColor(wardriveActive ? TFT_GREEN : TFT_DARKGREY, TFT_BLACK);
+  tft.drawString(wardriveActive ? "WARDRIVE: ACTIVE" : "WARDRIVE: STOPPED", pad, y);
+  y += lineH + 8;
+
+  // Start / Stop button
+  int btnW = (w - pad * 2 - 8) / 2;
+  int btnH = 36;
+  int btnY = h - btnH - 24;
+  Button btnToggle = {pad, btnY, btnW, btnH, wardriveActive ? "Stop" : "Start"};
+  Button btnBack   = {pad + btnW + 8, btnY, btnW, btnH, "Home"};
+  uint16_t toggleColor = wardriveActive ? TFT_RED : TFT_GREEN;
+  drawButton(btnToggle, TFT_BLACK, toggleColor, TFT_WHITE);
+  drawButton(btnBack,   TFT_BLACK, TFT_CYAN,   TFT_WHITE);
+
+  drawBorder();
+}
+
+static void handleWardriveTouch(int tx, int ty) {
+  const int w = tft.width();
+  const int h = tft.height();
+  int btnW = (w - 8 * 2 - 8) / 2;
+  int btnH = 36;
+  int btnY = h - btnH - 24;
+  Button btnToggle = {8, btnY, btnW, btnH, ""};
+  Button btnBack   = {8 + btnW + 8, btnY, btnW, btnH, ""};
+
+  if (hit(btnToggle, tx, ty)) {
+    wardriveActive = !wardriveActive;
+    if (wardriveActive && !GpsService::isRunning()) {
+      GpsService::begin(CYD35_GPS_RX, CYD35_GPS_TX);
+    }
+    Serial.printf("[wardrive] %s\n", wardriveActive ? "STARTED" : "STOPPED");
+    drawWardrive();
+    waitTouchRelease();
+    return;
+  }
+  if (hit(btnBack, tx, ty)) {
+    wardriveActive = false;
+    setScreen(ScreenId::HOME);
+    waitTouchRelease();
+    return;
+  }
+  waitTouchRelease();
 }
 
 // ---------- Recon Home Screen ----------
@@ -10977,6 +11516,12 @@ static void setScreen(ScreenId next) {
     case ScreenId::RECON_HOME:
       drawReconHome();
       break;
+    case ScreenId::WARDRIVE:
+      drawWardrive();
+      break;
+    case ScreenId::SYNC:
+      drawSync();
+      break;
     case ScreenId::RECON:
       reconLayoutDrawn = false;
       reconLastLogCount = 0;
@@ -11019,6 +11564,7 @@ static void setScreen(ScreenId next) {
     }
     case ScreenId::TARGETS_PLACEHOLDER: drawPlaceholder("Targets", "Coming soon"); break;
   }
+  HypercubeWidget::notifyScreenDrawn();
 #if UI_DEBUG_MEM
   char memTag[48];
   snprintf(memTag, sizeof(memTag), "screen:%s", screenToStr(screen));
@@ -11046,6 +11592,7 @@ static void tdisplayRedrawCurrentScreen() {
     case ScreenId::RECON:               drawRecon(); break;
     case ScreenId::PORT_SCANNER:        drawPortScanner(); break;
     case ScreenId::RECON_HOME:          drawReconHome(); break;
+    case ScreenId::WARDRIVE:            drawWardrive(); break;
     case ScreenId::ABOUT:               drawAbout(); break;
     case ScreenId::BRUCE_MENU:          drawBruceMenu(); break;
     case ScreenId::BRUCE_MONITOR:       drawBruceMonitor(); break;
@@ -11057,6 +11604,96 @@ static void tdisplayRedrawCurrentScreen() {
 }
 #endif
 
+static void saveScreenshotToSd() {
+  bool sdOk = sdReady || mountSdCard(false);
+  if (!sdOk) { Serial.println("[screenshot] SD not available"); return; }
+
+  SD.mkdir("/screenshots");
+
+  // Find next available filename
+  char path[36];
+  for (int i = 0; i < 1000; i++) {
+    snprintf(path, sizeof(path), "/screenshots/scr_%04d.bmp", i);
+    if (!SD.exists(path)) break;
+  }
+
+  const int W = tft.width();
+  const int H = tft.height();
+  const uint32_t rowStride  = ((uint32_t)(W * 3 + 3) & ~3u);
+  const uint32_t pixelBytes = rowStride * (uint32_t)H;
+  const uint32_t fileSize   = 54u + pixelBytes;
+
+  uint8_t header[54] = {};
+  header[0] = 'B'; header[1] = 'M';
+  header[2] = fileSize & 0xFF; header[3] = (fileSize >> 8) & 0xFF;
+  header[4] = (fileSize >> 16) & 0xFF; header[5] = (fileSize >> 24) & 0xFF;
+  header[10] = 54; header[14] = 40;
+  header[18] = W & 0xFF; header[19] = (W >> 8) & 0xFF;
+  int32_t negH = -H; memcpy(&header[22], &negH, 4);
+  header[26] = 1; header[28] = 24;
+  header[34] = pixelBytes & 0xFF; header[35] = (pixelBytes >> 8) & 0xFF;
+  header[36] = (pixelBytes >> 16) & 0xFF; header[37] = (pixelBytes >> 24) & 0xFF;
+
+  // Force TFT SPI bus into a clean idle state before switching to read mode.
+  // If the hypercube or any other code left a write-transaction open
+  // (inTransaction==true), readPixel/readRect would call end_tft_write()
+  // first, which spins on SPI_BUSY_CHECK until the watchdog fires.
+  tft.endWrite();
+  delay(2);
+
+  // Allocate one row of 565 pixels + one row of BGR24 pixels.
+  uint16_t* row565 = (uint16_t*)malloc((size_t)W * sizeof(uint16_t));
+  uint8_t*  rowBuf = (uint8_t*)malloc(rowStride);
+  if (!row565 || !rowBuf) {
+    free(row565); free(rowBuf);
+    Serial.println("[screenshot] malloc failed");
+    return;
+  }
+
+  File f = SD.open(path, FILE_WRITE);
+  if (!f) {
+    free(row565); free(rowBuf);
+    Serial.printf("[screenshot] open failed: %s\n", path);
+    return;
+  }
+  f.write(header, 54);
+
+  Serial.printf("[screenshot] writing %dx%d stride=%u total=%lu\n", W, H, (unsigned)rowStride, (unsigned long)fileSize);
+
+  bool readOk = true;
+  for (int y = 0; y < H; y++) {
+    // readRect for a full row: one SPI transaction vs 480 for readPixel,
+    // much less watchdog pressure.
+    tft.readRect(0, y, W, 1, row565);
+    for (int x = 0; x < W; x++) {
+      uint16_t px = row565[x];
+      rowBuf[x * 3 + 0] = (px & 0x001F) << 3;         // B (565 bits 4:0)
+      rowBuf[x * 3 + 1] = ((px >> 5) & 0x003F) << 2;  // G (565 bits 10:5)
+      rowBuf[x * 3 + 2] = ((px >> 11) & 0x001F) << 3; // R (565 bits 15:11)
+    }
+    memset(rowBuf + W * 3, 0, rowStride - W * 3);
+    if (f.write(rowBuf, rowStride) != rowStride) { readOk = false; break; }
+    if (y % 16 == 0) {
+      yield();
+      esp_task_wdt_reset();  // Explicit WDT reset — read loop can take 1-2s
+    }
+  }
+  free(row565);
+  free(rowBuf);
+  f.close();
+
+  if (readOk) {
+    Serial.printf("[screenshot] saved %s (%lu bytes)\n", path, (unsigned long)fileSize);
+  } else {
+    Serial.printf("[screenshot] write error on %s\n", path);
+  }
+
+  // Brief white flash border as visual confirmation
+  tft.drawRect(0, 0, W, H, TFT_WHITE);
+  delay(120);
+  HypercubeWidget::notifyScreenDrawn();
+}
+
 static void sw1Tick() {
   if (!sw1Enabled || PIN_SW1 < 0) return;
   const uint32_t now = millis();
@@ -11066,15 +11703,9 @@ static void sw1Tick() {
     return;
   }
   if (down && !sw1WasDown) {
-    sw1DebounceUntilMs = now + 180;
-    neonPanicMode = (NeonPanicMode)(((uint8_t)neonPanicMode + 1U) % 4U);
-    if (screen != ScreenId::NEON_PANIC) {
-      neonPanicReturnScreen = screen;
-      setScreen(ScreenId::NEON_PANIC);
-    } else {
-      drawNeonPanic();
-    }
-    pushConsoleEvent("INFO", "BOOT", neonPanicModeLabel(neonPanicMode));
+    sw1DebounceUntilMs = now + 400;
+    saveScreenshotToSd();
+    pushConsoleEvent("INFO", "BOOT", "Screenshot saved");
   }
   sw1WasDown = down;
 }
@@ -11470,6 +12101,7 @@ void setup() {
 
   backlightBringup();
   display_init();
+  HypercubeWidget::begin(tft);
   touch_init();
 
   // LittleFS
@@ -11503,6 +12135,7 @@ void setup() {
     saveConfig(temp);
   }
   cfg = temp;
+  HypercubeWidget::setEnabled(cfg.ui_hypercube);
   applyBacklightLevel(255);
   applyStatusLedState(ledBrightness, ledRed, ledGreen, ledBlue);
   verboseSerial = cfg.telemetry_verboseSerial;
@@ -11517,7 +12150,14 @@ void setup() {
   uiMemBudgetBoot();
 
   if (cfg.startup_autoReconnectPrompt && !cfg.wifi_ssid.isEmpty()) {
-    homeReconnectPromptActive = true;
+    Serial.printf("[boot] Auto-reconnecting to '%s'\n", cfg.wifi_ssid.c_str());
+    wifiConnectStart(cfg.wifi_ssid, cfg.wifi_password,
+                     wifiConnectStatus, wifiConnectInProgress, wifiConnectAttemptMs,
+                     wifiConnectSsid, wifiConnectPassword, pushConsoleEventf);
+  }
+  if (cfg.startup_webserver) {
+    Serial.println("[boot] Auto-starting webserver");
+    startWebServer();
   }
   setScreen(ScreenId::HOME);
   uiMemLog("after_ui_init");
@@ -11528,6 +12168,8 @@ void loop() {
   handleSerialDebugCommands();
   bruceMenuTick();
   timeServiceTick();
+  GpsService::tick();
+  HypercubeWidget::tick();
   sw1Tick();
   neonPanicTick();
   touchDebugTick();
@@ -11677,8 +12319,12 @@ void loop() {
           Serial.println("[ui] Home -> BRUCE_MENU");
           setScreen(ScreenId::BRUCE_MENU);
           break;
+        case 8:
+          Serial.println("[ui] Home -> WARDRIVE");
+          if (!GpsService::isRunning()) GpsService::begin(CYD35_GPS_RX, CYD35_GPS_TX);
+          setScreen(ScreenId::WARDRIVE);
+          break;
         default:
-          // if more buttons are added later, handle them here
           break;
       }
       waitTouchRelease();
@@ -12270,6 +12916,11 @@ void loop() {
     waitTouchRelease(); return;
   }
 
+  if (screen == ScreenId::WARDRIVE) {
+    handleWardriveTouch(tx, ty);
+    return;
+  }
+
   // AUTOMATE MENU (Scrollable mode selection with touch buttons)
   if (screen == ScreenId::AUTOMATE_MENU) {
     rawCaptureTick();
@@ -12333,12 +12984,51 @@ void loop() {
       waitTouchRelease();
       return;
     }
-    if (hit(btnCfgLed, tx, ty)) { 
+    if (hit(btnCfgLed, tx, ty)) {
       Serial.println("[cfg] Opening LED Control");
-      setScreen(ScreenId::LED_CONTROL); 
+      setScreen(ScreenId::LED_CONTROL);
       waitTouchRelease();
-      return; 
+      return;
     }
+    if (hit(btnCfgSync, tx, ty)) {
+      Serial.println("[cfg] Opening Sync screen");
+      setScreen(ScreenId::SYNC);
+      waitTouchRelease();
+      return;
+    }
+    waitTouchRelease();
+    return;
+  }
+
+  // SYNC
+  if (screen == ScreenId::SYNC) {
+    if (hit(btnBack, tx, ty)) { setScreen(ScreenId::CONFIG); waitTouchRelease(); return; }
+
+    if (hit(btnSyncDropbox, tx, ty) && !cfg.dropbox_token.isEmpty()) {
+      waitTouchRelease();
+      strncpy(syncDropboxStatus, "Syncing...", sizeof(syncDropboxStatus)-1);
+      drawSync();
+      syncAllDropbox();
+      drawSync();
+      return;
+    }
+
+    if (hit(btnSyncWpasec, tx, ty) && !cfg.wpasec_apikey.isEmpty()) {
+      waitTouchRelease();
+      wpasecSyncStatus = "Syncing...";
+      drawSync();
+      syncWithWPASec();
+      drawSync();
+      return;
+    }
+
+    if (hit(btnSyncWigle, tx, ty)) {
+      // Wigle not implemented on device — redirect to web UI
+      drawSync();
+      waitTouchRelease();
+      return;
+    }
+
     waitTouchRelease();
     return;
   }
@@ -12393,6 +13083,23 @@ void loop() {
 
     if (hit(btnStartupDefaultLockToggle, tx, ty)) {
       cfg.wifi_defaultLockChannel = !cfg.wifi_defaultLockChannel;
+      saveConfig(cfg);
+      drawStartupConfig();
+      waitTouchRelease();
+      return;
+    }
+
+    if (hit(btnStartupHypercube, tx, ty)) {
+      cfg.ui_hypercube = !cfg.ui_hypercube;
+      HypercubeWidget::setEnabled(cfg.ui_hypercube);
+      saveConfig(cfg);
+      drawStartupConfig();
+      waitTouchRelease();
+      return;
+    }
+
+    if (hit(btnStartupWebserver, tx, ty)) {
+      cfg.startup_webserver = !cfg.startup_webserver;
       saveConfig(cfg);
       drawStartupConfig();
       waitTouchRelease();

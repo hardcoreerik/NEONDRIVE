@@ -21,7 +21,13 @@ void printConfigSerial(const AppConfig& c) {
                   c.wifi_savedSsid[i].c_str(),
                   c.wifi_savedPassword[i].isEmpty() ? "false" : "true");
   }
-  Serial.print("wpasec.apikey_set="); Serial.println(c.wpasec_apikey.isEmpty() ? "false" : "true");
+  Serial.print("wpasec.apikey_set=");   Serial.println(c.wpasec_apikey.isEmpty()  ? "false" : "true");
+  Serial.print("wigle.apiname_set=");   Serial.println(c.wigle_apiname.isEmpty()  ? "false" : "true");
+  Serial.print("wigle.apitoken_set=");  Serial.println(c.wigle_apitoken.isEmpty() ? "false" : "true");
+  Serial.print("dropbox.token_set=");   Serial.println(c.dropbox_token.isEmpty()  ? "false" : "true");
+  Serial.print("webhook.url_set=");     Serial.println(c.webhook_url.isEmpty()    ? "false" : "true");
+  Serial.print("ntfy.topic_set=");      Serial.println(c.ntfy_topic.isEmpty()     ? "false" : "true");
+  Serial.print("mqtt.broker_set=");     Serial.println(c.mqtt_broker.isEmpty()    ? "false" : "true");
   Serial.print("display.showStats="); Serial.println(c.display_showStats ? "true" : "false");
   Serial.print("display.timeout="); Serial.println(c.display_timeout);
   Serial.print("startup.autoReconnectPrompt="); Serial.println(c.startup_autoReconnectPrompt ? "true" : "false");
@@ -91,13 +97,31 @@ bool loadConfig(AppConfig& out) {
   JsonObject wpasec = doc["wpasec"];
   out.wpasec_apikey = String(wpasec["apikey"] | "");
 
+  JsonObject wigle = doc["wigle"];
+  out.wigle_apiname  = String(wigle["apiname"]  | "");
+  out.wigle_apitoken = String(wigle["apitoken"] | "");
+
+  out.dropbox_token  = String(doc["dropbox"]["token"]  | "");
+  out.dropbox_folder = String(doc["dropbox"]["folder"] | "/WardriveAnalyzerSync");
+  out.webhook_url   = String(doc["webhook"]["url"]   | "");
+  out.ntfy_topic    = String(doc["ntfy"]["topic"]    | "");
+
+  JsonObject mqtt = doc["mqtt"];
+  out.mqtt_broker       = String(mqtt["broker"]      | "");
+  out.mqtt_port         = mqtt["port"]               | 1883;
+  out.mqtt_topic_prefix = String(mqtt["topicPrefix"] | "neondrive");
+  out.mqtt_username     = String(mqtt["username"]    | "");
+  out.mqtt_password     = String(mqtt["password"]    | "");
+
   JsonObject display = doc["display"];
   out.display_brightness = display["brightness"] | 128;
   out.display_timeout    = display["timeout"]    | 30;
   out.display_showStats  = display["showStats"]  | true;
+  out.ui_hypercube       = display["hypercube"]  | true;
 
   JsonObject startup = doc["startup"];
   out.startup_autoReconnectPrompt = startup["autoReconnectPrompt"] | true;
+  out.startup_webserver           = startup["webserver"]           | false;
   out.wifi_defaultLockChannel = wifi["defaultLockChannel"] | false;
 
   JsonObject telemetry = doc["telemetry"];
@@ -130,13 +154,31 @@ bool saveConfig(const AppConfig& in) {
   JsonObject wpasec = doc["wpasec"].to<JsonObject>();
   wpasec["apikey"] = in.wpasec_apikey.c_str();
 
+  JsonObject wigle = doc["wigle"].to<JsonObject>();
+  wigle["apiname"]  = in.wigle_apiname.c_str();
+  wigle["apitoken"] = in.wigle_apitoken.c_str();
+
+  doc["dropbox"]["token"]  = in.dropbox_token.c_str();
+  doc["dropbox"]["folder"] = in.dropbox_folder.c_str();
+  doc["webhook"]["url"]   = in.webhook_url.c_str();
+  doc["ntfy"]["topic"]    = in.ntfy_topic.c_str();
+
+  JsonObject mqtt = doc["mqtt"].to<JsonObject>();
+  mqtt["broker"]      = in.mqtt_broker.c_str();
+  mqtt["port"]        = in.mqtt_port;
+  mqtt["topicPrefix"] = in.mqtt_topic_prefix.c_str();
+  mqtt["username"]    = in.mqtt_username.c_str();
+  mqtt["password"]    = in.mqtt_password.c_str();
+
   JsonObject display = doc["display"].to<JsonObject>();
   display["brightness"] = in.display_brightness;
-  display["timeout"] = in.display_timeout;
-  display["showStats"] = in.display_showStats;
+  display["timeout"]    = in.display_timeout;
+  display["showStats"]  = in.display_showStats;
+  display["hypercube"]  = in.ui_hypercube;
 
   JsonObject startup = doc["startup"].to<JsonObject>();
   startup["autoReconnectPrompt"] = in.startup_autoReconnectPrompt;
+  startup["webserver"]           = in.startup_webserver;
   wifi["defaultLockChannel"] = in.wifi_defaultLockChannel;
 
   JsonObject telemetry = doc["telemetry"].to<JsonObject>();

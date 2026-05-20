@@ -37,3 +37,7 @@
 #define CYD35_SD_CS   5
 
 #define CYD35_SW1     0
+
+// GPS UART (Serial2) — connect GPS TX → GPIO16, GPS RX ← GPIO17 (tx, optional)
+#define CYD35_GPS_RX  16
+#define CYD35_GPS_TX  17
