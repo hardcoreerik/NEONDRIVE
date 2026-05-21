@@ -14,7 +14,7 @@ static constexpr float  ROT_SPEED_XZ = 0.007f;
 // 4D→3D and 3D→2D perspective eye distances
 static constexpr float  D4    = 2.5f;
 static constexpr float  D3    = 3.5f;
-static constexpr float  SCALE = 10.5f;  // fits in 52-px sprite
+static constexpr float  SCALE = 84.0f;  // scaled up to fill most of the 52x52 widget region
 
 // ── Module state ─────────────────────────────────────────────────────────────
 

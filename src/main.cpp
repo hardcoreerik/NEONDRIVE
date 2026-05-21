@@ -2301,6 +2301,8 @@ static void usbRpcSendError(uint32_t id, const char* err) {
   usbRpcSendJson(id, doc);
 }
 
+static bool saveScreenshotToSd(char* outPath, size_t outPathLen);
+
 static void handleSerialRpcLine(const String& lineRaw) {
   String line = lineRaw;
   line.trim();
@@ -2551,6 +2553,14 @@ static void handleSerialRpcLine(const String& lineRaw) {
         doc["error"] = "unknown wifi mode";
       }
       doc["mode"] = mode;
+    } else if (name == "SCREENSHOT") {
+      char shotPath[36] = {0};
+      if (saveScreenshotToSd(shotPath, sizeof(shotPath))) {
+        doc["path"] = shotPath;
+      } else {
+        doc["ok"] = false;
+        doc["error"] = "screenshot failed";
+      }
     } else {
       doc["ok"] = false;
       doc["error"] = "unknown control";
@@ -2667,11 +2677,11 @@ static constexpr uint8_t UI_BUTTON_TEXT_SIZE = 2;
 
 // utility for picking neon border colour; indexed same order as labels below.
 static uint16_t homeBtnBorderColor(int idx) {
-  // neon palette for 8 home buttons
+  // neon palette for 9 home buttons
   static const uint16_t colours[HOME_BTN_COUNT] = {
-    0x07E0, 0xF81F, 0x00FF,
-    0xFFE0, 0x001F, 0x0FF0,
-    0x07FF, 0xFD20
+    0x07E0, 0xF81F, 0xF800,
+    0xFFE0, 0x07E0, 0xF81F,
+    0x07FF, 0xFD20, 0x07FF
   };
   return colours[idx % HOME_BTN_COUNT];
 }
@@ -2700,6 +2710,135 @@ static void drawButton(const Button& b, uint16_t fill, uint16_t border, uint16_t
     tft.setTextSize(labelSize);
   }
   tft.drawString(b.label, drawX + (drawW / 2), drawY + (drawH / 2));
+}
+
+static void drawHomeGlyph(const char* label, int cx, int cy, int iconW, int iconH, uint16_t col) {
+  if (!label) return;
+  if (strcmp(label, "Just Go") == 0) {
+    const int step = max(6, iconW / 5);
+    tft.fillTriangle(cx - step, cy - iconH / 3, cx + step / 2, cy, cx - step, cy + iconH / 3, col);
+    tft.fillTriangle(cx, cy - iconH / 3, cx + step + step / 2, cy, cx, cy + iconH / 3, col);
+  } else if (strcmp(label, "WiFi") == 0) {
+    // Classic centered WiFi glyph: top arches + node below (no drawArc dependency).
+    const int baseY = cy + 1;
+    const int rOuter = max(8, min(iconW / 2 - 3, iconH / 2));
+    const int rMid   = max(6, rOuter - 4);
+    const int rInner = max(4, rMid - 3);
+    const auto drawTopBand = [&](int r, int thk) {
+      for (int t = 0; t < thk; ++t) tft.drawCircle(cx, baseY, r - t, col);
+      // Mask lower half so only top arc remains.
+      tft.fillRect(cx - r - 2, baseY, (r * 2) + 4, r + 6, TFT_BLACK);
+    };
+    drawTopBand(rOuter, 3);
+    drawTopBand(rMid, 3);
+    drawTopBand(rInner, 2);
+    tft.fillCircle(cx, baseY + rInner + 4, 3, col);
+  } else if (strcmp(label, "GPS") == 0) {
+    // Satellite body + solar panels + orbit ring
+    const int body = max(8, iconH / 3);
+    const int half = body / 2;
+    tft.drawRect(cx - half, cy - half, body, body, col);
+    tft.drawRect(cx - half + 2, cy - half + 2, body - 4, body - 4, col);
+    tft.fillCircle(cx, cy, 1, col);
+    const int panelW = max(6, body - 2);
+    const int panelH = max(3, body / 3);
+    tft.drawRect(cx - half - panelW - 3, cy - panelH / 2, panelW, panelH, col);
+    tft.drawRect(cx + half + 3, cy - panelH / 2, panelW, panelH, col);
+    tft.drawLine(cx - half, cy, cx - 4, cy, col);
+    tft.drawLine(cx + half, cy, cx + 4, cy, col);
+    tft.drawCircle(cx, cy, max(8, iconH / 3), col);
+    tft.drawLine(cx + 2, cy + 2, cx + max(9, iconH / 2), cy - max(7, iconH / 3), col);
+    tft.fillCircle(cx + max(9, iconH / 2), cy - max(7, iconH / 3), 1, col);
+  } else if (strcmp(label, "Logs") == 0) {
+    const int rw = iconW / 2;
+    const int rh = iconH / 2;
+    const int x0 = cx - rw / 2;
+    const int y0 = cy - rh / 2;
+    tft.drawRect(x0, y0, rw, rh, col);
+    tft.fillTriangle(x0 + rw - 8, y0, x0 + rw, y0 + 8, x0 + rw - 8, y0 + 8, col);
+    tft.drawFastHLine(x0 + 4, y0 + 12, rw - 10, col);
+    tft.drawFastHLine(x0 + 4, y0 + 18, rw - 10, col);
+  } else if (strcmp(label, "Target") == 0) {
+    tft.drawCircle(cx, cy, iconH / 3, col);
+    tft.drawCircle(cx, cy, iconH / 6, col);
+    tft.drawFastHLine(cx - iconW / 3, cy, (iconW * 2) / 3, col);
+    tft.drawFastVLine(cx, cy - iconH / 3, (iconH * 2) / 3, col);
+  } else if (strcmp(label, "Recon") == 0) {
+    tft.drawCircle(cx, cy, iconH / 3, col);
+    tft.drawCircle(cx, cy, iconH / 6, col);
+    tft.drawLine(cx, cy, cx + iconW / 4, cy - iconH / 4, col);
+    tft.fillCircle(cx, cy, 2, col);
+  } else if (strcmp(label, "Config") == 0) {
+    tft.drawCircle(cx, cy, iconH / 5, col);
+    for (int i = 0; i < 8; ++i) {
+      const float a = (float)i * 0.7853982f;
+      const int x1 = cx + (int)(cosf(a) * (iconH / 4));
+      const int y1 = cy + (int)(sinf(a) * (iconH / 4));
+      const int x2 = cx + (int)(cosf(a) * (iconH / 3));
+      const int y2 = cy + (int)(sinf(a) * (iconH / 3));
+      tft.drawLine(x1, y1, x2, y2, col);
+    }
+  } else if (strcmp(label, "Net Scan") == 0) {
+    // Network hierarchy tree: one root node branching to two child nodes.
+    const int box = max(4, min(iconW, iconH) / 5);
+    const int rootX = cx - (box / 2);
+    const int rootY = cy - box - 5;
+    const int leftX = cx - box - 6;
+    const int rightX = cx + 6;
+    const int childY = cy + 4;
+
+    tft.drawRect(rootX, rootY, box, box, col);
+    tft.drawRect(leftX, childY, box, box, col);
+    tft.drawRect(rightX, childY, box, box, col);
+
+    const int rootBottomX = rootX + (box / 2);
+    const int rootBottomY = rootY + box;
+    const int splitY = rootBottomY + 4;
+    const int leftTopX = leftX + (box / 2);
+    const int rightTopX = rightX + (box / 2);
+
+    tft.drawLine(rootBottomX, rootBottomY, rootBottomX, splitY, col);
+    tft.drawLine(leftTopX, childY, leftTopX, splitY, col);
+    tft.drawLine(rightTopX, childY, rightTopX, splitY, col);
+    tft.drawLine(leftTopX, splitY, rightTopX, splitY, col);
+  } else if (strcmp(label, "BRUCE") == 0) {
+    tft.fillCircle(cx - 8, cy - 5, 3, col);
+    tft.fillCircle(cx + 8, cy - 5, 3, col);
+    tft.fillRect(cx - 10, cy + 2, 20, 8, col);
+    tft.fillRect(cx - 6, cy + 10, 3, 4, col);
+    tft.fillRect(cx + 3, cy + 10, 3, 4, col);
+  }
+}
+
+static void drawHomeButton(const Button& b, uint16_t border, uint16_t text) {
+  const int yOff = buttonRenderYOffset(b);
+  const int drawW = (b.w * 95) / 100;
+  const int drawH = (b.h * 95) / 100;
+  const int drawX = b.x + (b.w - drawW) / 2;
+  const int drawY = (b.y + yOff) + (b.h - drawH) / 2;
+  const int r = (drawH >= 36) ? 8 : 6;
+  const int labelBandH = max(11, drawH / 3);
+  const int iconH = drawH - labelBandH - 3;
+
+  tft.fillRoundRect(drawX, drawY, drawW, drawH, r, TFT_BLACK);
+  tft.drawRoundRect(drawX, drawY, drawW, drawH, r, border);
+  tft.drawRoundRect(drawX + 2, drawY + 2, drawW - 4, drawH - 4, r - 2, border);
+  tft.drawFastHLine(drawX + 6, drawY + iconH, drawW - 12, border);
+  tft.drawFastHLine(drawX + 6, drawY + iconH + 1, drawW - 12, 0x2945);
+
+  const int cx = drawX + drawW / 2;
+  const int cy = drawY + iconH / 2 + 1;
+  drawHomeGlyph(b.label, cx, cy, drawW - 16, iconH - 6, border);
+
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(text, TFT_BLACK);
+  int labelSize = UI_BUTTON_TEXT_SIZE;
+  tft.setTextSize(labelSize);
+  while (labelSize > 1 && tft.textWidth(b.label) > (drawW - 10)) {
+    labelSize--;
+    tft.setTextSize(labelSize);
+  }
+  tft.drawString(b.label, cx, drawY + iconH + (labelBandH / 2));
 }
 
 static int ActionDockBoxX = 0;
@@ -3044,7 +3183,7 @@ static Button btnReconBack, btnReconModeDeauth, btnReconModePort;
 static Button btnReconStart, btnReconClear;
 static Button btnReconChMinus, btnReconChPlus, btnReconLock;
 static Button btnReconPortStartStop, btnReconPortExport;
-static Button btnPSBack, btnPSStart, btnPSExport, btnPSClr, btnPSFiles, btnPSDeep;
+static Button btnPSBack, btnPSStart, btnPSMode, btnPSExport, btnPSClr, btnPSFiles, btnPSDeep;
 static Button btnPSScrollUp, btnPSScrollDown;
 static Button btnReconHomeDeauth, btnReconHomeNetScan, btnReconHomeAnalyze, btnReconHomeBack;
 static Button btnReconPortUp, btnReconPortDown;
@@ -3801,32 +3940,35 @@ static void layoutHome() {
   const int gapV = 20;
   const int gridBtnH = 140;
 #else
-  const int pad = 8;
-  const int gapH = compact ? 6 : 8;
-  const int gapV = compact ? 4 : 8;
-  const int gridBtnH = compact ? 30 : 46;
+  const int pad = 10;
+  const int gapH = compact ? 6 : 10;
+  const int gapV = compact ? 6 : 12;
 #endif
+  const int footerTextY = h - 6;
+  const int bottomLimit = footerTextY - 14;
+  const int topBtnY = compact ? (uiHeaderBandH() + 4) : (uiHeaderBandH() + 12);
+  const int totalRowsH = bottomLimit - topBtnY - (gapV * (HOME_BTN_ROWS - 1));
+  const int gridBtnH = compact ? max(30, totalRowsH / HOME_BTN_ROWS) : max(56, totalRowsH / HOME_BTN_ROWS);
+  const int row1Y = topBtnY + gridBtnH + gapV;
+  const int row2Y = row1Y + gridBtnH + gapV;
+
+  // Reserve right-side room on row 0 for the hypercube module frame.
+  layoutActionDockBox();
+  const int topRightLimit = ActionDockBoxX - 14;
+  const int topWidth = max(180, topRightLimit - pad);
+  const int topBtnW = (topWidth - ((HOME_BTN_COLS - 1) * gapH)) / HOME_BTN_COLS;
+
   const int gridBtnW = (w - (pad * 2) - ((HOME_BTN_COLS - 1) * gapH)) / HOME_BTN_COLS;
 
-  // Top row buttons match the same size as all other Home buttons.
-#if defined(NEONDRIVE_TARGET_M5TAB5)
-  const int topBtnY = uiHeaderBandH() + 8;
-#else
-  const int topBtnY = compact ? (uiHeaderBandH() + 2) : 28;
-#endif
-  homeBtns[0] = {pad,                          topBtnY, gridBtnW, gridBtnH, "Just Go"};
-  homeBtns[1] = {pad + gridBtnW + gapH,        topBtnY, gridBtnW, gridBtnH, "WiFi"};
-  homeBtns[8] = {pad + (gridBtnW + gapH) * 2,  topBtnY, gridBtnW, gridBtnH, "Wardrive"};
+  homeBtns[0] = {pad,                        topBtnY, topBtnW, gridBtnH, "Just Go"};
+  homeBtns[1] = {pad + topBtnW + gapH,       topBtnY, topBtnW, gridBtnH, "WiFi"};
+  homeBtns[8] = {pad + (topBtnW + gapH) * 2, topBtnY, topBtnW, gridBtnH, "GPS"};
 
-  // Main grid (2 rows x 3 cols): Logs / Targets / Recon / Config / About / BRUCE.
-  // Anchor the bottom row ~10px above the footer text baseline.
-  const int footerTextY = h - 6;
-  const int bottomRowY = (footerTextY - 10) - gridBtnH;
-  const int gridTop = bottomRowY - (gridBtnH + gapV);
+  // Main grid (2 rows x 3 cols): Logs / Target / Recon / Config / Net Scan / BRUCE.
   const char* gridLabels[6] = {"Logs", "Target", "Recon", "Config", "Net Scan", "BRUCE"};
   int idx = 2;
   for (int r = 0; r < 2; ++r) {
-    const int y = gridTop + r * (gridBtnH + gapV);
+    const int y = (r == 0) ? row1Y : row2Y;
     for (int c = 0; c < HOME_BTN_COLS; ++c) {
       const int x = pad + c * (gridBtnW + gapH);
       homeBtns[idx++] = {x, y, gridBtnW, gridBtnH, gridLabels[(r * HOME_BTN_COLS) + c]};
@@ -3846,6 +3988,20 @@ static void layoutActionDockBox() {
   ActionDockBoxY = HypercubeWidget::REGION_PAD;
   ActionDockBoxX = clampi(ActionDockBoxX, ActionDock_CLEARANCE_PX, max(ActionDock_CLEARANCE_PX, w - ActionDock_CLEARANCE_PX - ActionDockBoxW));
   ActionDockBoxY = clampi(ActionDockBoxY, 0, max(0, h - ActionDockBoxH));
+}
+
+static void drawHomeHypercubeFrame() {
+  layoutActionDockBox();
+  const int x = ActionDockBoxX - 8;
+  const int y = ActionDockBoxY - 8;
+  const int w = ActionDockBoxW + 16;
+  const int h = ActionDockBoxH + 34;
+  tft.drawRoundRect(x, y, w, h, 6, TFT_CYAN);
+  tft.drawRoundRect(x + 2, y + 2, w - 4, h - 4, 5, 0x2104);
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("HYPERCUBE", x + (w / 2), y + h - 14);
 }
 
 static void drawCyberBackdrop() {
@@ -3875,12 +4031,13 @@ static void drawHome() {
   tft.fillScreen(TFT_BLACK);
   drawHeader(ND_HOME_HEADER);
   drawUniversalBackground();
+  drawHomeHypercubeFrame();
 
   layoutHome();
-  // draw the grid with the fixed neon borders; text and fill thanks to drawButton
+  // Draw cyber-styled home buttons with icon lane + label lane.
   for (int i = 0; i < HOME_BTN_COUNT; ++i) {
     if (homeBtns[i].label == nullptr || homeBtns[i].label[0] == '\0') continue;
-    drawButton(homeBtns[i], TFT_BLACK, homeBtnBorderColor(i), TFT_WHITE);
+    drawHomeButton(homeBtns[i], homeBtnBorderColor(i), TFT_WHITE);
   }
 
   tft.setTextDatum(BC_DATUM);
@@ -6896,7 +7053,14 @@ static void startWebServer() {
 
     bool dropboxReady = !cfg.dropbox_token.isEmpty();
     html += "<section class='nd-panel'><h3>Directory Entries</h3>";
-    html += "<table class='nd-table'><tr><th>Name</th><th>Type</th><th>Size</th><th>Actions</th></tr>";
+    html += "<form id='bulkDeleteForm' method='POST' action='/sd/delete-multi' onsubmit='return confirmBulkDelete()'>";
+    html += "<input type='hidden' name='back' value='" + escapeHtml(path) + "'>";
+    html += "<div class='nd-actions'>"
+            "<button class='nd-btn-ghost' type='button' onclick='toggleAllEntries(true)'>Select All</button>"
+            "<button class='nd-btn-ghost' type='button' onclick='toggleAllEntries(false)'>Clear</button>"
+            "<button class='nd-btn-danger' type='submit'>Delete Selected</button>"
+            "</div>";
+    html += "<table class='nd-table'><tr><th>Select</th><th>Name</th><th>Type</th><th>Size</th><th>Actions</th></tr>";
     while (true) {
       File entry = dir.openNextFile();
       if (!entry) break;
@@ -6911,7 +7075,8 @@ static void startWebServer() {
       uint32_t size = (uint32_t)entry.size();
       entry.close();
 
-      html += "<tr><td>" + escapeHtml(baseName) + "</td>";
+      html += "<tr><td><input class='nd-sd-select' type='checkbox' name='path' value='" + escapeHtml(fullPath) + "'></td>";
+      html += "<td>" + escapeHtml(baseName) + "</td>";
       html += isDir ? "<td>dir</td>" : "<td>file</td>";
       html += "<td>" + (isDir ? String("-") : String(size)) + "</td><td class='nd-actions-cell'>";
       if (isDir) {
@@ -6930,8 +7095,19 @@ static void startWebServer() {
       html += "</td></tr>";
     }
     dir.close();
-    html += "</table></section>";
+    html += "</table></form></section>";
     html += R"JS(<script>
+function toggleAllEntries(nextState) {
+  document.querySelectorAll('.nd-sd-select').forEach(cb => cb.checked = !!nextState);
+}
+function confirmBulkDelete() {
+  const selected = Array.from(document.querySelectorAll('.nd-sd-select')).filter(cb => cb.checked).length;
+  if (selected < 1) {
+    alert('Select at least one file or directory to delete.');
+    return false;
+  }
+  return confirm('Delete ' + selected + ' selected item(s)?');
+}
 function dbUpload(btn, path) {
   btn.disabled = true;
   btn.textContent = 'Uploading...';
@@ -7006,6 +7182,41 @@ function dbUpload(btn, path) {
     html += "<div class='nd-actions'><a class='nd-btn-ghost' href='/sd?path=" + urlEncodeSimple(back) + "'>Back to SD File Manager</a></div></section>";
     html += neonPageEnd();
     webServer.send(ok ? 200 : 500, "text/html", html);
+  });
+
+  webServer.on("/sd/delete-multi", HTTP_POST, [](){
+    bool sdOk = sdReady || mountSdCard(false);
+    if (!sdOk) {
+      webServer.send(503, "text/plain", "SD card not available");
+      return;
+    }
+    String back = normalizeSdWebPath(webServer.arg("back"));
+    if (back.isEmpty()) back = "/";
+
+    int selected = 0;
+    int deleted = 0;
+    String failedItems;
+    for (int i = 0; i < webServer.args(); i++) {
+      if (webServer.argName(i) != "path") continue;
+      String path = normalizeSdWebPath(webServer.arg(i));
+      if (path.isEmpty() || path == "/") continue;
+      selected++;
+      if (removeSdPathRecursive(path)) {
+        deleted++;
+      } else {
+        if (!failedItems.isEmpty()) failedItems += ", ";
+        failedItems += path;
+      }
+    }
+
+    String html = neonPageStart("SD Bulk Delete Result", "Bulk delete operation completed.", "/sd");
+    html += "<section class='nd-panel'><h2>Deleted " + String(deleted) + " of " + String(selected) + " item(s)</h2>";
+    if (!failedItems.isEmpty()) {
+      html += "<p>Failed: <code>" + escapeHtml(failedItems) + "</code></p>";
+    }
+    html += "<div class='nd-actions'><a class='nd-btn-ghost' href='/sd?path=" + urlEncodeSimple(back) + "'>Back to SD File Manager</a></div></section>";
+    html += neonPageEnd();
+    webServer.send((selected > 0 && deleted == selected) ? 200 : 500, "text/html", html);
   });
 
   webServer.on("/sd/upload", HTTP_POST, [](){
@@ -9689,17 +9900,99 @@ static void drawRecon() {
 }
 
 // ---------- Port Scanner Screen - Option B Split Panel (320x240) ----------
-static constexpr int PS_SPLIT    = 175;
-static constexpr int PS_COLHDR_Y = 35;
-static constexpr int PS_LIST_Y   = 45;
-static constexpr int PS_ROW_H    = 18;
-static constexpr int PS_STATS_Y  = 189;
-static constexpr int PS_SCROLL_BTN_X = 0;
-static constexpr int PS_SCROLL_BTN_W = 12;
-static constexpr int PS_SCROLL_BTN_H = 12;
-static constexpr int PS_SCROLLBAR_X = 4;
-static constexpr int PS_SCROLLBAR_W = 4;
-static constexpr int PS_HOST_TEXT_X = 14;
+static UiRect psHostsRect{};
+static UiRect psTargetRect{};
+static UiRect psOpenRect{};
+static UiRect psEventsRect{};
+static UiRect psStatusRect{};
+static UiRect psRateRect{};
+static UiRect psTopPortsRect{};
+static constexpr int PS_HOST_ROWS_VISIBLE = 6;
+static int16_t psEventScroll = 0;
+static bool psEventAutoScroll = true;
+
+static void psDrawNeonPanel(int x, int y, int w, int h, uint16_t border, const char* title) {
+  tft.drawRoundRect(x, y, w, h, 6, border);
+  tft.drawRoundRect(x + 2, y + 2, w - 4, h - 4, 5, tft.color565(16, 28, 36));
+  if (title && title[0] != '\0') {
+    tft.fillRect(x + 8, y - 1, min(w - 16, 160), 11, TFT_BLACK);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextSize(1);
+    tft.setTextColor(border, TFT_BLACK);
+    tft.drawString(title, x + 10, y + 1);
+  }
+}
+
+static void psDrawHostStatusDot(const ReconHostRecord& h, int x, int y) {
+  uint16_t col = TFT_GREEN;
+  bool risky = false;
+  for (uint8_t i = 0; i < h.openCount; ++i) {
+    const uint16_t p = h.open[i].port;
+    if (p == 23 || p == 3389 || p == 5900 || p == 445) risky = true;
+  }
+  if (risky) col = TFT_RED;
+  else if (h.openCount == 0) col = TFT_YELLOW;
+  tft.fillCircle(x, y, 3, col);
+}
+
+static void psDrawProgressRing(int cx, int cy, int rOuter, int pct) {
+  const int rInner = rOuter - 5;
+  for (int a = 0; a < 360; a += 12) {
+    const float rad = (float)a * 0.0174532925f;
+    const int x0 = cx + (int)(cosf(rad) * rInner);
+    const int y0 = cy + (int)(sinf(rad) * rInner);
+    const int x1 = cx + (int)(cosf(rad) * rOuter);
+    const int y1 = cy + (int)(sinf(rad) * rOuter);
+    const bool lit = a <= ((pct * 360) / 100);
+    tft.drawLine(x0, y0, x1, y1, lit ? TFT_CYAN : tft.color565(18, 24, 28));
+  }
+}
+
+static void psDrawTinySparkline(const UiRect& r) {
+  const int n = portScanner.rateSampleCount();
+  if (n < 2) return;
+  uint16_t vmax = 1;
+  for (int i = 0; i < n; ++i) vmax = max(vmax, portScanner.rateSampleAt(i));
+  const int plotX = r.x + 4;
+  const int plotY = r.y + 18;
+  const int plotW = r.w - 8;
+  const int plotH = r.h - 24;
+  int px = plotX;
+  int py = plotY + plotH;
+  for (int i = 0; i < n; ++i) {
+    const int x = plotX + (i * plotW) / max(1, n - 1);
+    const int y = plotY + plotH - ((int)portScanner.rateSampleAt(i) * plotH / vmax);
+    if (i > 0) tft.drawLine(px, py, x, y, TFT_CYAN);
+    px = x; py = y;
+  }
+}
+
+static const char* psEventTypeLabel(ReconEventType t) {
+  switch (t) {
+    case ReconEventType::INFO: return "INFO";
+    case ReconEventType::DISCOVERED: return "DISCOVERED";
+    case ReconEventType::PROBE: return "PROBE";
+    case ReconEventType::OPEN: return "OPEN";
+    case ReconEventType::TIMEOUT: return "TIMEOUT";
+    case ReconEventType::RETRY: return "RETRY";
+    case ReconEventType::DONE: return "DONE";
+    case ReconEventType::ERROR: return "ERROR";
+    default: return "EVT";
+  }
+}
+
+static uint16_t psEventTypeColor(ReconEventType t) {
+  switch (t) {
+    case ReconEventType::INFO: return TFT_CYAN;
+    case ReconEventType::DISCOVERED: return TFT_GREEN;
+    case ReconEventType::OPEN: return TFT_GREEN;
+    case ReconEventType::TIMEOUT: return TFT_YELLOW;
+    case ReconEventType::RETRY: return TFT_MAGENTA;
+    case ReconEventType::ERROR: return TFT_RED;
+    case ReconEventType::DONE: return 0x07FF;
+    default: return TFT_WHITE;
+  }
+}
 
 static void psSaveToSD() {
   String ssid  = WiFi.SSID();
@@ -9717,159 +10010,325 @@ static void psSaveToSD() {
   if (!saved) portScanner.exportCsv(LittleFS, "/recon_scan.csv");
 }
 
-static void psDrawDetailPanel(int selIdx) {
-  const int rx = PS_SPLIT + 4;
-  const int rw = tft.width() - PS_SPLIT - 5;
-  tft.fillRect(PS_SPLIT + 1, PS_LIST_Y, rw, PS_STATS_Y - PS_LIST_Y, TFT_BLACK);
-  const ReconHostRecord* hp = (selIdx >= 0) ? portScanner.hostAt((uint8_t)selIdx) : nullptr;
-  if (!hp) {
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    tft.setTextSize(1);
-    tft.drawString("no host", PS_SPLIT + rw/2, PS_LIST_Y + (PS_STATS_Y-PS_LIST_Y)/2);
-    return;
-  }
-  const ReconHostRecord& h = *hp;
-  char mac[18];
-  snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
-    h.mac[0],h.mac[1],h.mac[2],h.mac[3],h.mac[4],h.mac[5]);
-  char rttStr[12]; snprintf(rttStr, sizeof(rttStr), "%dms", (int)h.rttMs);
-  String ipStr = h.ip.toString();
-  const char* rowLabels[] = {"IP","MAC","RTT"};
-  const char* rowVals[]   = {ipStr.c_str(), mac, rttStr};
-  tft.setTextSize(1);
-  int fy = PS_LIST_Y + 2;
-  for (int i = 0; i < 3; i++) {
-    tft.setTextDatum(TL_DATUM);
-    tft.setTextColor(TFT_CYAN, TFT_BLACK);
-    tft.drawString(rowLabels[i], rx, fy);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString(rowVals[i], rx, fy + 10);
-    fy += 22;
-    tft.drawFastHLine(PS_SPLIT + 1, fy + 2, rw, TFT_DARKGREY);
-    fy += 4;
-  }
-  fy += 2;
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString("Ports:", rx, fy);
-  fy += 12;
-  int bxp = rx;
-  for (uint8_t p = 0; p < h.openCount && p < 8; p++) {
-    char ps[8]; snprintf(ps, sizeof(ps), "%u", h.open[p].port);
-    int bw = tft.textWidth(ps) + 6;
-    if (bxp + bw > tft.width() - 2) { bxp = rx; fy += 14; }
-    tft.fillRoundRect(bxp, fy, bw, 12, 2, tft.color565(0,80,0));
-    tft.setTextColor(TFT_GREEN, tft.color565(0,80,0));
-    tft.drawString(ps, bxp + 3, fy + 2);
-    bxp += bw + 3;
-  }
-}
-
 static void drawPortScanner() {
-  ActionDockBoxX = 2; ActionDockBoxY = 2;
-  ActionDockBoxW = 24; ActionDockBoxH = 24;
-  const int safeRight = 31;
   tft.fillScreen(TFT_BLACK);
-  tft.fillRect(safeRight, 0, tft.width()-safeRight, 28, tft.color565(10,10,30));
-  tft.setTextDatum(TL_DATUM); tft.setTextSize(1);
-  tft.setTextColor(TFT_CYAN, tft.color565(10,10,30));
-  tft.drawString("NET SCAN", safeRight+4, 6);
-  btnPSDeep = {safeRight + 76, 4, 82, 18, psDeepScanEnabled ? "[x] DEEP" : "[ ] DEEP"};
-  drawButton(btnPSDeep,
-             psDeepScanEnabled ? tft.color565(0, 60, 0) : TFT_BLACK,
-             TFT_CYAN,
-             TFT_WHITE);
+  drawUniversalBackground();
+  const int w = tft.width();
+  const int h = tft.height();
   const ReconScanState st = portScanner.state();
-  const char* stStr = (st==ReconScanState::IDLE)?"IDLE":(st==ReconScanState::DONE)?"DONE":(st==ReconScanState::ERROR)?"ERR":"SCAN";
-  tft.setTextColor(TFT_YELLOW, tft.color565(10,10,30));
-  tft.setTextDatum(TR_DATUM);
-  tft.drawString(stStr, tft.width()-4, 6);
+  const int hdrH = 52;
+  const int bottomY = 266;
+  const int gap = 6;
+
+  // Header
+  tft.fillRect(0, 0, w, hdrH, TFT_BLACK);
+  tft.drawFastHLine(0, hdrH - 1, w, tft.color565(20, 28, 32));
   tft.setTextDatum(TL_DATUM);
-  const int pct = (int)portScanner.progressPct();
-  tft.fillRect(0, 28, tft.width(), 6, tft.color565(20,20,40));
-  if (pct > 0) tft.fillRect(0, 28, tft.width()*pct/100, 6, TFT_CYAN);
-  tft.fillRect(0, PS_COLHDR_Y, tft.width(), PS_LIST_Y-PS_COLHDR_Y, tft.color565(15,15,35));
-  tft.setTextSize(1); tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_CYAN, tft.color565(15,15,35));
-  tft.drawString("HOST", PS_HOST_TEXT_X, PS_COLHDR_Y+1);
-  tft.drawString("DETAIL", PS_SPLIT+4, PS_COLHDR_Y+1);
-  tft.drawFastVLine(PS_SPLIT, PS_COLHDR_Y, PS_STATS_Y-PS_COLHDR_Y, TFT_CYAN);
-  tft.fillRect(0, PS_LIST_Y, PS_SPLIT, PS_STATS_Y-PS_LIST_Y, TFT_BLACK);
-  btnPSScrollUp = {PS_SCROLL_BTN_X, PS_LIST_Y, PS_SCROLL_BTN_W, PS_SCROLL_BTN_H, "^"};
-  btnPSScrollDown = {PS_SCROLL_BTN_X, PS_STATS_Y - PS_SCROLL_BTN_H, PS_SCROLL_BTN_W, PS_SCROLL_BTN_H, "v"};
-  drawButton(btnPSScrollUp, TFT_BLACK, TFT_CYAN, TFT_WHITE);
-  drawButton(btnPSScrollDown, TFT_BLACK, TFT_CYAN, TFT_WHITE);
-  const int visible = (PS_STATS_Y-PS_LIST_Y)/PS_ROW_H;
+  tft.setTextSize(2);
+  tft.setTextColor(0x87E0, TFT_BLACK);
+  tft.drawString("NET SCAN", 34, 6);
+  tft.drawCircle(16, 16, 8, TFT_GREEN);
+  tft.drawCircle(16, 16, 2, TFT_GREEN);
+  tft.drawFastHLine(8, 16, 16, TFT_GREEN);
+  tft.drawFastVLine(16, 8, 16, TFT_GREEN);
+
+  const char* modeLabel = psDeepScanEnabled ? "DEEP" : "FAST";
+  const int modeX = 216;
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("MODE", modeX, 6);
+  btnPSDeep = {modeX + 38, 4, 72, 18, modeLabel};
+  drawButton(btnPSDeep, tft.color565(0, 30, 0), TFT_GREEN, TFT_WHITE);
+
+  layoutActionDockBox();
+  const int cubeBoxX = w - 58;
+  const int cubeBoxY = 2;
+  tft.drawRoundRect(cubeBoxX, cubeBoxY, 54, 54, 6, TFT_GREEN);
+  tft.drawRoundRect(cubeBoxX + 2, cubeBoxY + 2, 50, 50, 4, tft.color565(20, 40, 20));
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("HYP", cubeBoxX + 4, cubeBoxY + 42);
+
+  char scanMeta[160];
+  snprintf(scanMeta, sizeof(scanMeta), "RANGE:%s  PROFILE:%s  PORTS:SMART-%u  TIMEOUT:%ums  ENGINE:LOCAL",
+           portScanner.subnetLabel()[0] ? portScanner.subnetLabel() : "-",
+           portScanner.profileLabel()[0] ? portScanner.profileLabel() : (psDeepScanEnabled ? "SMART-DEEP" : "SMART-FAST"),
+           (unsigned)portScanner.portCount(),
+           (unsigned)portScanner.timeoutMs());
+  String meta = scanMeta;
+  const int metaMaxW = cubeBoxX - 12;
+  while (meta.length() > 8 && tft.textWidth(meta) > metaMaxW) {
+    meta.remove(meta.length() - 1);
+  }
+  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString(meta, 8, 36);
+
+  // Main layout
+  psHostsRect  = UiRect{6, 58, 116, 202};
+  psStatusRect = UiRect{378, 58, 96, 90};
+  psRateRect   = UiRect{378, 154, 96, 50};
+  psTopPortsRect = UiRect{378, 210, 96, 50};
+  psTargetRect = UiRect{128, 58, 244, 84};
+  psOpenRect   = UiRect{128, 146, 244, 50};
+  psEventsRect = UiRect{128, 200, 244, 60};
+
+  psDrawNeonPanel(psHostsRect.x, psHostsRect.y, psHostsRect.w, psHostsRect.h, TFT_GREEN, "DISCOVERED HOSTS");
+  psDrawNeonPanel(psTargetRect.x, psTargetRect.y, psTargetRect.w, psTargetRect.h, TFT_CYAN, "TARGET DETAILS");
+  psDrawNeonPanel(psOpenRect.x, psOpenRect.y, psOpenRect.w, psOpenRect.h, TFT_CYAN, "OPEN PORTS");
+  psDrawNeonPanel(psEventsRect.x, psEventsRect.y, psEventsRect.w, psEventsRect.h, TFT_GREEN, "LIVE EVENTS");
+  psDrawNeonPanel(psStatusRect.x, psStatusRect.y, psStatusRect.w, psStatusRect.h, TFT_CYAN, "SCAN STATUS");
+  psDrawNeonPanel(psRateRect.x, psRateRect.y, psRateRect.w, psRateRect.h, TFT_CYAN, "RESPONSE RATE");
+  psDrawNeonPanel(psTopPortsRect.x, psTopPortsRect.y, psTopPortsRect.w, psTopPortsRect.h, TFT_CYAN, "TOP PORTS");
+
+  // Hosts list
   const uint8_t total = portScanner.hostCount();
-  const int maxScroll = max(0, (int)total - visible);
+  const int maxScroll = max(0, (int)total - PS_HOST_ROWS_VISIBLE);
   if ((int)psScrollOffset > maxScroll) psScrollOffset = (uint8_t)maxScroll;
-  for (int r = 0; r < visible; r++) {
+  const int hostRowH = (psHostsRect.h - 24) / PS_HOST_ROWS_VISIBLE;
+  for (int r = 0; r < PS_HOST_ROWS_VISIBLE; ++r) {
     const int idx = psScrollOffset + r;
-    if (idx >= (int)total) break;
-    const ReconHostRecord* hp2 = portScanner.hostAt((uint8_t)idx);
-    if (!hp2) break;
-    const ReconHostRecord& h2 = *hp2;
-    const int ry = PS_LIST_Y + r*PS_ROW_H;
-    bool sel = (idx == psSelectedRow);
-    uint16_t rowBg = sel ? tft.color565(0,40,60) : TFT_BLACK;
-    tft.fillRect(PS_HOST_TEXT_X - 2, ry, PS_SPLIT - PS_HOST_TEXT_X - 1, PS_ROW_H-1, rowBg);
-    char ipBuf[16];
-    snprintf(ipBuf, sizeof(ipBuf), "%u.%u.%u.%u",
-             h2.ip[0], h2.ip[1], h2.ip[2], h2.ip[3]);
-    tft.setTextDatum(TL_DATUM); tft.setTextSize(1);
-    tft.setTextColor(sel ? TFT_WHITE : TFT_GREEN, rowBg);
-    tft.drawString(ipBuf, PS_HOST_TEXT_X, ry+4);
-    if (h2.openCount > 0) {
-      char pc[4]; snprintf(pc, sizeof(pc), "%u", h2.openCount);
-      tft.fillRoundRect(PS_SPLIT-22, ry+4, 18, 10, 3, TFT_GREEN);
-      tft.setTextColor(TFT_BLACK, TFT_GREEN);
-      tft.setTextDatum(MC_DATUM);
-      tft.drawString(pc, PS_SPLIT-13, ry+9);
+    if (idx >= total) break;
+    const ReconHostRecord* hrec = portScanner.hostAt((uint8_t)idx);
+    if (!hrec) break;
+    const int ry = psHostsRect.y + 16 + r * hostRowH;
+    const bool sel = (idx == psSelectedRow);
+    const uint16_t rowBg = sel ? tft.color565(28, 44, 10) : TFT_BLACK;
+    tft.fillRect(psHostsRect.x + 4, ry, psHostsRect.w - 12, hostRowH - 2, rowBg);
+    psDrawHostStatusDot(*hrec, psHostsRect.x + 10, ry + 8);
+    tft.setTextColor(sel ? TFT_WHITE : 0x87E0, rowBg);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextSize(1);
+    tft.drawString(hrec->ip.toString(), psHostsRect.x + 18, ry + 2);
+    char macBuf[20];
+    snprintf(macBuf, sizeof(macBuf), "%02X:%02X:%02X:%02X:%02X:%02X",
+             hrec->mac[0], hrec->mac[1], hrec->mac[2], hrec->mac[3], hrec->mac[4], hrec->mac[5]);
+    tft.setTextColor(TFT_DARKGREY, rowBg);
+    tft.drawString(macBuf, psHostsRect.x + 18, ry + 12);
+  }
+  if (total > PS_HOST_ROWS_VISIBLE) {
+    const int trackY = psHostsRect.y + 18;
+    const int trackH = psHostsRect.h - 30;
+    tft.fillRect(psHostsRect.x + psHostsRect.w - 10, trackY, 8, trackH, tft.color565(10, 20, 10));
+    const int knobH = max(12, (trackH * PS_HOST_ROWS_VISIBLE) / total);
+    const int knobY = trackY + ((trackH - knobH) * psScrollOffset) / max(1, (int)total - PS_HOST_ROWS_VISIBLE);
+    tft.fillRect(psHostsRect.x + psHostsRect.w - 10, knobY, 8, knobH, TFT_GREEN);
+  }
+  btnPSScrollUp = {psHostsRect.x + psHostsRect.w - 18, psHostsRect.y + psHostsRect.h - 20, 14, 8, "^"};
+  btnPSScrollDown = {psHostsRect.x + psHostsRect.w - 18, psHostsRect.y + psHostsRect.h - 10, 14, 8, "v"};
+
+  // Target details
+  const ReconHostRecord* selHost = (psSelectedRow >= 0) ? portScanner.hostAt((uint8_t)psSelectedRow) : nullptr;
+  if (selHost) {
+    const int tx = psTargetRect.x + 8;
+    tft.setTextSize(2);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString(selHost->ip.toString(), tx + 26, psTargetRect.y + 14);
+    tft.setTextSize(1);
+    drawButton({psTargetRect.x + psTargetRect.w - 74, psTargetRect.y + 16, 64, 16, "ACTIVE"},
+               tft.color565(10, 36, 10), TFT_GREEN, TFT_WHITE);
+    char macBuf[20];
+    snprintf(macBuf, sizeof(macBuf), "%02X:%02X:%02X:%02X:%02X:%02X",
+             selHost->mac[0], selHost->mac[1], selHost->mac[2], selHost->mac[3], selHost->mac[4], selHost->mac[5]);
+    const char* labels[] = {"HOST", "MAC", "VENDOR", "OS", "RTT"};
+    const char* values[] = {
+      selHost->hostname[0] ? selHost->hostname : "-",
+      macBuf,
+      selHost->vendor[0] ? selHost->vendor : "Unknown",
+      selHost->osGuess[0] ? selHost->osGuess : "Unknown",
+      nullptr
+    };
+    char rttBuf[16];
+    snprintf(rttBuf, sizeof(rttBuf), "%ums", (unsigned)selHost->rttMs);
+    const int rowY0 = psTargetRect.y + 42;
+    for (int i = 0; i < 5; ++i) {
+      tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+      tft.drawString(labels[i], tx, rowY0 + (i * 9));
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.drawString((i == 4) ? rttBuf : values[i], tx + 52, rowY0 + (i * 9));
+    }
+  } else {
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString("NO HOST SELECTED", psTargetRect.x + psTargetRect.w / 2, psTargetRect.y + psTargetRect.h / 2);
+    tft.setTextDatum(TL_DATUM);
+  }
+
+  // Open ports
+  tft.setTextSize(1);
+  int chipX = psOpenRect.x + 8;
+  int chipY = psOpenRect.y + 16;
+  uint8_t openShown = 0;
+  if (selHost && selHost->openCount > 0) {
+    for (uint8_t i = 0; i < selHost->openCount && i < 6; ++i) {
+      const uint16_t p = selHost->open[i].port;
+      const char* svc = selHost->open[i].service ? selHost->open[i].service : "Unknown";
+      uint16_t bcol = TFT_GREEN;
+      if (p == 445 || p == 139 || p == 3389 || p == 23 || p == 5900) bcol = TFT_RED;
+      else if (p == 135 || p == 21) bcol = TFT_YELLOW;
+      char buf[24];
+      snprintf(buf, sizeof(buf), "%u %s", (unsigned)p, svc);
+      const int bw = tft.textWidth(buf) + 8;
+      if (chipX + bw > psOpenRect.x + psOpenRect.w - 8) {
+        chipX = psOpenRect.x + 8;
+        chipY += 14;
+      }
+      tft.drawRoundRect(chipX, chipY, bw, 12, 3, bcol);
+      tft.setTextColor(bcol, TFT_BLACK);
+      tft.drawString(buf, chipX + 4, chipY + 2);
+      chipX += bw + 6;
+      openShown++;
     }
   }
-  const int listH = PS_STATS_Y-PS_LIST_Y;
-  const int scrollTrackY = PS_LIST_Y + PS_SCROLL_BTN_H + 1;
-  const int scrollTrackH = max(8, listH - ((PS_SCROLL_BTN_H * 2) + 2));
-  tft.fillRect(PS_SCROLLBAR_X, scrollTrackY, PS_SCROLLBAR_W, scrollTrackH, tft.color565(20,20,30));
-  if ((int)total > visible) {
-    const int sH = max(6, scrollTrackH*visible/(int)total);
-    const int sY = scrollTrackY + (scrollTrackH-sH)*psScrollOffset/max(1,(int)total-visible);
-    tft.fillRect(PS_SCROLLBAR_X, sY, PS_SCROLLBAR_W, sH, TFT_CYAN);
+  if (openShown == 0) {
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.drawString("NO OPEN PORTS", psOpenRect.x + 10, psOpenRect.y + 20);
   }
-  psDrawDetailPanel(psSelectedRow);
-  tft.fillRect(0, PS_STATS_Y, tft.width(), 13, tft.color565(10,10,25));
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_CYAN, tft.color565(10,10,25));
+
+  // Live events
+  const uint8_t evCount = portScanner.eventCount();
+  const uint8_t evShown = 6;
+  const int maxEvScroll = max(0, (int)evCount - (int)evShown);
+  if (psEventAutoScroll) psEventScroll = maxEvScroll;
+  if (psEventScroll > maxEvScroll) psEventScroll = maxEvScroll;
+  if (psEventScroll < 0) psEventScroll = 0;
+  for (uint8_t i = 0; i < evShown; ++i) {
+    const int evIdx = psEventScroll + i;
+    if (evIdx >= evCount) break;
+    const ReconEventRecord* ev = portScanner.eventAt((uint8_t)evIdx);
+    if (!ev) continue;
+    IPAddress ip((uint8_t)((ev->ipU32 >> 24) & 0xFF),
+                 (uint8_t)((ev->ipU32 >> 16) & 0xFF),
+                 (uint8_t)((ev->ipU32 >> 8) & 0xFF),
+                 (uint8_t)(ev->ipU32 & 0xFF));
+    char line[84];
+    if (ev->port > 0) {
+      snprintf(line, sizeof(line), "[%lus] [%s] %s:%u %s",
+               (unsigned long)((ev->ms) / 1000UL),
+               psEventTypeLabel(ev->type),
+               ip.toString().c_str(),
+               (unsigned)ev->port,
+               ev->service ? ev->service : ev->message);
+    } else {
+      snprintf(line, sizeof(line), "[%lus] [%s] %s",
+               (unsigned long)((ev->ms) / 1000UL),
+               psEventTypeLabel(ev->type),
+               ev->message);
+    }
+    tft.setTextColor(psEventTypeColor(ev->type), TFT_BLACK);
+    String clipped = line;
+    const int maxLineW = psEventsRect.w - 18;
+    while (clipped.length() > 8 && tft.textWidth(clipped) > maxLineW) clipped.remove(clipped.length() - 1);
+    tft.drawString(clipped, psEventsRect.x + 6, psEventsRect.y + 14 + i * 8);
+  }
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.drawString(psEventAutoScroll ? "AUTO SCROLL" : "MANUAL", psEventsRect.x + psEventsRect.w - 78, psEventsRect.y + 2);
+  if (maxEvScroll > 0) {
+    const int eTrackY = psEventsRect.y + 14;
+    const int eTrackH = psEventsRect.h - 18;
+    const int eKnobH = max(10, (eTrackH * evShown) / max(1, (int)evCount));
+    const int eKnobY = eTrackY + ((eTrackH - eKnobH) * psEventScroll) / max(1, maxEvScroll);
+    tft.fillRect(psEventsRect.x + psEventsRect.w - 6, eTrackY, 4, eTrackH, tft.color565(10, 20, 10));
+    tft.fillRect(psEventsRect.x + psEventsRect.w - 6, eKnobY, 4, eKnobH, TFT_GREEN);
+  }
+
+  // Right column panels
+  const int pct = (int)portScanner.progressPct();
+  psDrawProgressRing(psStatusRect.x + psStatusRect.w / 2, psStatusRect.y + 34, 24, pct);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.setTextSize(2);
+  char pctBuf[8]; snprintf(pctBuf, sizeof(pctBuf), "%d%%", pct);
+  tft.drawString(pctBuf, psStatusRect.x + psStatusRect.w / 2, psStatusRect.y + 36);
   tft.setTextSize(1);
-  char statStr[48]; snprintf(statStr, sizeof(statStr), "Hosts:%u  %u%%  %s",
-                             total, pct, psDeepScanEnabled ? "Deep" : "Fast");
-  tft.drawString(statStr, 4, PS_STATS_Y+2);
-  const int bw  = (tft.width()-10)/5;
+  tft.setTextDatum(TL_DATUM);
+  char hostsBuf[32];
+  snprintf(hostsBuf, sizeof(hostsBuf), "HOSTS %u/%lu", (unsigned)total, (unsigned long)portScanner.totalHostCandidates());
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.drawString(hostsBuf, psStatusRect.x + 6, psStatusRect.y + 70);
+  char portsBuf[32];
+  snprintf(portsBuf, sizeof(portsBuf), "PORTS %lu/%lu", (unsigned long)portScanner.portsAttempted(), (unsigned long)portScanner.portsTotal());
+  tft.drawString(portsBuf, psStatusRect.x + 6, psStatusRect.y + 82);
+
+  char rateBuf[20];
+  snprintf(rateBuf, sizeof(rateBuf), "%u /s", (unsigned)portScanner.latestRatePerSec());
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString(rateBuf, psRateRect.x + psRateRect.w - 42, psRateRect.y + 8);
+  psDrawTinySparkline(psRateRect);
+
+  uint16_t topPort[5] = {0};
+  uint8_t topCount[5] = {0};
+  for (uint8_t i = 0; i < total; ++i) {
+    const ReconHostRecord* hrec = portScanner.hostAt(i);
+    if (!hrec) continue;
+    for (uint8_t p = 0; p < hrec->openCount; ++p) {
+      const uint16_t port = hrec->open[p].port;
+      int pos = -1;
+      for (int j = 0; j < 5; ++j) if (topPort[j] == port) { pos = j; break; }
+      if (pos >= 0) topCount[pos]++;
+      else {
+        for (int j = 0; j < 5; ++j) {
+          if (topPort[j] == 0) { topPort[j] = port; topCount[j] = 1; pos = j; break; }
+        }
+      }
+      for (int j = 4; j > 0; --j) {
+        if (topCount[j] > topCount[j - 1]) {
+          const uint8_t tmpCount = topCount[j];
+          topCount[j] = topCount[j - 1];
+          topCount[j - 1] = tmpCount;
+          const uint16_t tmpPort = topPort[j];
+          topPort[j] = topPort[j - 1];
+          topPort[j - 1] = tmpPort;
+        }
+      }
+    }
+  }
+  for (int i = 0; i < 5; ++i) {
+    const int ry = psTopPortsRect.y + 12 + i * 8;
+    if (topPort[i] == 0) break;
+    char pbuf[12];
+    snprintf(pbuf, sizeof(pbuf), "%u", (unsigned)topPort[i]);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString(pbuf, psTopPortsRect.x + 6, ry);
+    const int barW = min(36, topCount[i] * 6);
+    tft.fillRect(psTopPortsRect.x + 30, ry + 2, barW, 4, tft.color565(30, 90, 10));
+    char cbuf[6];
+    snprintf(cbuf, sizeof(cbuf), "%u", (unsigned)topCount[i]);
+    tft.drawString(cbuf, psTopPortsRect.x + 72, ry);
+  }
+
+  // Bottom controls
+  const int bw  = (w - 10 - (gap * 4)) / 5;
   const int bx0 = 5;
-  const int by  = PS_STATS_Y+14;
-  const int bh  = tft.height()-by-3;
-  btnPSBack   = {bx0+0*(bw+2), by, bw, bh, "Back"};
-  btnPSStart  = {bx0+1*(bw+2), by, bw, bh, psActive?"Stop":"Scan"};
-  btnPSExport = {bx0+2*(bw+2), by, bw, bh, "Save"};
-  btnPSClr    = {bx0+3*(bw+2), by, bw, bh, "Clr"};
-  btnPSFiles  = {bx0+4*(bw+2), by, bw, bh, "Files"};
-  const uint16_t bcs[5] = {TFT_RED,TFT_GREEN,TFT_YELLOW,TFT_CYAN,TFT_MAGENTA};
-  Button* allBtns[5] = {&btnPSBack,&btnPSStart,&btnPSExport,&btnPSClr,&btnPSFiles};
+  const int by  = bottomY + 2;
+  const int bh  = h - by - 3;
+  btnPSBack   = {bx0 + 0 * (bw + 2), by, bw, bh, "Back"};
+  btnPSStart  = {bx0 + 1 * (bw + 2), by, bw, bh, psActive ? "Stop" : "Scan"};
+  btnPSMode   = {bx0 + 2 * (bw + 2), by, bw, bh, psDeepScanEnabled ? "Mode:Deep" : "Mode:Fast"};
+  btnPSExport = {bx0 + 3 * (bw + 2), by, bw, bh, "Save"};
+  btnPSClr    = {bx0 + 4 * (bw + 2), by, bw, bh, "Clear"};
+  const uint16_t bcs[5] = {TFT_CYAN,TFT_GREEN,TFT_MAGENTA,TFT_YELLOW,TFT_RED};
+  Button* allBtns[5] = {&btnPSBack,&btnPSStart,&btnPSMode,&btnPSExport,&btnPSClr};
   for (int i = 0; i < 5; i++) drawButton(*allBtns[i], TFT_BLACK, bcs[i], TFT_WHITE);
-  psLayoutDrawn=true; psLastHostCount=total; psLastPct=(uint8_t)pct; psLastState=(uint8_t)st;
+  const uint8_t phaseU8 =
+      (st == ReconScanState::ERROR) ? 3 :
+      (st == ReconScanState::DONE)  ? 2 :
+      (portScanner.isRunning() ? 1 : 0);
+  psLayoutDrawn=true; psLastHostCount=total; psLastPct=(uint8_t)pct; psLastState=phaseU8;
 }
 
 static void portScannerTick() {
   if (screen != ScreenId::PORT_SCANNER) return;
   portScanner.tick();
   const uint8_t total   = portScanner.hostCount();
-  const uint8_t pct     = portScanner.progressPct();
-  const uint8_t stateU8 = (uint8_t)portScanner.state();
+  const ReconScanState st = portScanner.state();
+  const uint8_t phaseU8 =
+      (st == ReconScanState::ERROR) ? 3 :
+      (st == ReconScanState::DONE)  ? 2 :
+      (portScanner.isRunning() ? 1 : 0);
   if (!portScanner.isRunning() && psActive) psActive = false;
-  const int visible = max(1, (PS_STATS_Y - PS_LIST_Y) / PS_ROW_H);
-  const int maxScroll = max(0, (int)total - visible);
-  bool needRedraw = !psLayoutDrawn || total!=psLastHostCount || pct!=psLastPct || stateU8!=psLastState;
+  const int maxScroll = max(0, (int)total - PS_HOST_ROWS_VISIBLE);
+  // Avoid full-screen repaint on every progress tick; only redraw on structural changes.
+  bool needRedraw = !psLayoutDrawn || total!=psLastHostCount || phaseU8!=psLastState;
   if ((int)psScrollOffset > maxScroll) {
     psScrollOffset = (uint8_t)maxScroll;
     needRedraw = true;
@@ -9880,6 +10339,7 @@ static void portScannerTick() {
   if (needRedraw) {
     drawPortScanner();
     psLastDrawMs=millis();
+    psLastState = phaseU8;
   }
 }
 
@@ -11692,9 +12152,10 @@ static void tdisplayRedrawCurrentScreen() {
 }
 #endif
 
-static void saveScreenshotToSd() {
+static bool saveScreenshotToSd(char* outPath, size_t outPathLen) {
+  if (outPath && outPathLen > 0) outPath[0] = '\0';
   bool sdOk = sdReady || mountSdCard(false);
-  if (!sdOk) { Serial.println("[screenshot] SD not available"); return; }
+  if (!sdOk) { Serial.println("[screenshot] SD not available"); return false; }
 
   SD.mkdir("/screenshots");
 
@@ -11735,14 +12196,14 @@ static void saveScreenshotToSd() {
   if (!row565 || !rowBuf) {
     free(row565); free(rowBuf);
     Serial.println("[screenshot] malloc failed");
-    return;
+    return false;
   }
 
   File f = SD.open(path, FILE_WRITE);
   if (!f) {
     free(row565); free(rowBuf);
     Serial.printf("[screenshot] open failed: %s\n", path);
-    return;
+    return false;
   }
   f.write(header, 54);
 
@@ -11771,6 +12232,10 @@ static void saveScreenshotToSd() {
   f.close();
 
   if (readOk) {
+    if (outPath && outPathLen > 0) {
+      strncpy(outPath, path, outPathLen - 1);
+      outPath[outPathLen - 1] = '\0';
+    }
     Serial.printf("[screenshot] saved %s (%lu bytes)\n", path, (unsigned long)fileSize);
   } else {
     Serial.printf("[screenshot] write error on %s\n", path);
@@ -11780,6 +12245,7 @@ static void saveScreenshotToSd() {
   tft.drawRect(0, 0, W, H, TFT_WHITE);
   delay(120);
   HypercubeWidget::notifyScreenDrawn();
+  return readOk;
 }
 
 static void sw1Tick() {
@@ -11792,7 +12258,7 @@ static void sw1Tick() {
   }
   if (down && !sw1WasDown) {
     sw1DebounceUntilMs = now + 400;
-    saveScreenshotToSd();
+    saveScreenshotToSd(nullptr, 0);
     pushConsoleEvent("INFO", "BOOT", "Screenshot saved");
   }
   sw1WasDown = down;
@@ -11820,6 +12286,21 @@ static void printDeviceProfileBanner() {
 #if defined(NEONDRIVE_TARGET_CYD)
   Serial.printf("[variant] active=%s\n", CYD_VARIANT_NAME);
 #endif
+}
+
+static void updateHypercubeActivity() {
+  const bool busyWork =
+      sniffActive ||
+      wifiIsScanning ||
+      wifiConnectInProgress ||
+      justGoActive ||
+      wardriveActive ||
+      (autoMode != AutoMode::NONE) ||
+      reconScanner.isRunning() ||
+      portScanner.isRunning();
+  HypercubeWidget::setActivity(
+      busyWork ? HypercubeWidget::Activity::ATTACKING
+               : HypercubeWidget::Activity::IDLE);
 }
 
 static void display_init() {
@@ -12272,7 +12753,6 @@ void loop() {
   bruceMenuTick();
   timeServiceTick();
   GpsService::tick();
-  HypercubeWidget::tick();
   sw1Tick();
   neonPanicTick();
   touchDebugTick();
@@ -12303,6 +12783,8 @@ void loop() {
   reconTick();
   portScannerTick();
   bruceMonitorTick();
+  updateHypercubeActivity();
+  HypercubeWidget::tick();
   verboseHeartbeatTick();
 
   // WiFi connection status updates
@@ -12945,6 +13427,12 @@ void loop() {
       waitTouchRelease();
       return;
     }
+    if (hit(btnPSMode, tx, ty)) {
+      if (!portScanner.isRunning()) psDeepScanEnabled = !psDeepScanEnabled;
+      drawPortScanner();
+      waitTouchRelease();
+      return;
+    }
     if (hit(btnPSStart, tx, ty)) {
       if (psActive) { portScanner.stop(); psActive = false; }
       else { if (portScanner.start(psDeepScanEnabled)) psActive = true; }
@@ -12952,16 +13440,11 @@ void loop() {
     }
     if (hit(btnPSExport, tx, ty)) { psSaveToSD(); waitTouchRelease(); return; }
     if (hit(btnPSClr, tx, ty)) {
-      if (psActive) { portScanner.stop(); psActive = false; }
+      portScanner.clearResults();
+      psActive = false;
       psScrollOffset=0; psSelectedRow=-1; psLastSelectedRow=-1;
       psLastHostCount=0; psLastPct=0; psLastState=0; psLayoutDrawn=false;
       drawPortScanner(); waitTouchRelease(); return;
-    }
-    if (hit(btnPSFiles, tx, ty)) {
-      monitorMode = MonitorMode::FILES;
-      monitorReturnScreen = ScreenId::PORT_SCANNER;
-      monitorLoadFileDir("/captures");
-      setScreen(ScreenId::MONITOR); waitTouchRelease(); return;
     }
     if (hit(btnPSScrollUp, tx, ty)) {
       if (psScrollOffset > 0) {
@@ -12973,8 +13456,7 @@ void loop() {
     }
     if (hit(btnPSScrollDown, tx, ty)) {
       const int total = (int)portScanner.hostCount();
-      const int visible = max(1, (PS_STATS_Y - PS_LIST_Y) / PS_ROW_H);
-      const int maxScroll = max(0, total - visible);
+      const int maxScroll = max(0, total - PS_HOST_ROWS_VISIBLE);
       if ((int)psScrollOffset < maxScroll) {
         psScrollOffset++;
         drawPortScanner();
@@ -12982,15 +13464,15 @@ void loop() {
       waitTouchRelease();
       return;
     }
-    const int scrollTrackY = PS_LIST_Y + PS_SCROLL_BTN_H + 1;
-    const int scrollTrackH = max(8, (PS_STATS_Y - PS_LIST_Y) - ((PS_SCROLL_BTN_H * 2) + 2));
-    if (tx >= PS_SCROLLBAR_X && tx < (PS_SCROLLBAR_X + PS_SCROLLBAR_W) &&
+    const int scrollTrackY = psHostsRect.y + 18;
+    const int scrollTrackH = psHostsRect.h - 30;
+    const int scrollBarX = psHostsRect.x + psHostsRect.w - 10;
+    if (tx >= scrollBarX && tx < (scrollBarX + 10) &&
         ty >= scrollTrackY && ty < (scrollTrackY + scrollTrackH)) {
       const int total = (int)portScanner.hostCount();
-      const int visible = max(1, (PS_STATS_Y - PS_LIST_Y) / PS_ROW_H);
-      const int maxScroll = max(0, total - visible);
+      const int maxScroll = max(0, total - PS_HOST_ROWS_VISIBLE);
       if (maxScroll > 0) {
-        const int handleH = max(6, scrollTrackH * visible / total);
+        const int handleH = max(12, (scrollTrackH * PS_HOST_ROWS_VISIBLE) / total);
         int relY = ty - scrollTrackY - (handleH / 2);
         relY = constrain(relY, 0, max(0, scrollTrackH - handleH));
         const int nextScroll = (relY * maxScroll) / max(1, scrollTrackH - handleH);
@@ -13002,8 +13484,42 @@ void loop() {
       waitTouchRelease();
       return;
     }
-    if (tx < PS_SPLIT && ty >= PS_LIST_Y && ty < PS_STATS_Y) {
-      const int r = (ty-PS_LIST_Y)/PS_ROW_H;
+    // Event log scrollbar / auto-scroll toggle
+    const int evCount = (int)portScanner.eventCount();
+    const int evShown = 6;
+    const int maxEvScroll = max(0, evCount - evShown);
+    if (pointInRect(tx, ty, psEventsRect)) {
+      if (tx >= psEventsRect.x + psEventsRect.w - 10 && maxEvScroll > 0) {
+        const int eTrackY = psEventsRect.y + 14;
+        const int eTrackH = psEventsRect.h - 18;
+        const int eKnobH = max(10, (eTrackH * evShown) / max(1, evCount));
+        int relY = ty - eTrackY - (eKnobH / 2);
+        relY = constrain(relY, 0, max(0, eTrackH - eKnobH));
+        psEventScroll = (relY * maxEvScroll) / max(1, eTrackH - eKnobH);
+        psEventAutoScroll = false;
+        drawPortScanner();
+        waitTouchRelease();
+        return;
+      }
+      if (ty <= psEventsRect.y + 12) {
+        psEventAutoScroll = !psEventAutoScroll;
+        drawPortScanner();
+        waitTouchRelease();
+        return;
+      }
+      // quick tap top/bottom half for manual scroll step
+      if (maxEvScroll > 0 && !psEventAutoScroll) {
+        const int midY = psEventsRect.y + psEventsRect.h / 2;
+        if (ty < midY && psEventScroll > 0) psEventScroll--;
+        if (ty >= midY && psEventScroll < maxEvScroll) psEventScroll++;
+        drawPortScanner();
+        waitTouchRelease();
+        return;
+      }
+    }
+    if (pointInRect(tx, ty, psHostsRect)) {
+      const int hostRowH = (psHostsRect.h - 24) / PS_HOST_ROWS_VISIBLE;
+      const int r = (ty - (psHostsRect.y + 16)) / max(1, hostRowH);
       const uint8_t idx = psScrollOffset+(uint8_t)r;
       if (idx < portScanner.hostCount()) { psSelectedRow=(int16_t)idx; drawPortScanner(); }
     }
@@ -13571,4 +14087,3 @@ void loop() {
 
 
 }
-

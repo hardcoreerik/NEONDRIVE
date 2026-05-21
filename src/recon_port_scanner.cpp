@@ -94,6 +94,9 @@ static void reconFormatMac(const uint8_t mac[6], char* out, size_t outLen) {
 ReconPortScanner::ReconPortScanner() {
   memset(subnetLabel_, 0, sizeof(subnetLabel_));
   memset(errorMessage_, 0, sizeof(errorMessage_));
+  memset(profileLabel_, 0, sizeof(profileLabel_));
+  rateSamples_ = (uint16_t*)calloc(RECON_RATE_SAMPLES, sizeof(uint16_t));
+  events_ = (ReconEventRecord*)calloc(RECON_MAX_EVENTS, sizeof(ReconEventRecord));
   clearHosts();
 }
 
@@ -132,6 +135,8 @@ bool ReconPortScanner::startInternal(const IPAddress& ip, const IPAddress& mask,
       portList_[portCount_++] = kDeepExtra[i];
     }
   }
+  timeoutMs_ = deep ? 220 : 120;
+  snprintf(profileLabel_, sizeof(profileLabel_), "%s", deep ? "SMART-DEEP" : "SMART-FAST");
 
   subnetBaseU32_ = reconSubnetBaseFromU32(reconIpToU32(localIp_), reconIpToU32(subnetMask_));
   broadcastU32_ = reconBroadcastFromU32(subnetBaseU32_, reconIpToU32(subnetMask_));
@@ -141,6 +146,7 @@ bool ReconPortScanner::startInternal(const IPAddress& ip, const IPAddress& mask,
 
   uint32_t hostBits = ~reconIpToU32(subnetMask_);
   uint32_t hostCount = (hostBits > 1U) ? (hostBits - 1U) : 0U;
+  totalHostCandidates_ = hostCount;
   if (hostCount > 1024U) {
     setError("Subnet too large (max /22)");
     state_ = ReconScanState::ERROR;
@@ -163,18 +169,31 @@ bool ReconPortScanner::startInternal(const IPAddress& ip, const IPAddress& mask,
   probeSentAtMs_ = 0;
   scanHostIndex_ = 0;
   scanPortIndex_ = 0;
+  hostsProbed_ = 0;
+  portsAttempted_ = 0;
+  portsTotal_ = 0;
+  scanStartMs_ = millis();
+  rateWindowStartMs_ = scanStartMs_;
+  rateWindowAttempts_ = 0;
+  rateSampleHead_ = 0;
+  rateSampleCount_ = 0;
+  eventHead_ = 0;
+  eventCount_ = 0;
   state_ = ReconScanState::DISCOVER_SEND;
   running_ = true;
+  pushEvent(ReconEventType::INFO, nullptr, 0, 0, nullptr, "Scan started");
   return true;
 }
 
 void ReconPortScanner::stop() {
   running_ = false;
   if (state_ != ReconScanState::ERROR) state_ = ReconScanState::IDLE;
+  pushEvent(ReconEventType::INFO, nullptr, 0, 0, nullptr, "Scan stopped");
 }
 
 void ReconPortScanner::setError(const char* msg) {
   snprintf(errorMessage_, sizeof(errorMessage_), "%s", msg ? msg : "Unknown scanner error");
+  pushEvent(ReconEventType::ERROR, nullptr, 0, 0, nullptr, errorMessage_);
 }
 
 void ReconPortScanner::clearHosts() {
@@ -185,6 +204,77 @@ void ReconPortScanner::clearHosts() {
 const ReconHostRecord* ReconPortScanner::hostAt(uint8_t idx) const {
   if (idx >= hostCount_) return nullptr;
   return &hosts_[idx];
+}
+
+const ReconEventRecord* ReconPortScanner::eventAt(uint8_t idx) const {
+  if (!events_) return nullptr;
+  if (idx >= eventCount_) return nullptr;
+  const uint8_t start = (uint8_t)((eventHead_ + RECON_MAX_EVENTS - eventCount_) % RECON_MAX_EVENTS);
+  const uint8_t pos = (uint8_t)((start + idx) % RECON_MAX_EVENTS);
+  return &events_[pos];
+}
+
+uint16_t ReconPortScanner::rateSampleAt(uint8_t idx) const {
+  if (!rateSamples_) return 0;
+  if (idx >= rateSampleCount_) return 0;
+  const uint8_t start = (uint8_t)((rateSampleHead_ + RECON_RATE_SAMPLES - rateSampleCount_) % RECON_RATE_SAMPLES);
+  const uint8_t pos = (uint8_t)((start + idx) % RECON_RATE_SAMPLES);
+  return rateSamples_[pos];
+}
+
+uint16_t ReconPortScanner::latestRatePerSec() const {
+  if (rateSampleCount_ == 0) return 0;
+  const uint8_t last = (uint8_t)((rateSampleHead_ + RECON_RATE_SAMPLES - 1) % RECON_RATE_SAMPLES);
+  return rateSamples_[last];
+}
+
+void ReconPortScanner::clearResults() {
+  if (running_) stop();
+  clearHosts();
+  hostsProbed_ = 0;
+  portsAttempted_ = 0;
+  portsTotal_ = 0;
+  eventHead_ = 0;
+  eventCount_ = 0;
+  rateSampleHead_ = 0;
+  rateSampleCount_ = 0;
+  if (rateSamples_) memset(rateSamples_, 0, RECON_RATE_SAMPLES * sizeof(uint16_t));
+  state_ = ReconScanState::IDLE;
+  pushEvent(ReconEventType::INFO, nullptr, 0, 0, nullptr, "Results cleared");
+}
+
+void ReconPortScanner::pushEvent(ReconEventType type,
+                                 const IPAddress* ip,
+                                 uint16_t port,
+                                 uint16_t elapsedMs,
+                                 const char* service,
+                                 const char* msg) {
+  if (!events_) return;
+  ReconEventRecord& e = events_[eventHead_];
+  memset(&e, 0, sizeof(e));
+  e.ms = millis();
+  e.type = type;
+  e.port = port;
+  e.elapsedMs = elapsedMs;
+  e.service = service;
+  e.ipU32 = ip ? reconIpToU32(*ip) : 0;
+  snprintf(e.message, sizeof(e.message), "%s", msg ? msg : "");
+  eventHead_ = (uint8_t)((eventHead_ + 1) % RECON_MAX_EVENTS);
+  if (eventCount_ < RECON_MAX_EVENTS) eventCount_++;
+}
+
+void ReconPortScanner::noteRateSampleTick(uint32_t now) {
+  if (rateWindowStartMs_ == 0) rateWindowStartMs_ = now;
+  const uint32_t dt = now - rateWindowStartMs_;
+  if (dt < 1000U) return;
+  const uint32_t denom = (dt == 0U) ? 1U : dt;
+  const uint32_t rate = ((uint32_t)rateWindowAttempts_ * 1000U) / denom;
+  if (!rateSamples_) return;
+  rateSamples_[rateSampleHead_] = (uint16_t)min<uint32_t>(65535U, rate);
+  rateSampleHead_ = (uint8_t)((rateSampleHead_ + 1) % RECON_RATE_SAMPLES);
+  if (rateSampleCount_ < RECON_RATE_SAMPLES) rateSampleCount_++;
+  rateWindowStartMs_ = now;
+  rateWindowAttempts_ = 0;
 }
 
 bool ReconPortScanner::sendArpProbe(const IPAddress& ip) {
@@ -277,6 +367,7 @@ void ReconPortScanner::tick() {
   if (!running_) return;
 
   const uint32_t now = millis();
+  noteRateSampleTick(now);
   switch (state_) {
     case ReconScanState::DISCOVER_SEND: {
       if (currentHostU32_ > lastHostU32_) {
@@ -316,7 +407,9 @@ void ReconPortScanner::tick() {
       if (readArpEntry(probeIp, mac)) {
         const uint32_t took = now - probeSentAtMs_;
         const uint16_t rtt = (took > 65535U) ? 65535U : (uint16_t)took;
-        addHost(probeIp, mac, rtt);
+        if (addHost(probeIp, mac, rtt)) {
+          pushEvent(ReconEventType::DISCOVERED, &probeIp, 0, rtt, nullptr, "Host discovered");
+        }
       }
       currentHostU32_++;
       if (hostCount_ >= RECON_MAX_HOSTS) {
@@ -329,12 +422,15 @@ void ReconPortScanner::tick() {
       if (scanHostIndex_ >= hostCount_) {
         running_ = false;
         state_ = ReconScanState::DONE;
+        pushEvent(ReconEventType::DONE, nullptr, 0, 0, nullptr, "Scan complete");
         return;
       }
 
       ReconHostRecord& host = hosts_[scanHostIndex_];
+      portsTotal_ = (uint32_t)hostCount_ * (uint32_t)portCount_;
       if (scanPortIndex_ >= portCount_) {
         fingerprintHost(host);
+        hostsProbed_++;
         scanHostIndex_++;
         scanPortIndex_ = 0;
         return;
@@ -342,9 +438,14 @@ void ReconPortScanner::tick() {
 
       const uint16_t port = portList_[scanPortIndex_];
       uint16_t elapsedMs = 0;
-      const bool open = checkTcpPort(host.ip, port, 120, elapsedMs);
+      const bool open = checkTcpPort(host.ip, port, timeoutMs_, elapsedMs);
+      portsAttempted_++;
+      rateWindowAttempts_++;
       if (open && host.openCount < RECON_MAX_OPEN_PORTS) {
         host.open[host.openCount++] = ReconOpenPort{port, reconServiceName(port)};
+        pushEvent(ReconEventType::OPEN, &host.ip, port, elapsedMs, reconServiceName(port), "Port open");
+      } else if (!open) {
+        pushEvent(ReconEventType::TIMEOUT, &host.ip, port, elapsedMs, nullptr, "No response");
       }
       if (elapsedMs > host.rttMs) host.rttMs = elapsedMs;
       yield();

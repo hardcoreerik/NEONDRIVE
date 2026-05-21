@@ -14,9 +14,11 @@ const char* reconServiceName(uint16_t port);
 #include <IPAddress.h>
 #include <WiFi.h>
 
-static constexpr uint8_t RECON_MAX_HOSTS = 50;
+static constexpr uint8_t RECON_MAX_HOSTS = 40;
 static constexpr uint8_t RECON_MAX_OPEN_PORTS = 16;
 static constexpr uint8_t RECON_MAX_SCAN_PORTS = 24;
+static constexpr uint8_t RECON_MAX_EVENTS = 12;
+static constexpr uint8_t RECON_RATE_SAMPLES = 32;
 
 enum class ReconScanState : uint8_t {
   IDLE = 0,
@@ -31,6 +33,27 @@ enum class ReconScanState : uint8_t {
 struct ReconOpenPort {
   uint16_t port;
   const char* service;
+};
+
+enum class ReconEventType : uint8_t {
+  INFO = 0,
+  DISCOVERED,
+  PROBE,
+  OPEN,
+  TIMEOUT,
+  RETRY,
+  DONE,
+  ERROR
+};
+
+struct ReconEventRecord {
+  uint32_t ms;
+  ReconEventType type;
+  uint32_t ipU32;
+  uint16_t port;
+  uint16_t elapsedMs;
+  const char* service;
+  char message[28];
 };
 
 struct ReconHostRecord {
@@ -59,6 +82,22 @@ public:
   const ReconHostRecord* hostAt(uint8_t idx) const;
   const char* subnetLabel() const { return subnetLabel_; }
   const char* errorMessage() const { return errorMessage_; }
+  uint8_t portCount() const { return portCount_; }
+  uint16_t portAt(uint8_t idx) const { return (idx < portCount_) ? portList_[idx] : 0; }
+  uint8_t scanHostIndex() const { return scanHostIndex_; }
+  uint8_t scanPortIndex() const { return scanPortIndex_; }
+  uint32_t totalHostCandidates() const { return totalHostCandidates_; }
+  uint32_t hostsProbed() const { return hostsProbed_; }
+  uint32_t portsAttempted() const { return portsAttempted_; }
+  uint32_t portsTotal() const { return portsTotal_; }
+  uint16_t timeoutMs() const { return timeoutMs_; }
+  const char* profileLabel() const { return profileLabel_; }
+  uint8_t eventCount() const { return eventCount_; }
+  const ReconEventRecord* eventAt(uint8_t idx) const;
+  uint8_t rateSampleCount() const { return rateSampleCount_; }
+  uint16_t rateSampleAt(uint8_t idx) const;
+  uint16_t latestRatePerSec() const;
+  void clearResults();
 
   bool exportCsv(Print& out) const;
   bool exportCsv(fs::FS& fs, const char* path = "/recon_scan.csv") const;
@@ -72,6 +111,13 @@ private:
   bool addHost(const IPAddress& ip, const uint8_t mac[6], uint16_t rttMs);
   void fingerprintHost(ReconHostRecord& host) const;
   void clearHosts();
+  void pushEvent(ReconEventType type,
+                 const IPAddress* ip = nullptr,
+                 uint16_t port = 0,
+                 uint16_t elapsedMs = 0,
+                 const char* service = nullptr,
+                 const char* msg = nullptr);
+  void noteRateSampleTick(uint32_t now);
 
   ReconScanState state_ = ReconScanState::IDLE;
   bool running_ = false;
@@ -96,6 +142,21 @@ private:
 
   uint8_t scanHostIndex_ = 0;
   uint8_t scanPortIndex_ = 0;
+  uint32_t totalHostCandidates_ = 0;
+  uint32_t hostsProbed_ = 0;
+  uint32_t portsAttempted_ = 0;
+  uint32_t portsTotal_ = 0;
+  uint16_t timeoutMs_ = 120;
+  char profileLabel_[16];
+  uint32_t scanStartMs_ = 0;
+  uint32_t rateWindowStartMs_ = 0;
+  uint16_t rateWindowAttempts_ = 0;
+  uint16_t* rateSamples_ = nullptr;
+  uint8_t rateSampleHead_ = 0;
+  uint8_t rateSampleCount_ = 0;
+  ReconEventRecord* events_ = nullptr;
+  uint8_t eventHead_ = 0;
+  uint8_t eventCount_ = 0;
   char subnetLabel_[24];
   char errorMessage_[64];
 };
