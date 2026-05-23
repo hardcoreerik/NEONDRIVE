@@ -6,6 +6,7 @@
 // M5Tab5: M5Unified handles MIPI-DSI display init and GT911 touch via I²C.
 // M5.Lcd (M5GFX) is aliased to 'tft' so all draw call sites are unchanged.
 #include <M5Unified.h>
+#include "device_profile_select.h"
 #else
 #include <TFT_eSPI.h>
 
@@ -83,6 +84,8 @@ using fs::File;
 static constexpr bool BOARD_HAS_TOUCH = true;
 static constexpr bool BOARD_HAS_SD    = true;
 static constexpr bool TFT_USES_SPI_BUS = false;
+static constexpr int BOARD_TFT_ROTATION = 1;
+static constexpr bool BOARD_TFT_INVERT = false;
 static constexpr int PIN_LCD_POWER_ON = -1;
 static constexpr int PIN_TFT_SCLK = -1;
 static constexpr int PIN_TFT_MISO = -1;
@@ -97,6 +100,7 @@ static constexpr int PIN_SD_SCLK   = -1;
 static constexpr int PIN_SD_MISO   = -1;
 static constexpr int PIN_SD_MOSI   = -1;
 static constexpr int PIN_SD_CS     = -1;
+static constexpr int PIN_SW1       = -1;
 // Backlight and RGB LED managed by M5GFX; no discrete PWM pins exposed here.
 static constexpr int BL_PINS[] = {-1};
 static constexpr uint8_t BL_PWM_CHANNELS[] = {4};
@@ -658,7 +662,7 @@ static bool touch_read_point(TouchState& s) {
       g_lastTouchRawZ = 1;
     }
   }
-  return s;
+  return s.down;
 #elif defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
   int rx = -1;
   int ry = -1;
@@ -3027,11 +3031,19 @@ static UiPanel uiMakePanel(const UiRect& frame, int left, int top, int right, in
 }
 
 static void beginPanelContent(const UiPanel& panel) {
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  tft.setClipRect(panel.contentRect.x, panel.contentRect.y, panel.contentRect.w, panel.contentRect.h);
+#else
   tft.setViewport(panel.contentRect.x, panel.contentRect.y, panel.contentRect.w, panel.contentRect.h);
+#endif
 }
 
 static void endPanelContent() {
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  tft.clearClipRect();
+#else
   tft.resetViewport();
+#endif
 }
 
 static void drawTextClipped(const String& input, int x, int y, int maxW, uint16_t fg, uint16_t bg, bool ellipsis = false) {
@@ -4045,7 +4057,7 @@ static void layoutHome() {
   const int pad = 24;
   const int gapH = 20;
   const int gapV = 20;
-  const int gridBtnH = 140;
+  const int fixedGridBtnH = 140;
 #else
   const int pad = 10;
   const int gapH = compact ? 6 : 10;
@@ -4055,7 +4067,11 @@ static void layoutHome() {
   const int bottomLimit = footerTextY - 14;
   const int topBtnY = compact ? (uiHeaderBandH() + 4) : (uiHeaderBandH() + 12);
   const int totalRowsH = bottomLimit - topBtnY - (gapV * (HOME_BTN_ROWS - 1));
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  const int gridBtnH = fixedGridBtnH;
+#else
   const int gridBtnH = compact ? max(30, totalRowsH / HOME_BTN_ROWS) : max(56, totalRowsH / HOME_BTN_ROWS);
+#endif
   const int row1Y = topBtnY + gridBtnH + gapV;
   const int row2Y = row1Y + gridBtnH + gapV;
 
@@ -10678,7 +10694,11 @@ static void psDrawTinySparkline(const UiRect& r) {
   const int plotH = r.h - 20;
   if (plotW < 8 || plotH < 8) return;
   tft.fillRect(plotX, plotY, plotW, plotH, TFT_BLACK);
+  #if defined(NEONDRIVE_TARGET_M5TAB5)
+  tft.setClipRect(plotX, plotY, plotW, plotH);
+  #else
   tft.setViewport(plotX, plotY, plotW, plotH);
+  #endif
   int px = 0;
   int py = plotH - 1;
   for (int i = 0; i < n; ++i) {
@@ -10687,7 +10707,11 @@ static void psDrawTinySparkline(const UiRect& r) {
     if (i > 0) tft.drawLine(px, py, x, y, TFT_CYAN);
     px = x; py = y;
   }
+  #if defined(NEONDRIVE_TARGET_M5TAB5)
+  tft.clearClipRect();
+  #else
   tft.resetViewport();
+  #endif
 }
 
 static const char* psEventTypeLabel(ReconEventType t) {
@@ -10955,7 +10979,7 @@ static void psDrawRateDynamic() {
   tft.fillRect(0, 0, psRatePanel.contentRect.w, psRatePanel.contentRect.h, TFT_BLACK);
   char rateBuf[20];
   snprintf(rateBuf, sizeof(rateBuf), "%u /s", (unsigned)portScanner.latestRatePerSec());
-  drawTextClipped(String(rateBuf), max(2, psRatePanel.contentRect.w - tft.textWidth(rateBuf) - 2), 0, psRatePanel.contentRect.w - 2, TFT_CYAN, TFT_BLACK, false);
+  drawTextClipped(String(rateBuf), max(2, (int)(psRatePanel.contentRect.w - tft.textWidth(rateBuf) - 2)), 0, psRatePanel.contentRect.w - 2, TFT_CYAN, TFT_BLACK, false);
   endPanelContent();
   psDrawTinySparkline(psRateRect);
 }
@@ -13309,6 +13333,8 @@ static void touch_init() {
   } else {
     Serial.println("[touch] touch enabled + BUTTON_1/BUTTON_2 fallback enabled");
   }
+#elif defined(NEONDRIVE_TARGET_M5TAB5)
+  Serial.println("[touch] M5Tab5 GT911 touch enabled via M5GFX");
 #elif defined(NEONDRIVE_TARGET_TEMBED)
   Serial.println("[input] encoder + button navigation enabled (no touch)");
 #elif defined(NEONDRIVE_TARGET_CYD28)

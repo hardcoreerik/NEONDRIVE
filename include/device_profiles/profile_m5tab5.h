@@ -1,0 +1,25 @@
+#pragma once
+
+// NEONDRIVE // M5Stack Tab5 profile (ESP32-P4, 16MB flash + PSRAM)
+#define ND_PROFILE_STATUS "beta"
+#define ND_PROFILE_CODE "m5tab5"
+#define ND_PROFILE_NAME "NEONDRIVE // M5Stack Tab5 [BETA]"
+#define ND_HOME_HEADER  "NEONDRIVE // M5TAB5 [BETA]"
+
+#define ND_DISPLAY_W 1280
+#define ND_DISPLAY_H 720
+
+#define ND_HW_TOUCH 1
+#define ND_HW_BUTTON_NAV 0
+#define ND_HW_ENCODER 0
+#define ND_HW_KEYBOARD 0
+#define ND_HW_CC1101 0
+#define ND_HW_SD 1
+
+#define ND_FLASH_MB 16
+#define ND_EXPECT_PSRAM 1
+
+#define ND_FEATURE_WEB_UI 1
+#define ND_FEATURE_SCOPE_WATERFALL 1
+#define ND_FEATURE_SD_CAPTURE 1
+#define ND_FEATURE_SUBGHZ_TOOLKIT 0
