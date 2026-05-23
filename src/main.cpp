@@ -6,6 +6,7 @@
 // M5Tab5: M5Unified handles MIPI-DSI display init and GT911 touch via I²C.
 // M5.Lcd (M5GFX) is aliased to 'tft' so all draw call sites are unchanged.
 #include <M5Unified.h>
+#include <utility/PI4IOE5V6408_Class.hpp>
 #include "device_profile_select.h"
 #else
 #include <TFT_eSPI.h>
@@ -282,6 +283,72 @@ static uint32_t g_touchDebounceUntilMs = 0;
 static inline void ledcSetup(uint8_t, uint32_t, uint8_t) {}
 static inline void ledcAttachPin(int, uint8_t) {}
 #endif // NEONDRIVE_TARGET_M5TAB5
+
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+static void tab5VerifyExpanderAndPulse() {
+  m5::PI4IOE5V6408_Class exp0(0x43);
+  m5::PI4IOE5V6408_Class exp1(0x44);
+  const bool ok0 = exp0.begin();
+  const bool ok1 = exp1.begin();
+  Serial.printf("[touch] exp0(0x43)=%d exp1(0x44)=%d\n", ok0 ? 1 : 0, ok1 ? 1 : 0);
+  if (ok0) {
+    exp0.setDirection(5, true);
+    exp0.digitalWrite(5, false);
+    delay(60);
+    exp0.digitalWrite(5, true);
+    delay(60);
+  }
+}
+
+static bool tab5ForceTouchInit() {
+  Serial.printf("[touch] begin(bind display) start enabled=%d\n", (int)M5.Touch.isEnabled());
+  M5.Touch.begin(&M5.Display);
+  delay(40);
+  if (M5.Touch.isEnabled()) return true;
+
+  M5.Touch.begin(&M5.Display);
+  delay(60);
+  if (M5.Touch.isEnabled()) return true;
+
+  // Final quick retry.
+  M5.Touch.begin(&M5.Display);
+  delay(40);
+  return M5.Touch.isEnabled();
+}
+
+static void tab5RuntimeTouchRecoveryTick() {
+  static uint32_t lastTryMs = 0;
+  static uint32_t lastProbeMs = 0;
+  if (M5.Touch.isEnabled()) return;
+  const uint32_t now = millis();
+  if ((int32_t)(now - lastProbeMs) >= 5000) {
+    lastProbeMs = now;
+    tab5VerifyExpanderAndPulse();
+  }
+  if ((int32_t)(now - lastTryMs) < 2000) return;
+  lastTryMs = now;
+  Serial.println("[touch] runtime recovery retry");
+  tab5ForceTouchInit();
+  Serial.printf("[touch] runtime enabled=%d\n", (int)M5.Touch.isEnabled());
+}
+
+static void tab5TouchProbeTick() {
+  static uint32_t nextLogMs = 0;
+  const uint32_t now = millis();
+  if ((int32_t)(now - nextLogMs) < 0) return;
+  nextLogMs = now + 200;
+
+  const auto td = M5.Touch.getDetail();
+  int gx = -1, gy = -1;
+  const bool gfxPressed = tft.getTouch(&gx, &gy);
+  if (td.isPressed() || gfxPressed) {
+    Serial.printf("[touch-probe] enabled=%d m5=%d m5xy=(%d,%d) gfx=%d gfxxy=(%d,%d)\n",
+                  (int)M5.Touch.isEnabled(),
+                  td.isPressed() ? 1 : 0, (int)td.x, (int)td.y,
+                  gfxPressed ? 1 : 0, gx, gy);
+  }
+}
+#endif
 
 #ifndef ND_TOUCH_VISUAL_DEBUG
 #define ND_TOUCH_VISUAL_DEBUG 0
@@ -645,24 +712,39 @@ static bool touch_read_point(TouchState& s) {
   s.down = false;
 
 #if defined(NEONDRIVE_TARGET_M5TAB5)
-  // GT911 via M5GFX — tft.getTouch() reads hardware directly and applies the
-  // current display rotation transform, avoiding M5Unified state-machine gaps.
-  // M5.update() is still called in loop() to keep the M5 subsystem ticked.
-  {
-    int32_t tx = 0, ty = 0;
-    if (tft.getTouch(&tx, &ty)) {
-      s.down = true;
-      s.x = (int)tx;
-      s.y = (int)ty;
-      s.z = 1;
-      s.rx = s.x;
-      s.ry = s.y;
-      g_lastTouchRawX = s.rx;
-      g_lastTouchRawY = s.ry;
-      g_lastTouchRawZ = 1;
-    }
+  // Primary path: M5Unified touch state machine.
+  if (!M5.Touch.isEnabled()) {
+    tab5ForceTouchInit();
   }
-  return s.down;
+  auto td = M5.Touch.getDetail();
+  if (td.isPressed()) {
+    s.down = true;
+    s.x = td.x;
+    s.y = td.y;
+    s.z = 1;
+    s.rx = s.x;
+    s.ry = s.y;
+    g_lastTouchRawX = s.rx;
+    g_lastTouchRawY = s.ry;
+    g_lastTouchRawZ = 1;
+    return true;
+  }
+
+  // Fallback path: direct M5GFX touch read.
+  int32_t tx = 0, ty = 0;
+  if (tft.getTouch(&tx, &ty)) {
+    s.down = true;
+    s.x = (int)tx;
+    s.y = (int)ty;
+    s.z = 1;
+    s.rx = s.x;
+    s.ry = s.y;
+    g_lastTouchRawX = s.rx;
+    g_lastTouchRawY = s.ry;
+    g_lastTouchRawZ = 1;
+    return true;
+  }
+  return false;
 #elif defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
   int rx = -1;
   int ry = -1;
@@ -13334,7 +13416,11 @@ static void touch_init() {
     Serial.println("[touch] touch enabled + BUTTON_1/BUTTON_2 fallback enabled");
   }
 #elif defined(NEONDRIVE_TARGET_M5TAB5)
-  Serial.println("[touch] M5Tab5 GT911 touch enabled via M5GFX");
+  Serial.printf("[touch] M5.Touch.isEnabled(before)=%d\n", (int)M5.Touch.isEnabled());
+  // Official Tab5 path: bind M5Unified touch to M5.Display and let M5GFX auto-handle GT911/ST7123.
+  tab5ForceTouchInit();
+  Serial.printf("[touch] M5.Touch.isEnabled(after)=%d\n", (int)M5.Touch.isEnabled());
+  Serial.println("[touch] M5Tab5 capacitive touch ready (M5Unified Touch_Class)");
 #elif defined(NEONDRIVE_TARGET_TEMBED)
   Serial.println("[input] encoder + button navigation enabled (no touch)");
 #elif defined(NEONDRIVE_TARGET_CYD28)
@@ -13684,11 +13770,13 @@ void setup() {
     auto cfg = M5.config();
     M5.begin(cfg);
   }
+  M5.Display.setRotation(1);
   tft.setRotation(1);
   tft.fillScreen(TFT_BLACK);
   drawBorder();
   Serial.printf("[tab5] display %dx%d\n", tft.width(), tft.height());
-  Serial.println("[tab5] touch: GT911 via M5Unified");
+  Serial.println("[tab5] touch: M5Unified/M5GFX auto (GT911 or ST7123)");
+  touch_init();
 #else
   backlightBringup();
   display_init();
@@ -13759,6 +13847,8 @@ void setup() {
 void loop() {
 #if defined(NEONDRIVE_TARGET_M5TAB5)
   M5.update();  // polls GT911 touch; must be called before readTouch()
+  tab5RuntimeTouchRecoveryTick();
+  tab5TouchProbeTick();
 #endif
   handleSerialDebugCommands();
   bruceMenuTick();
