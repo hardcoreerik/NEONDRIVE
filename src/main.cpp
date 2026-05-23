@@ -903,7 +903,7 @@ static void uiMemBudgetBoot();
 
 // AutoMode must be declared before handleCapturedPacket so the promiscuous
 // callback can filter on JAMMIT mode without a forward-declaration problem.
-enum class AutoMode : uint8_t { NONE, Y0INK, RAW, SCOPE, JAMMIT, PROBE_FLOOD, DEAUTH_FLOOD };
+enum class AutoMode : uint8_t { NONE, Y0INK, RAW, SCOPE, JAMMIT, PROBE_FLOOD, DEAUTH_FLOOD, PUSH1T };
 static AutoMode autoMode = AutoMode::NONE;
 static void engageAutoMode(AutoMode mode);
 static void disengageAutoMode();
@@ -1549,6 +1549,8 @@ static bool isHandshakeFrame(const uint8_t* frame, uint32_t len) {
   return false;
 }
 
+static void push1tHandleBeacon(const uint8_t* frame, uint32_t len); // defined near PUSH1T engine
+
 static void handleCapturedPacket(uint8_t *buf, uint32_t len) {
   if (!hasTarget || !sniffActive || !buf || len < 24) return;
   
@@ -1578,6 +1580,11 @@ static void handleCapturedPacket(uint8_t *buf, uint32_t len) {
     }
   }
   
+  // PUSH1T: parse WPS IEs from beacons for the current target
+  if (autoMode == AutoMode::PUSH1T && isBeaconFrame(buf, len)) {
+    push1tHandleBeacon(buf, len);
+  }
+
   // Only write handshake and beacon frames (not all raw packets)
   // Writing ALL packets causes WiFi tx buffer exhaustion and watchdog timeout
   if (pcapCaptureActive && pcapFilesOpen && sdReady) {
@@ -1821,6 +1828,7 @@ static const char* autoModeStr(AutoMode m) {
     case AutoMode::JAMMIT: return "JAMMIT";
     case AutoMode::PROBE_FLOOD: return "PROBE";
     case AutoMode::DEAUTH_FLOOD: return "DEAUTH_FLOOD";
+    case AutoMode::PUSH1T:       return "PUSH1T";
     default:              return "NONE";
   }
 }
@@ -2117,6 +2125,7 @@ enum class ScreenId : uint8_t {
   RECON_HOME,
   WARDRIVE,
   SYNC,
+  PUSH1T_SCREEN,
 };
 static ScreenId screen = ScreenId::HOME;
 
@@ -2148,6 +2157,7 @@ static const char* screenToStr(ScreenId s) {
     case ScreenId::RECON_HOME:   return "RECON_HOME";
     case ScreenId::WARDRIVE:     return "WARDRIVE";
     case ScreenId::SYNC:         return "SYNC";
+    case ScreenId::PUSH1T_SCREEN: return "PUSH1T";
     default: return "UNKNOWN";
   }
 }
@@ -2801,7 +2811,7 @@ static void drawHomeGlyph(const char* label, int cx, int cy, int iconW, int icon
     tft.drawLine(leftTopX, childY, leftTopX, splitY, col);
     tft.drawLine(rightTopX, childY, rightTopX, splitY, col);
     tft.drawLine(leftTopX, splitY, rightTopX, splitY, col);
-  } else if (strcmp(label, "BRUCE") == 0) {
+  } else if (strcmp(label, "Packet Lab") == 0) {
     tft.fillCircle(cx - 8, cy - 5, 3, col);
     tft.fillCircle(cx + 8, cy - 5, 3, col);
     tft.fillRect(cx - 10, cy + 2, 20, 8, col);
@@ -3443,7 +3453,10 @@ static void drawLedControlDynamic() {
 // Bruce Monitor screen buttons and state
 static Button btnBruceMonBack;
 static Button btnBruceMonFiles;
-static Button bruceMenuBtns[6];
+static Button bruceMenuBtns[8];
+// PUSH1T screen buttons
+static Button btnP1tBack, btnP1tEngage, btnP1tManual, btnP1tBruce, btnP1tSetTarget;
+static uint32_t push1tScreenLastSig = 0;
 static Button btnBruceSetTargetBack;
 static Button btnBruceSetTargetAll;
 static Button btnBruceSetTargetRows[8];
@@ -3625,6 +3638,45 @@ static uint32_t justGoLastDeauthCount = 0;
 static uint32_t justGoLastConsoleUpdateMs = 0;
 static uint32_t justGoLastRenderSig = 0;
 static bool justGoLayoutDrawn = false;
+
+// ── PUSH1T (WPS Intelligence) state ────────────────────────────────────────
+static uint32_t push1tLastProbeMs   = 0;
+static uint32_t push1tProbeCount    = 0;
+static bool     push1tWpsDetected   = false;
+static bool     push1tWpsLocked     = false;
+static uint8_t  push1tWpsVersion    = 0;
+static bool     push1tVulnerable    = false; // WPS 1.0 + unlocked heuristic
+static char     push1tManufacturer[24] = "";
+static char     push1tDeviceName[24]   = "";
+static uint8_t  push1tTargetBssid[6]  = {0};
+static bool     push1tBssidCached     = false;
+
+// Just Go adaptive feedback state
+static bool justGoY0inkExtendedOnce = false;
+static bool justGoPostStimulusWindow = false;
+static bool justGoTargetHadClient = false;
+static bool justGoTargetHadPartial = false;
+static bool justGoTargetSucceeded = false;
+static uint8_t justGoSessionSuccesses = 0;
+static uint8_t justGoSessionAttempts = 0;
+
+// Just Go per-target session stats table
+struct JustGoTargetStats {
+  char bssid[18];
+  uint8_t attempts;
+  uint8_t successes;
+  uint8_t y0inkTimeouts;
+  uint8_t jammitRuns;
+  uint8_t clientsMax;
+  uint8_t hsMax;
+  uint8_t pmkidMax;
+  int8_t  bestRssi;
+  uint32_t lastTriedMs;
+  uint32_t lastSuccessMs;
+};
+static constexpr uint8_t JUSTGO_STATS_MAX = 8;
+static JustGoTargetStats justGoStats[JUSTGO_STATS_MAX];
+static uint8_t justGoStatsCount = 0;
 
 #if defined(NEONDRIVE_TARGET_BUTTON_NAV)
 static constexpr uint8_t TDISPLAY_NAV_MAX_ITEMS = 64;
@@ -3884,8 +3936,15 @@ static void tdisplayNavBuild() {
       break;
     case ScreenId::NEON_PANIC:
       break;
+    case ScreenId::PUSH1T_SCREEN:
+      tdisplayNavPush(btnP1tBack);
+      tdisplayNavPush(btnP1tEngage);
+      tdisplayNavPush(btnP1tManual);
+      tdisplayNavPush(btnP1tSetTarget);
+      tdisplayNavPush(btnP1tBruce);
+      break;
     case ScreenId::BRUCE_MENU:
-      for (int i = 0; i < 6; i++) tdisplayNavPush(bruceMenuBtns[i]);
+      for (int i = 0; i < 8; i++) tdisplayNavPush(bruceMenuBtns[i]);
       break;
     case ScreenId::BRUCE_MONITOR:
       tdisplayNavPush(btnBruceMonBack);
@@ -4013,7 +4072,7 @@ static void layoutHome() {
   homeBtns[8] = {pad + (topBtnW + gapH) * 2, topBtnY, topBtnW, gridBtnH, "GPS"};
 
   // Main grid (2 rows x 3 cols): Logs / Target / Recon / Config / Net Scan / BRUCE.
-  const char* gridLabels[6] = {"Logs", "Target", "Recon", "Config", "Net Scan", "BRUCE"};
+  const char* gridLabels[6] = {"Logs", "Target", "Recon", "Config", "Net Scan", "Packet Lab"};
   int idx = 2;
   for (int r = 0; r < 2; ++r) {
     const int y = (r == 0) ? row1Y : row2Y;
@@ -4670,15 +4729,141 @@ static bool justGoAcceptsTarget(const ApRecord& a) {
   return true;
 }
 
+// ── Just Go session stats helpers ──────────────────────────────────────────
+
+static void justGoResetSessionStats() {
+  memset(justGoStats, 0, sizeof(justGoStats));
+  justGoStatsCount = 0;
+  justGoSessionSuccesses = 0;
+  justGoSessionAttempts = 0;
+}
+
+static JustGoTargetStats* justGoFindStatsByBssid(const char* bssid) {
+  for (uint8_t i = 0; i < justGoStatsCount; i++) {
+    if (strncmp(justGoStats[i].bssid, bssid, 17) == 0) return &justGoStats[i];
+  }
+  return nullptr;
+}
+
+static JustGoTargetStats* justGoFindOrCreateStats(const ApRecord& a) {
+  JustGoTargetStats* s = justGoFindStatsByBssid(a.bssid.c_str());
+  if (s) return s;
+  if (justGoStatsCount < JUSTGO_STATS_MAX) {
+    s = &justGoStats[justGoStatsCount++];
+  } else {
+    // Evict the entry with the oldest lastTriedMs
+    uint32_t oldest = justGoStats[0].lastTriedMs;
+    uint8_t oidx = 0;
+    for (uint8_t i = 1; i < JUSTGO_STATS_MAX; i++) {
+      if (justGoStats[i].lastTriedMs < oldest) { oldest = justGoStats[i].lastTriedMs; oidx = i; }
+    }
+    s = &justGoStats[oidx];
+  }
+  memset(s, 0, sizeof(JustGoTargetStats));
+  strncpy(s->bssid, a.bssid.c_str(), 17);
+  s->bssid[17] = '\0';
+  s->bestRssi = (int8_t)constrain(a.rssi, -128, 127);
+  return s;
+}
+
+static void justGoRecordTargetAttempt(const ApRecord& a) {
+  JustGoTargetStats* s = justGoFindOrCreateStats(a);
+  if (!s) return;
+  s->attempts++;
+  s->lastTriedMs = millis();
+  if (a.rssi > (int)s->bestRssi) s->bestRssi = (int8_t)constrain(a.rssi, -128, 127);
+  justGoSessionAttempts++;
+}
+
+static void justGoRecordTargetSuccess(const ApRecord& a) {
+  JustGoTargetStats* s = justGoFindOrCreateStats(a);
+  if (!s) return;
+  s->successes++;
+  s->lastSuccessMs = millis();
+  uint8_t hs  = YoinkEngine::isRunning() ? YoinkEngine::getHandshakeCount() : 0;
+  uint8_t pmk = YoinkEngine::isRunning() ? YoinkEngine::getPmkidCount()    : 0;
+  uint8_t cl  = YoinkEngine::isRunning() ? YoinkEngine::getClientCount()   : (uint8_t)min((uint32_t)255U, (uint32_t)jammitClientCount);
+  if (hs  > s->hsMax)      s->hsMax      = hs;
+  if (pmk > s->pmkidMax)   s->pmkidMax   = pmk;
+  if (cl  > s->clientsMax) s->clientsMax = cl;
+  justGoSessionSuccesses++;
+}
+
+static void justGoRecordModeOutcome(AutoMode mode, bool success) {
+  if (!hasTarget) return;
+  JustGoTargetStats* s = justGoFindStatsByBssid(target.bssid.c_str());
+  if (!s) return;
+  if (mode == AutoMode::Y0INK && !success) s->y0inkTimeouts++;
+  if (mode == AutoMode::JAMMIT) {
+    s->jammitRuns++;
+    uint8_t cl = (uint8_t)min((uint32_t)255U, (uint32_t)jammitClientCount);
+    if (cl > s->clientsMax) s->clientsMax = cl;
+  }
+}
+
+static bool justGoHasCaptureSuccess() {
+  if (YoinkEngine::isRunning())
+    return (YoinkEngine::getHandshakeCount() > 0 || YoinkEngine::getPmkidCount() > 0);
+  return false;
+}
+
+static bool justGoHasUsefulClientActivity() {
+  if (justGoMode == AutoMode::Y0INK && YoinkEngine::isRunning())
+    return YoinkEngine::getClientCount() > 0;
+  if (justGoMode == AutoMode::JAMMIT) return jammitClientCount > 0;
+  return false;
+}
+
+// Scoring: returns integer — higher = better target for this session
+static int justGoScoreTarget(const ApRecord& a) {
+  int score = 50;
+  // WPA/WPA2/WPA3 bonus
+  bool isWpa = (a.auth != WIFI_AUTH_OPEN && a.auth != WIFI_AUTH_WEP);
+  if (isWpa) score += 10;
+  // WPS vulnerability bonus — lab yield opportunity
+  if      (a.wpsEnabled && !a.wpsLocked && a.wpsVersion == 0x10) score += 20; // WPS 1.0 unlocked
+  else if (a.wpsEnabled && !a.wpsLocked)                          score += 10; // WPS unlocked
+  else if (a.wpsEnabled &&  a.wpsLocked)                          score +=  5; // WPS present but locked
+  // RSSI sweet spot -35 to -70 dBm
+  if      (a.rssi >= -35)             score += 15; // very close
+  else if (a.rssi >= -70)             score += 20; // ideal
+  else if (a.rssi >= -82)             score +=  0; // marginal
+  else                                score -= 15; // too weak
+  // Per-session stats bonus/penalty
+  JustGoTargetStats* s = justGoFindStatsByBssid(a.bssid.c_str());
+  if (s) {
+    if (s->clientsMax > 0)                   score += 10;
+    if (s->hsMax > 0 || s->pmkidMax > 0)     score += 15;
+    score -= (int)s->y0inkTimeouts * 5;
+    if (s->successes > 0)                    score -= 20; // already captured, deprioritize
+  }
+  return score;
+}
+
+// ── Target list builder (scored) ───────────────────────────────────────────
+
 static void justGoBuildTargetList() {
   justGoResetTargets();
-  for (int i = 0; i < apCount && justGoTargetCount < 3; i++) {
-    if (!justGoAcceptsTarget(aps[i])) continue;
-    justGoTargets[justGoTargetCount++] = (uint8_t)i;
-    
-    // THREAT ASSESSMENT: Calculate for each discovered target
-    // Estimate client count based on deauth patterns (stub - use 2 as default)
-    recordThreatAssessment(aps[i], 2);
+  // Score every valid AP then pick the top-3 by score; no heap, O(n*3).
+  static int scores[MAX_APS];
+  for (int i = 0; i < apCount; i++) {
+    scores[i] = justGoAcceptsTarget(aps[i]) ? justGoScoreTarget(aps[i]) : -9999;
+  }
+  for (uint8_t pick = 0; pick < 3; pick++) {
+    int best = -9999; int bestIdx = -1;
+    for (int i = 0; i < apCount; i++) {
+      if (scores[i] <= -9999) continue;
+      bool already = false;
+      for (uint8_t j = 0; j < justGoTargetCount; j++)
+        if (justGoTargets[j] == (uint8_t)i) { already = true; break; }
+      if (already) continue;
+      if (scores[i] > best) { best = scores[i]; bestIdx = i; }
+    }
+    if (bestIdx < 0) break;
+    justGoTargets[justGoTargetCount++] = (uint8_t)bestIdx;
+    Serial.printf("[JUSTGO-SCORE] rank=%u ssid=%s score=%d rssi=%d\n",
+                  (unsigned)justGoTargetCount, aps[bestIdx].ssid.c_str(), best, aps[bestIdx].rssi);
+    recordThreatAssessment(aps[bestIdx], 2);
   }
 }
 
@@ -4688,13 +4873,30 @@ static uint32_t justGoModeDurationMs(AutoMode mode) {
   }
   // Duration varies by profile and mode
   switch (mode) {
-    case AutoMode::PROBE_FLOOD: return 30000U;
-    case AutoMode::Y0INK:       return 90000U;
-    case AutoMode::JAMMIT:      return 45000U;
-    case AutoMode::RAW:         return 45000U;
+    case AutoMode::PROBE_FLOOD:  return 30000U;
+    case AutoMode::Y0INK:        return 90000U;
+    case AutoMode::JAMMIT:       return 45000U;
+    case AutoMode::RAW:          return 45000U;
     case AutoMode::DEAUTH_FLOOD: return 45000U;
+    case AutoMode::PUSH1T:       return 45000U;
     default: return 25000U;
   }
+}
+
+// Post-stimulus Y0INK retry uses a shorter window; otherwise use base duration.
+static uint32_t justGoAdaptiveModeDurationMs(AutoMode mode) {
+  if (mode == AutoMode::Y0INK && justGoPostStimulusWindow) return 45000U;
+  return justGoModeDurationMs(mode);
+}
+
+// True if we should extend the current Y0INK window once (client seen, not yet extended).
+static bool justGoShouldExtendY0INK(uint32_t now) {
+  if (justGoY0inkExtendedOnce) return false;
+  if (justGoMode != AutoMode::Y0INK) return false;
+  const uint32_t maxMs = justGoAdaptiveModeDurationMs(AutoMode::Y0INK);
+  const uint32_t elapsed = now - justGoStageStartMs;
+  if (elapsed < (maxMs * 6) / 10) return false; // wait until 60% of window
+  return justGoHasUsefulClientActivity() || justGoTargetHadPartial;
 }
 
 static uint8_t justGoSequenceLength(const ApRecord& a) {
@@ -4717,7 +4919,7 @@ static uint8_t justGoSequenceLength(const ApRecord& a) {
     
     default: // STANDARD
       if (a.auth == WIFI_AUTH_OPEN || a.auth == WIFI_AUTH_WEP) return 1; // RAW only
-      return 3; // Y0INK + JAMMIT + RAW
+      return 5; // Y0INK + PUSH1T + JAMMIT + Y0INK_RETRY + RAW
   }
 }
 
@@ -4756,15 +4958,15 @@ static AutoMode justGoModeForStep(const ApRecord& a, uint8_t step) {
       return AutoMode::NONE;
     
     default: // STANDARD
-      // STANDARD: Adaptive to auth type
       if (a.auth == WIFI_AUTH_OPEN || a.auth == WIFI_AUTH_WEP) {
-        // For open/WEP: RAW only
         if (step == 0) return AutoMode::RAW;
       } else {
-        // For WPA/WPA2: Y0INK + JAMMIT + RAW
+        // WPA/WPA2/WPA3: Y0INK → PUSH1T → JAMMIT → Y0INK_RETRY → RAW
         if (step == 0) return AutoMode::Y0INK;
-        if (step == 1) return AutoMode::JAMMIT;
-        if (step == 2) return AutoMode::RAW;
+        if (step == 1) return AutoMode::PUSH1T; // WPS assessment
+        if (step == 2) return AutoMode::JAMMIT;
+        if (step == 3) return AutoMode::Y0INK;  // post-JAMMIT retry window
+        if (step == 4) return AutoMode::RAW;
       }
       return AutoMode::NONE;
   }
@@ -4782,6 +4984,11 @@ static void justGoStop() {
   justGoLogf("~~ STOPPED ~~");
   uint32_t elapsed = (millis() - justGoStageStartMs) / 1000;
   justGoLogf("Ran for %lus", elapsed);
+  if (justGoSessionAttempts > 0) {
+    justGoLogf("[WIN] %u/%u captured", justGoSessionSuccesses, justGoSessionAttempts);
+    Serial.printf("[JUSTGO-WIN] successes=%u attempts=%u\n",
+                  (unsigned)justGoSessionSuccesses, (unsigned)justGoSessionAttempts);
+  }
   Serial.printf("[JUSTGO-STOP] elapsed=%lu\n", elapsed);
   
   // THREAT EXPORT: Save JSON data for Android app analysis
@@ -4798,6 +5005,12 @@ static void justGoStart() {
   justGoMode = AutoMode::NONE;
   justGoModeStep = 0;
   justGoResetTargets();
+  justGoResetSessionStats();
+  justGoY0inkExtendedOnce = false;
+  justGoPostStimulusWindow = false;
+  justGoTargetHadClient    = false;
+  justGoTargetHadPartial   = false;
+  justGoTargetSucceeded    = false;
   monitorLineCount = 0;
   
   // Ensure spoofing mode matches profile
@@ -4854,9 +5067,27 @@ static void justGoPickTarget(uint32_t now) {
   justGoLogf("Auth:%s|Ch:%u|RSSI:%d", authStr, (unsigned)a.channel, a.rssi);
   Serial.printf("[JUSTGO-TARGET] ssid=%s bssid=%s auth=%s ch=%u rssi=%d\n",
                 a.ssid.c_str(), a.bssid.c_str(), authStr, a.channel, a.rssi);
+
+  // Per-target session accounting + adaptive state reset
+  justGoRecordTargetAttempt(a);
+  justGoY0inkExtendedOnce = false;
+  justGoPostStimulusWindow = false;
+  justGoTargetHadClient    = false;
+  justGoTargetHadPartial   = false;
+  justGoTargetSucceeded    = false;
+
+  int tgtScore = justGoScoreTarget(a);
+  Serial.printf("[JUSTGO-SCORE] selected bssid=%s score=%d\n", a.bssid.c_str(), tgtScore);
+  justGoLogf("Score:%d", tgtScore);
 }
 
 static void justGoAdvanceTarget(uint32_t now) {
+  Serial.printf("[JUSTGO-RESULT] bssid=%s succeeded=%d hs=%u pmkid=%u clients=%u\n",
+                hasTarget ? target.bssid.c_str() : "?",
+                justGoTargetSucceeded ? 1 : 0,
+                YoinkEngine::isRunning() ? YoinkEngine::getHandshakeCount() : 0,
+                YoinkEngine::isRunning() ? YoinkEngine::getPmkidCount()    : 0,
+                YoinkEngine::isRunning() ? YoinkEngine::getClientCount()   : (uint8_t)min((uint32_t)255U,(uint32_t)jammitClientCount));
   disengageAutoMode();
   justGoMode = AutoMode::NONE;
   justGoModeStep = 0;
@@ -4879,6 +5110,8 @@ static void justGoUpdateConsole() {
       const char* modeDesc = "?";
       if (justGoMode == AutoMode::Y0INK) {
         modeDesc = "Hunting handshakes...";
+      } else if (justGoMode == AutoMode::PUSH1T) {
+        modeDesc = "WPS probe & assessment...";
       } else if (justGoMode == AutoMode::JAMMIT) {
         modeDesc = "Launching deauth attack...";
       } else if (justGoMode == AutoMode::RAW) {
@@ -4963,58 +5196,119 @@ static void justGoTick() {
       }
 
       if (justGoMode == AutoMode::NONE) {
-        justGoMode = justGoModeForStep(a, justGoModeStep);
+        AutoMode nextMode = justGoModeForStep(a, justGoModeStep);
+        // Flag when entering the post-JAMMIT Y0INK retry window
+        if (nextMode == AutoMode::Y0INK && justGoModeStep > 0) {
+          justGoPostStimulusWindow = true;
+          Serial.printf("[JUSTGO-ADAPT] entering post-stimulus Y0INK retry step=%u\n", justGoModeStep);
+        }
+        justGoMode = nextMode;
         justGoStageStartMs = now;
         engageAutoMode(justGoMode);
-        
-        // Detailed mode engagement messages
+
         const char* modeDesc = "?";
-        if (justGoMode == AutoMode::Y0INK) {
+        if (justGoMode == AutoMode::Y0INK && justGoPostStimulusWindow)
+          modeDesc = "Post-JAMMIT retry window...";
+        else if (justGoMode == AutoMode::Y0INK)
           modeDesc = "Hunting handshakes...";
-        } else if (justGoMode == AutoMode::JAMMIT) {
-          modeDesc = "Launching deauth attack...";
-        } else if (justGoMode == AutoMode::RAW) {
+        else if (justGoMode == AutoMode::PUSH1T)
+          modeDesc = "WPS probe & assessment...";
+        else if (justGoMode == AutoMode::JAMMIT)
+          modeDesc = "Launching deauth stimulus...";
+        else if (justGoMode == AutoMode::RAW)
           modeDesc = "Passive packet capture...";
-        } else if (justGoMode == AutoMode::PROBE_FLOOD) {
+        else if (justGoMode == AutoMode::PROBE_FLOOD)
           modeDesc = "Waking clients with probes...";
-        } else if (justGoMode == AutoMode::DEAUTH_FLOOD) {
+        else if (justGoMode == AutoMode::DEAUTH_FLOOD)
           modeDesc = "Broadcast channel deauth...";
-        }
-        justGoLogf("[%s]  %s", autoModeStr(justGoMode), modeDesc);
-        Serial.printf("[JUSTGO-ENGAGE] mode=%s desc=%s\n", autoModeStr(justGoMode), modeDesc);
+        justGoLogf("[%s] %s", autoModeStr(justGoMode), modeDesc);
+        Serial.printf("[JUSTGO-ENGAGE] mode=%s step=%u\n", autoModeStr(justGoMode), justGoModeStep);
         break;
       }
 
+      // ── Y0INK live checks ───────────────────────────────────────────────
       if (justGoMode == AutoMode::Y0INK) {
-        if (YoinkEngine::getHandshakeCount() > 0 || YoinkEngine::getPmkidCount() > 0) {
-          uint8_t hs = YoinkEngine::getHandshakeCount();
-          uint8_t pmkid = YoinkEngine::getPmkidCount();
+        uint8_t hs    = YoinkEngine::isRunning() ? YoinkEngine::getHandshakeCount() : 0;
+        uint8_t pmkid = YoinkEngine::isRunning() ? YoinkEngine::getPmkidCount()    : 0;
+        uint8_t cl    = YoinkEngine::isRunning() ? YoinkEngine::getClientCount()   : 0;
+
+        // Track evidence
+        if (cl > 0)            justGoTargetHadClient  = true;
+        if (hs > 0 || pmkid > 0) justGoTargetHadPartial = true;
+
+        if (hs > 0 || pmkid > 0) {
           justGoLogf("[SUCCESS] %dHS + %dPMKID", hs, pmkid);
-          justGoLogf("Y0INK complete - advancing...");
+          justGoLogf("Y0INK captured - skip to RAW");
           Serial.printf("[JUSTGO-CAPTURE] handshakes=%d pmkids=%d\n", hs, pmkid);
+          justGoTargetSucceeded = true;
+          justGoRecordTargetSuccess(target);
+          justGoRecordModeOutcome(AutoMode::Y0INK, true);
           disengageAutoMode();
           justGoMode = AutoMode::NONE;
-          justGoModeStep++;
+          // Jump to last step (RAW) — skips JAMMIT and any remaining retry
+          justGoModeStep = (seqLen > 1) ? (seqLen - 1) : seqLen;
           justGoStageStartMs = now;
           break;
         }
+
+        // Extend Y0INK window once if clients are seen near timeout
+        if (justGoShouldExtendY0INK(now)) {
+          justGoY0inkExtendedOnce = true;
+          justGoStageStartMs += 30000U; // push deadline 30 s later
+          justGoLogf("[ADAPT] Y0INK+30s (client seen)");
+          Serial.printf("[JUSTGO-ADAPT] y0ink_extended_30s cl=%u\n", cl);
+        }
       }
 
-      const uint32_t maxMs = justGoModeDurationMs(justGoMode);
+      // ── Adaptive timeout ────────────────────────────────────────────────
+      const uint32_t maxMs = justGoAdaptiveModeDurationMs(justGoMode);
       if ((now - justGoStageStartMs) >= maxMs) {
-        // Log summary before advancing
         if (justGoMode == AutoMode::Y0INK) {
-          uint8_t clients = YoinkEngine::getClientCount();
-          uint8_t hs = YoinkEngine::getHandshakeCount();
-          justGoLogf("Y0INK timeout - found %dC/%dHS", clients, hs);
+          uint8_t clients = YoinkEngine::isRunning() ? YoinkEngine::getClientCount() : 0;
+          uint8_t hs      = YoinkEngine::isRunning() ? YoinkEngine::getHandshakeCount() : 0;
+          justGoLogf("Y0INK timeout %dC/%dHS", clients, hs);
+          justGoRecordModeOutcome(AutoMode::Y0INK, false);
+          // No clients and no partial evidence: skip JAMMIT + retry, go straight to RAW
+          if (!justGoTargetHadClient && !justGoTargetHadPartial && seqLen >= 3) {
+            Serial.printf("[JUSTGO-ADAPT] no_activity skip_to_raw step=%u->%u\n",
+                          justGoModeStep, seqLen - 1);
+            justGoLogf("[ADAPT] No activity, skip to RAW");
+            disengageAutoMode();
+            justGoMode = AutoMode::NONE;
+            justGoModeStep = seqLen - 1;
+            justGoStageStartMs = now;
+            break;
+          }
         } else if (justGoMode == AutoMode::JAMMIT) {
-          justGoLogf("JAMMIT complete - %lu deauths", (unsigned long)jammitDeauthCount);
+          justGoLogf("JAMMIT done %lu deauths", (unsigned long)jammitDeauthCount);
+          justGoRecordModeOutcome(AutoMode::JAMMIT, false);
+          // Mark so next Y0INK uses shorter post-stimulus window
+          justGoPostStimulusWindow = true;
+          Serial.printf("[JUSTGO-ADAPT] jammit_done post_stimulus_window=1\n");
         } else if (justGoMode == AutoMode::RAW) {
           justGoLogf("RAW complete - sniff done");
+          Serial.printf("[JUSTGO-RESULT] succeeded=%d hs=%u pmkid=%u\n",
+                        justGoTargetSucceeded ? 1 : 0,
+                        YoinkEngine::isRunning() ? YoinkEngine::getHandshakeCount() : 0,
+                        YoinkEngine::isRunning() ? YoinkEngine::getPmkidCount()    : 0);
+        } else if (justGoMode == AutoMode::PUSH1T) {
+          if (push1tWpsDetected) {
+            justGoLogf("WPS:%s%s v%02X",
+                       push1tWpsLocked ? "LOCKD" : "OPEN",
+                       push1tVulnerable ? "+VULN" : "",
+                       push1tWpsVersion);
+            if (push1tManufacturer[0])
+              justGoLogf("MFR:%s", push1tManufacturer);
+          } else {
+            justGoLogf("PUSH1T: no WPS found");
+          }
+          Serial.printf("[PUSH1T-RESULT] wps=%d locked=%d vuln=%d ver=0x%02X mfr=%s dev=%s\n",
+                        push1tWpsDetected, push1tWpsLocked, push1tVulnerable,
+                        push1tWpsVersion, push1tManufacturer, push1tDeviceName);
         } else if (justGoMode == AutoMode::PROBE_FLOOD) {
-          justGoLogf("PROBE_FLOOD complete - clients probed");
+          justGoLogf("PROBE_FLOOD complete");
         } else if (justGoMode == AutoMode::DEAUTH_FLOOD) {
-          justGoLogf("DEAUTH_FLOOD complete - broadcast done");
+          justGoLogf("DEAUTH_FLOOD complete");
         }
         disengageAutoMode();
         justGoMode = AutoMode::NONE;
@@ -5104,26 +5398,28 @@ static void drawJustGo() {
     tft.drawString(tgtIdx, leftX + 132, y0 + 5);
   }
 
-  // Pipeline row.
+  // Pipeline row: SCN | LCK | Y0NK | P1T | JAM | RAW | HOP
   const int pipeY = y0 + statusH + 4;
   const int pipeH = 16;
-  const char* pLabels[6] = {"SCAN", "LOCK", "Y0INK", "JAM", "RAW", "HOP"};
-  const int pipeW = (leftW - 10) / 6;
-  for (int i = 0; i < 6; ++i) {
+  const char* pLabels[7] = {"SCN", "LCK", "Y0NK", "P1T", "JAM", "RAW", "HOP"};
+  const int pipeW = (leftW - 10) / 7;
+  for (int i = 0; i < 7; ++i) {
     const int bx = leftX + 2 + (i * pipeW);
     uint16_t col = TFT_DARKGREY;
     if (i == 0 && (justGoStage == JustGoStage::SCAN || justGoLastStage != JustGoStage::IDLE)) col = TFT_GREEN;
     if (i == 1 && hasTarget && lockChannel) col = TFT_CYAN;
     if (i == 2 && (justGoMode == AutoMode::Y0INK || justGoLastMode == AutoMode::Y0INK)) col = TFT_GREEN;
-    if (i == 3 && (justGoMode == AutoMode::JAMMIT || justGoLastMode == AutoMode::JAMMIT)) col = TFT_GREEN;
-    if (i == 4 && (justGoMode == AutoMode::RAW || justGoLastMode == AutoMode::RAW)) col = TFT_GREEN;
-    if (i == 5 && (justGoStage == JustGoStage::COOLDOWN || justGoLastStage == JustGoStage::COOLDOWN)) col = TFT_CYAN;
+    if (i == 3 && (justGoMode == AutoMode::PUSH1T || justGoLastMode == AutoMode::PUSH1T)) col = push1tVulnerable ? TFT_RED : TFT_MAGENTA;
+    if (i == 4 && (justGoMode == AutoMode::JAMMIT || justGoLastMode == AutoMode::JAMMIT)) col = TFT_GREEN;
+    if (i == 5 && (justGoMode == AutoMode::RAW || justGoLastMode == AutoMode::RAW)) col = TFT_GREEN;
+    if (i == 6 && (justGoStage == JustGoStage::COOLDOWN || justGoLastStage == JustGoStage::COOLDOWN)) col = TFT_CYAN;
     if ((i == 0 && justGoStage == JustGoStage::SCAN) ||
         (i == 1 && justGoStage == JustGoStage::SELECT_TARGET) ||
         (i == 2 && justGoMode == AutoMode::Y0INK) ||
-        (i == 3 && justGoMode == AutoMode::JAMMIT) ||
-        (i == 4 && justGoMode == AutoMode::RAW) ||
-        (i == 5 && justGoStage == JustGoStage::COOLDOWN)) {
+        (i == 3 && justGoMode == AutoMode::PUSH1T) ||
+        (i == 4 && justGoMode == AutoMode::JAMMIT) ||
+        (i == 5 && justGoMode == AutoMode::RAW) ||
+        (i == 6 && justGoStage == JustGoStage::COOLDOWN)) {
       col = TFT_YELLOW;
     }
     if (!justGoActive && justGoStage == JustGoStage::IDLE) col = TFT_DARKGREY;
@@ -5165,7 +5461,7 @@ static void drawJustGo() {
   while (modeLine.length() > 8 && tft.textWidth(modeLine) > (leftW - 4)) modeLine.remove(modeLine.length() - 1);
   tft.drawString(modeLine, leftX + 2, targetY + targetH + 2);
 
-  // Right-side unified stat stack panel (under hypercube area).
+  // Right-side Mission HUD stat stack panel.
   const int statsY = max(y0 + statusH + 2, ActionDockBoxY + ActionDockBoxH + 2);
   const int statsH = max(56, bottom.y - statsY - 24);
   tft.drawRoundRect(rightX, statsY, rightW, statsH, 4, TFT_CYAN);
@@ -5173,18 +5469,53 @@ static void drawJustGo() {
   tft.setTextSize(1);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("STATS", rightX + 4, statsY + 2);
-  const int hs = YoinkEngine::isRunning() ? YoinkEngine::getHandshakeCount() : 0;
-  char s1[28], s2[28], s3[28], s4[28], s5[28], s6[28];
+
+  // Compute values for HUD fields
+  const int hudHs    = YoinkEngine::isRunning() ? YoinkEngine::getHandshakeCount() : 0;
+  const int hudPmk   = YoinkEngine::isRunning() ? YoinkEngine::getPmkidCount()    : 0;
+  const int hudCl    = YoinkEngine::isRunning() ? YoinkEngine::getClientCount()    : (int)jammitClientCount;
+  const int hudScore = hasTarget ? justGoScoreTarget(target) : 0;
+
+  // CAPTURE state label
+  const char* capState = "NONE";
+  if (justGoTargetSucceeded)          capState = "VALID";
+  else if (hudHs > 0 || hudPmk > 0)  capState = "PMKID";
+  else if (justGoTargetHadPartial)    capState = "PARTIAL";
+  else if (justGoTargetHadClient)     capState = "CLIENT";
+
+  // NEXT action label
+  const char* nextAct = "LISTEN";
+  if (justGoStage == JustGoStage::SCAN)          nextAct = "SCAN";
+  else if (justGoStage == JustGoStage::COOLDOWN) nextAct = "HOP";
+  else if (justGoMode == AutoMode::Y0INK  && !justGoPostStimulusWindow)
+    nextAct = justGoTargetHadClient ? "STIMULUS" : "LISTEN";
+  else if (justGoMode == AutoMode::Y0INK  && justGoPostStimulusWindow)  nextAct = "RAW";
+  else if (justGoMode == AutoMode::JAMMIT)                              nextAct = "RETRY";
+  else if (justGoMode == AutoMode::RAW)                                 nextAct = "HOP";
+  else if (justGoTargetSucceeded)                                       nextAct = "RAW";
+
+  char s1[22], s2[22], s3[22], s4[22], s5[22], s6[22], s7[22], s8[22], s9[22];
   snprintf(s1, sizeof(s1), "NETS   %d", apCount);
-  snprintf(s2, sizeof(s2), "TGT    %u", (unsigned)justGoTargetCount);
-  snprintf(s3, sizeof(s3), "HS     %d", hs);
-  snprintf(s4, sizeof(s4), "PMK    %d", YoinkEngine::getPmkidCount());
-  snprintf(s5, sizeof(s5), "PKT/s  %d", sniffPps);
-  snprintf(s6, sizeof(s6), "DEAUTH %lu", (unsigned long)((justGoMode == AutoMode::JAMMIT) ? jammitDeauthCount : yoinkDeauthCount));
-  const char* rows[6] = {s1, s2, s3, s4, s5, s6};
-  const uint16_t cols[6] = {TFT_CYAN, TFT_MAGENTA, TFT_GREEN, TFT_YELLOW, TFT_CYAN, TFT_RED};
+  snprintf(s2, sizeof(s2), "TGT    %u/%u", (unsigned)(justGoTargetPos+1), (unsigned)justGoTargetCount);
+  snprintf(s3, sizeof(s3), "HS     %d", hudHs);
+  snprintf(s4, sizeof(s4), "PMK    %d", hudPmk);
+  snprintf(s5, sizeof(s5), "CLNT   %d", hudCl);
+  snprintf(s6, sizeof(s6), "SCORE  %d", hudScore);
+  snprintf(s7, sizeof(s7), "WIN %u/%u", (unsigned)justGoSessionSuccesses, (unsigned)justGoSessionAttempts);
+  // WPS row: show detection state and vulnerability
+  if (!push1tWpsDetected)       snprintf(s8, sizeof(s8), "WPS    --");
+  else if (push1tVulnerable)    snprintf(s8, sizeof(s8), "WPS  VULN!");
+  else if (push1tWpsLocked)     snprintf(s8, sizeof(s8), "WPS  LOCK");
+  else                          snprintf(s8, sizeof(s8), "WPS  SAFE");
+  snprintf(s9, sizeof(s9), "%-7s>%-5s", capState, nextAct);
+
+  const char*    rows[9] = {s1, s2, s3, s4, s5, s6, s7, s8, s9};
+  const uint16_t cols[9] = {TFT_CYAN, TFT_MAGENTA, TFT_GREEN, TFT_YELLOW,
+                             TFT_CYAN, TFT_WHITE, TFT_GREEN,
+                             (uint16_t)(push1tVulnerable ? TFT_RED : (push1tWpsDetected ? TFT_MAGENTA : TFT_DARKGREY)),
+                             TFT_ORANGE};
   int sy = statsY + 12;
-  for (int i = 0; i < 6; ++i) {
+  for (int i = 0; i < 9; ++i) {
     if (sy > statsY + statsH - 10) break;
     tft.setTextColor(cols[i], TFT_BLACK);
     String line = rows[i];
@@ -5253,6 +5584,12 @@ static void drawJustGo() {
   mix((uint32_t)apCount);
   mix((uint32_t)hasTarget);
   mix((uint32_t)lockChannel);
+  mix((uint32_t)justGoTargetSucceeded);
+  mix((uint32_t)justGoTargetHadClient);
+  mix((uint32_t)justGoSessionSuccesses);
+  mix((uint32_t)justGoSessionAttempts);
+  mix((uint32_t)push1tWpsDetected);
+  mix((uint32_t)push1tVulnerable);
   justGoLastRenderSig = sig;
 
   drawBorder();
@@ -5562,6 +5899,144 @@ static void exportThreatDataToSD() {
   Serial.printf("[threat] Threat export stub (buffer removed for LED flash feature)\n");
 }
 
+// ============================================================
+// PUSH1T — WPS Intelligence & Assessment Engine
+// Double entendre: "push it" (WPS Push-Button) + Salt-N-Pepa
+// ============================================================
+
+// Parse WPS TLV attribute block (called from beacon handler, non-blocking).
+static void push1tParseWpsTlv(const uint8_t* data, uint8_t dataLen) {
+  const uint8_t* p   = data;
+  const uint8_t* end = data + dataLen;
+  while (p + 4 <= end) {
+    uint16_t attr = ((uint16_t)p[0] << 8) | p[1];
+    uint16_t alen = ((uint16_t)p[2] << 8) | p[3];
+    p += 4;
+    if (p + alen > end) break;
+    switch (attr) {
+      case 0x104A: // Version
+        if (alen >= 1) push1tWpsVersion = p[0];
+        break;
+      case 0x1057: // AP Setup Locked
+        if (alen >= 1) push1tWpsLocked = (p[0] != 0);
+        break;
+      case 0x1021: // Manufacturer
+        { uint8_t n = (uint8_t)min((uint32_t)(sizeof(push1tManufacturer) - 1), (uint32_t)alen);
+          memcpy(push1tManufacturer, p, n);
+          push1tManufacturer[n] = '\0'; }
+        break;
+      case 0x1023: // Model Name
+        { uint8_t n = (uint8_t)min((uint32_t)(sizeof(push1tDeviceName) - 1), (uint32_t)alen);
+          memcpy(push1tDeviceName, p, n);
+          push1tDeviceName[n] = '\0'; }
+        break;
+    }
+    p += alen;
+  }
+  push1tVulnerable = push1tWpsDetected && !push1tWpsLocked && (push1tWpsVersion == 0x10);
+}
+
+// Called from handleCapturedPacket for every beacon frame while PUSH1T is active.
+// Checks if beacon is from the current target and extracts WPS IE.
+static void push1tHandleBeacon(const uint8_t* frame, uint32_t len) {
+  if (!push1tBssidCached || len < 38) return;
+  // Beacon: addr2 (SA/BSSID) is at offset 10
+  if (memcmp(frame + 10, push1tTargetBssid, 6) != 0) return;
+
+  // Walk tagged parameters — fixed params start at offset 36 in beacons
+  const uint8_t* ie  = frame + 36;
+  const uint8_t* end = frame + len;
+  while (ie + 2 <= end) {
+    uint8_t ie_type = ie[0];
+    uint8_t ie_len  = ie[1];
+    if (ie + 2 + ie_len > end) break;
+    // Vendor Specific (0xDD) with WPS OUI 00:50:F2:04
+    if (ie_type == 0xDD && ie_len >= 4 &&
+        ie[2] == 0x00 && ie[3] == 0x50 && ie[4] == 0xF2 && ie[5] == 0x04) {
+      push1tWpsDetected = true;
+      if (ie_len > 4) push1tParseWpsTlv(ie + 6, ie_len - 4);
+      // Propagate to ApRecord for scoring on subsequent sessions
+      if (hasTarget) {
+        target.wpsEnabled = true;
+        target.wpsLocked  = push1tWpsLocked;
+        target.wpsVersion = push1tWpsVersion;
+      }
+    }
+    ie += 2 + ie_len;
+  }
+}
+
+// Send a minimal 802.11 Probe Request with WPS IE to elicit a Probe Response.
+static void push1tSendProbeRequest() {
+  if (!hasTarget || !push1tBssidCached) return;
+
+  // Minimal WPS IE (39 bytes):
+  //   DD 25: Vendor Specific, len=37
+  //   OUI+type: 00 50 F2 04
+  //   Attributes: Version(1.0) | RequestType(Info) | ConfigMethods(PIN) |
+  //               RFBands(2.4) | AssocState(None) | ConfigError(None)
+  static const uint8_t kWpsIe[] = {
+    0xDD, 0x25,
+    0x00, 0x50, 0xF2, 0x04,
+    0x10, 0x4A, 0x00, 0x01, 0x10,        // Version 1.0
+    0x10, 0x3A, 0x00, 0x01, 0x00,        // Request Type: Enrollee Info
+    0x10, 0x08, 0x00, 0x02, 0x00, 0x08,  // Config Methods: PIN
+    0x10, 0x3C, 0x00, 0x01, 0x01,        // RF Bands: 2.4 GHz
+    0x10, 0x02, 0x00, 0x02, 0x00, 0x00,  // Association State: Not Associated
+    0x10, 0x09, 0x00, 0x02, 0x00, 0x00,  // Config Error: No Error
+    0x10, 0x12, 0x00, 0x02, 0x00, 0x00,  // OS Version: unspecified
+  };
+  // Supported Rates IE
+  static const uint8_t kRatesIe[] = {0x01, 0x08, 0x82, 0x84, 0x8B, 0x96, 0x24, 0x30, 0x48, 0x6C};
+
+  uint8_t ssidLen = (uint8_t)min((size_t)32, target.ssid.length());
+  const char* ssid = target.ssid.c_str();
+  uint8_t dsIe[3] = {0x03, 0x01, (uint8_t)target.channel};
+
+  const size_t frameLen = 24 + 2 + ssidLen + sizeof(kRatesIe) + sizeof(dsIe) + sizeof(kWpsIe);
+  if (frameLen > 220) return;
+
+  uint8_t frame[220] __attribute__((aligned(4)));
+  memset(frame, 0, sizeof(frame));
+
+  // 802.11 Probe Request header
+  frame[0] = 0x40; frame[1] = 0x00; // FC: management, probe request
+  memset(frame + 4, 0xFF, 6);        // DA: broadcast
+  esp_wifi_get_mac(WIFI_IF_AP, frame + 10); // SA: our AP MAC
+  memcpy(frame + 16, push1tTargetBssid, 6); // BSSID: target
+  frame[22] = (uint8_t)((push1tProbeCount & 0x0F) << 4);
+
+  uint8_t* p = frame + 24;
+  *p++ = 0x00; *p++ = ssidLen;
+  memcpy(p, ssid, ssidLen); p += ssidLen;
+  memcpy(p, kRatesIe, sizeof(kRatesIe)); p += sizeof(kRatesIe);
+  memcpy(p, dsIe,     sizeof(dsIe));     p += sizeof(dsIe);
+  memcpy(p, kWpsIe,   sizeof(kWpsIe));   p += sizeof(kWpsIe);
+
+  size_t txLen = (size_t)(p - frame);
+  esp_err_t r = esp_wifi_80211_tx(WIFI_IF_AP, frame, txLen, false);
+  if (r != ESP_OK) esp_wifi_80211_tx(WIFI_IF_STA, frame, txLen, false);
+  push1tProbeCount++;
+}
+
+static void push1tTick() {
+  if (autoMode != AutoMode::PUSH1T) return;
+  const uint32_t now = millis();
+  // Send WPS probe requests every 4 s
+  if (now - push1tLastProbeMs >= 4000U) {
+    push1tLastProbeMs = now;
+    push1tSendProbeRequest();
+    if (push1tWpsDetected) {
+      Serial.printf("[PUSH1T] probe#%lu wps=YES locked=%d vuln=%d ver=0x%02X mfr='%s' dev='%s'\n",
+                    (unsigned long)push1tProbeCount, push1tWpsLocked, push1tVulnerable,
+                    push1tWpsVersion, push1tManufacturer, push1tDeviceName);
+    } else {
+      Serial.printf("[PUSH1T] probe#%lu wps=NO (waiting for beacon)\n",
+                    (unsigned long)push1tProbeCount);
+    }
+  }
+}
+
 static void disengageAutoMode() {
   if (autoMode == AutoMode::NONE) return;
   
@@ -5597,8 +6072,12 @@ static void disengageAutoMode() {
   } else if (autoMode == AutoMode::PROBE_FLOOD || autoMode == AutoMode::DEAUTH_FLOOD) {
     // Stop Bruce attack (PROBE_FLOOD, DEAUTH_FLOOD)
     bruceStopAttack();
+  } else if (autoMode == AutoMode::PUSH1T) {
+    push1tBssidCached = false;
+    Serial.printf("[PUSH1T] stopped probes=%lu wps=%d vuln=%d\n",
+                  (unsigned long)push1tProbeCount, push1tWpsDetected, push1tVulnerable);
   }
-  
+
   // Clear mode
   autoMode = AutoMode::NONE;
 }
@@ -5692,6 +6171,20 @@ static void engageAutoMode(AutoMode mode) {
     // Start broadcast deauth flood
     bruceStartDeauthBroadcast(target.channel, justGoModeDurationMs(AutoMode::DEAUTH_FLOOD));
     Serial.printf("[auto] DEAUTH_FLOOD engaged: ch=%d (broadcast to all)\n", target.channel);
+  } else if (mode == AutoMode::PUSH1T) {
+    // === PUSH1T: WPS beacon detection + active probing ===
+    if (!sniffActive) startSniff();
+    push1tWpsDetected  = false;
+    push1tWpsLocked    = false;
+    push1tWpsVersion   = 0;
+    push1tVulnerable   = false;
+    push1tProbeCount   = 0;
+    push1tLastProbeMs  = 0;
+    push1tManufacturer[0] = '\0';
+    push1tDeviceName[0]   = '\0';
+    push1tBssidCached = macFromString(target.bssid.c_str(), push1tTargetBssid);
+    Serial.printf("[PUSH1T] engaged: target='%s' ch=%d bssidCached=%d\n",
+                  target.ssid.c_str(), target.channel, push1tBssidCached);
   }
 }
 
@@ -11311,45 +11804,255 @@ void drawBruceMenu() {
     drawStatusLine(bruceGetAttackName(), zoneLeft + 3, statusY + 13, TFT_YELLOW);
   }
 
-  // Normalized 3x2 grid with stable spacing.
+  // 4x2 grid: attacks (rows 1-2) + PUSH!T/Set Target (row 3) + Back/Stop (row 4).
   const int cols = 2;
-  const int rows = 3;
+  const int rows = 4;
   const int gapX = compact ? 4 : 8;
-  const int gapY = compact ? 4 : 7;
+  const int gapY = compact ? 3 : 6;
   int gridTop = statusY + statusH + (compact ? 5 : 7);
   // Avoid global top-button render offset that would shift only the first row and cause overlap.
   if (gridTop <= UI_TOP_BUTTON_SHIFT_THRESHOLD_Y) {
     gridTop = UI_TOP_BUTTON_SHIFT_THRESHOLD_Y + 1;
   }
   const int gridBottom = bottom.y - 2;
-  const int gridH = max(60, gridBottom - gridTop);
+  const int gridH = max(80, gridBottom - gridTop);
   const int btnW = max(52, (zoneW - gapX) / cols);
-  const int btnH = max(18, (gridH - (gapY * (rows - 1))) / rows);
+  const int btnH = max(16, (gridH - (gapY * (rows - 1))) / rows);
   const int row1Y = gridTop;
   const int row2Y = row1Y + btnH + gapY;
   const int row3Y = row2Y + btnH + gapY;
+  const int row4Y = row3Y + btnH + gapY;
 
-  // Attack buttons (top 4)
+  // Attack buttons (rows 1-2)
   bruceMenuBtns[0] = {zoneLeft,               row1Y, btnW, btnH, "Deauth Flood"};
   bruceMenuBtns[1] = {zoneLeft + btnW + gapX, row1Y, btnW, btnH, "Beacon Spam"};
   bruceMenuBtns[2] = {zoneLeft,               row2Y, btnW, btnH, "Probe Flood"};
   bruceMenuBtns[3] = {zoneLeft + btnW + gapX, row2Y, btnW, btnH, "Deauth All"};
-  // Set Target and Back/Stop buttons (bottom row)
-  bruceMenuBtns[4] = {zoneLeft,               row3Y, btnW, btnH, "Set Target"};
-  bruceMenuBtns[5] = {zoneLeft + btnW + gapX, row3Y, btnW, btnH,
+  // PUSH!T and Set Target (row 3)
+  bruceMenuBtns[4] = {zoneLeft,               row3Y, btnW, btnH, "PUSH!T"};
+  bruceMenuBtns[5] = {zoneLeft + btnW + gapX, row3Y, btnW, btnH, "Set Target"};
+  // Back/Stop (row 4, full-width)
+  bruceMenuBtns[6] = {zoneLeft,               row4Y, zoneW, btnH,
                       bruceIsAttacking() ? "STOP" : "Back"};
+  bruceMenuBtns[7] = {0, 0, 0, 0, ""};  // unused placeholder
 
   drawButton(bruceMenuBtns[0], TFT_BLACK, 0xFF07, TFT_WHITE);
   drawButton(bruceMenuBtns[1], TFT_BLACK, 0xFF07, TFT_WHITE);
   drawButton(bruceMenuBtns[2], TFT_BLACK, 0xFF07, TFT_WHITE);
   drawButton(bruceMenuBtns[3], TFT_BLACK, 0xF800, TFT_WHITE);
-  drawButton(bruceMenuBtns[4], TFT_BLACK, TFT_NAVY, TFT_WHITE);
-  drawButton(bruceMenuBtns[5], TFT_BLACK,
+  drawButton(bruceMenuBtns[4], TFT_BLACK, TFT_MAGENTA, TFT_WHITE);
+  drawButton(bruceMenuBtns[5], TFT_BLACK, TFT_NAVY,    TFT_WHITE);
+  drawButton(bruceMenuBtns[6], TFT_BLACK,
              bruceIsAttacking() ? 0xFC00 : 0x07E0, TFT_WHITE);
 
   drawBorder();
 }
 
+
+// ============================================================
+//  PUSH!T standalone screen
+// ============================================================
+
+static void drawPush1t() {
+  tft.fillScreen(TFT_BLACK);
+  drawHeader("PUSH!T // WPS INTEL");
+  drawUniversalBackground();
+
+  const UiRect content = computeContentRect();
+  const UiRect bottom  = computeBottomBarRect();
+  const int safeLeft   = uiActionDockSafeLeft();
+
+  // Split content into left panel (stats/status) and right panel (controls)
+  const int gap    = 4;
+  const int rightW = min(120, content.w * 2 / 5);
+  const int leftW  = max(100, min(safeLeft, content.x + content.w) - content.x - rightW - gap);
+  const int leftX  = content.x;
+  const int rightX = leftX + leftW + gap;
+  const int y0     = content.y + 2;
+
+  // ── Target card ──────────────────────────────────────────────────────────
+  const int tgtH = 52;
+  tft.drawRoundRect(leftX, y0, leftW, tgtH, 4, TFT_MAGENTA);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
+  tft.drawString("TARGET", leftX + 4, y0 + 2);
+  if (hasTarget) {
+    String ssid = target.ssid.isEmpty() ? String("(hidden)") : target.ssid;
+    while (ssid.length() > 4 && tft.textWidth(ssid) > leftW - 8) ssid.remove(ssid.length() - 1);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(ssid, leftX + 4, y0 + 13);
+    char row1[40];
+    snprintf(row1, sizeof(row1), "%s  CH:%d  %ddBm", authToStr(target.auth), target.channel, target.rssi);
+    String r1 = row1;
+    while (r1.length() > 4 && tft.textWidth(r1) > leftW - 8) r1.remove(r1.length() - 1);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.drawString(r1, leftX + 4, y0 + 24);
+    String bssid = target.bssid;
+    while (bssid.length() > 4 && tft.textWidth(bssid) > leftW - 8) bssid.remove(bssid.length() - 1);
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.drawString(bssid, leftX + 4, y0 + 38);
+  } else {
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("No target — press SET TGT", leftX + 4, y0 + 22);
+  }
+
+  // ── WPS hero status box ───────────────────────────────────────────────────
+  const int heroY = y0 + tgtH + gap;
+  const int heroH = 44;
+  uint16_t heroCol;
+  const char* heroText;
+  const char* heroSubText;
+  if (!push1tWpsDetected) {
+    heroCol  = TFT_DARKGREY;
+    heroText = "NO WPS DETECTED";
+    heroSubText = "Listening for beacons...";
+  } else if (push1tVulnerable) {
+    heroCol  = TFT_RED;
+    heroText = "!! VULNERABLE !!";
+    heroSubText = "WPS 1.0 - AP Setup Unlocked";
+  } else if (push1tWpsLocked) {
+    heroCol  = TFT_ORANGE;
+    heroText = "WPS LOCKED";
+    heroSubText = "AP Setup Lock active";
+  } else {
+    heroCol  = TFT_MAGENTA;
+    heroText = "WPS DETECTED";
+    heroSubText = push1tWpsVersion == 0x20 ? "WPS 2.0 - Lower risk" : "WPS present";
+  }
+  tft.fillRoundRect(leftX, heroY, leftW, heroH, 4, heroCol);
+  tft.setTextColor(TFT_BLACK, heroCol);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString(heroText,    leftX + leftW / 2, heroY + 14);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_BLACK, heroCol);
+  tft.drawString(heroSubText, leftX + leftW / 2, heroY + 28);
+  tft.setTextDatum(TL_DATUM);
+
+  // ── WPS detail rows ───────────────────────────────────────────────────────
+  const int detY  = heroY + heroH + gap;
+  const int detLH = 10;
+  tft.setTextSize(1);
+
+  auto detRow = [&](int dy, const char* label, const char* val, uint16_t col) {
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.drawString(label, leftX + 2, dy);
+    String v = val;
+    while (v.length() > 1 && tft.textWidth(v) > leftW - 60) v.remove(v.length() - 1);
+    tft.setTextColor(col, TFT_BLACK);
+    tft.drawString(v, leftX + 56, dy);
+  };
+
+  char verBuf[12], mfrBuf[26], devBuf[26];
+  if      (!push1tWpsDetected)       snprintf(verBuf, sizeof(verBuf), "--");
+  else if (push1tWpsVersion == 0x20) snprintf(verBuf, sizeof(verBuf), "2.0");
+  else if (push1tWpsVersion == 0x10) snprintf(verBuf, sizeof(verBuf), "1.0");
+  else                               snprintf(verBuf, sizeof(verBuf), "0x%02X", push1tWpsVersion);
+  snprintf(mfrBuf, sizeof(mfrBuf), "%s", push1tManufacturer[0] ? push1tManufacturer : "--");
+  snprintf(devBuf, sizeof(devBuf), "%s", push1tDeviceName[0]   ? push1tDeviceName   : "--");
+
+  detRow(detY + detLH * 0, "WPS Ver:", verBuf,
+         push1tWpsVersion == 0x10 ? TFT_RED : (push1tWpsDetected ? TFT_YELLOW : TFT_DARKGREY));
+  detRow(detY + detLH * 1, "Locked: ", push1tWpsDetected ? (push1tWpsLocked ? "YES" : "NO") : "--",
+         push1tWpsLocked ? TFT_ORANGE : (push1tWpsDetected ? TFT_GREEN : TFT_DARKGREY));
+  detRow(detY + detLH * 2, "Mfr:    ", mfrBuf, TFT_CYAN);
+  detRow(detY + detLH * 3, "Device: ", devBuf, TFT_CYAN);
+
+  // ── Probe stats ───────────────────────────────────────────────────────────
+  const int statY = detY + detLH * 4 + 3;
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  char probeBuf[48];
+  if (autoMode == AutoMode::PUSH1T) {
+    const uint32_t elapsed = (millis() - push1tLastProbeMs);
+    snprintf(probeBuf, sizeof(probeBuf), "Probes: %lu  Last: %lus ago",
+             (unsigned long)push1tProbeCount, (unsigned long)(elapsed / 1000));
+  } else if (push1tProbeCount > 0) {
+    snprintf(probeBuf, sizeof(probeBuf), "Probes: %lu  (stopped)", (unsigned long)push1tProbeCount);
+  } else {
+    snprintf(probeBuf, sizeof(probeBuf), "Probes: 0  (idle)");
+  }
+  String ps = probeBuf;
+  while (ps.length() > 4 && tft.textWidth(ps) > leftW - 4) ps.remove(ps.length() - 1);
+  tft.drawString(ps, leftX + 2, statY);
+
+  // ── Right-side control stack ─────────────────────────────────────────────
+  const int ctrlGap = gap;
+  const int ctrlH   = 30;
+  const int nBtns   = 4;
+  const int totalCtrlH = nBtns * ctrlH + (nBtns - 1) * ctrlGap;
+  const int ctrlTop = y0 + (content.h - totalCtrlH) / 2;
+
+  const bool engaged = (autoMode == AutoMode::PUSH1T);
+  btnP1tEngage    = {rightX, ctrlTop + 0*(ctrlH+ctrlGap), rightW, ctrlH, engaged ? "STOP" : "ENGAGE"};
+  btnP1tManual    = {rightX, ctrlTop + 1*(ctrlH+ctrlGap), rightW, ctrlH, "PROBE NOW"};
+  btnP1tSetTarget = {rightX, ctrlTop + 2*(ctrlH+ctrlGap), rightW, ctrlH, "SET TGT"};
+  btnP1tBruce     = {rightX, ctrlTop + 3*(ctrlH+ctrlGap), rightW, ctrlH, "Pkt Lab"};
+
+  drawButton(btnP1tEngage,    engaged ? TFT_MAROON    : TFT_DARKGREEN, TFT_RED,     TFT_WHITE);
+  drawButton(btnP1tManual,    TFT_BLACK,               TFT_MAGENTA,    TFT_WHITE);
+  drawButton(btnP1tSetTarget, TFT_NAVY,                TFT_CYAN,       TFT_WHITE);
+  drawButton(btnP1tBruce,     TFT_BLACK,               0xFF07,         TFT_WHITE);
+
+  // ── Bottom bar ────────────────────────────────────────────────────────────
+  btnP1tBack = {bottom.x, bottom.y, bottom.w, bottom.h, "Back"};
+  drawButton(btnP1tBack, TFT_NAVY, TFT_CYAN, TFT_WHITE);
+
+  // Stable render signature
+  uint32_t sig = 2166136261u;
+  auto mix = [&](uint32_t v) { sig ^= v; sig *= 16777619u; };
+  mix((uint32_t)push1tWpsDetected);
+  mix((uint32_t)push1tVulnerable);
+  mix((uint32_t)push1tWpsLocked);
+  mix((uint32_t)push1tWpsVersion);
+  mix((uint32_t)(push1tProbeCount & 0xFF));
+  mix((uint32_t)autoMode);
+  mix((uint32_t)hasTarget);
+  push1tScreenLastSig = sig;
+
+  drawBorder();
+}
+
+// Touch handler for PUSH1T screen
+static void push1tScreenTick_UI(int tx, int ty) {
+  if (screen != ScreenId::PUSH1T_SCREEN) return;
+
+  if (hit(btnP1tBack, tx, ty)) {
+    if (autoMode == AutoMode::PUSH1T) disengageAutoMode();
+    setScreen(ScreenId::HOME);
+    waitTouchRelease();
+    return;
+  }
+  if (hit(btnP1tEngage, tx, ty)) {
+    if (autoMode == AutoMode::PUSH1T) {
+      disengageAutoMode();
+    } else if (hasTarget) {
+      engageAutoMode(AutoMode::PUSH1T);
+    } else {
+      Serial.println("[PUSH1T] No target selected");
+    }
+    drawPush1t();
+    waitTouchRelease();
+    return;
+  }
+  if (hit(btnP1tManual, tx, ty)) {
+    // Fire one probe immediately, regardless of engage state
+    push1tSendProbeRequest();
+    drawPush1t();
+    waitTouchRelease();
+    return;
+  }
+  if (hit(btnP1tSetTarget, tx, ty)) {
+    setScreen(ScreenId::WIFI_SCAN);
+    waitTouchRelease();
+    return;
+  }
+  if (hit(btnP1tBruce, tx, ty)) {
+    setScreen(ScreenId::BRUCE_MENU);
+    waitTouchRelease();
+    return;
+  }
+  waitTouchRelease();
+}
 
 // ============================================================
 //  Bruce Monitor: capture helpers
@@ -11889,7 +12592,7 @@ static void bruceMenuTick_UI(int tx, int ty) {
 
   if (bruceIsAttacking()) {
     // Only allow STOP button when attacking
-    if (hit(bruceMenuBtns[5], tx, ty)) {
+    if (hit(bruceMenuBtns[6], tx, ty)) {
       Serial.println("[BRUCE] STOP ATTACK pressed");
       bruceStopAttack();
       drawBruceMenu();
@@ -11900,8 +12603,16 @@ static void bruceMenuTick_UI(int tx, int ty) {
     return;
   }
 
-  // Check Set Target button
+  // Check PUSH!T button — no Bruce target needed
   if (hit(bruceMenuBtns[4], tx, ty)) {
+    Serial.println("[ui] Packet Lab -> PUSH1T");
+    setScreen(ScreenId::PUSH1T_SCREEN);
+    waitTouchRelease();
+    return;
+  }
+
+  // Check Set Target button
+  if (hit(bruceMenuBtns[5], tx, ty)) {
     Serial.println("[BRUCE] Set Target pressed");
     setScreen(ScreenId::BRUCE_SET_TARGET);
     waitTouchRelease();
@@ -11909,7 +12620,7 @@ static void bruceMenuTick_UI(int tx, int ty) {
   }
 
   // Check Back button
-  if (hit(bruceMenuBtns[5], tx, ty)) {
+  if (hit(bruceMenuBtns[6], tx, ty)) {
     Serial.println("[BRUCE] Back to Home");
     setScreen(ScreenId::HOME);
     waitTouchRelease();
@@ -12351,6 +13062,7 @@ static void setScreen(ScreenId next) {
       if (reconHostSelected >= reconScanner.hostCount()) reconHostSelected = -1;
       drawRecon();
       break;
+    case ScreenId::PUSH1T_SCREEN:     push1tProbeCount = 0; push1tLastProbeMs = 0; drawPush1t(); break;
     case ScreenId::BRUCE_MENU:        drawBruceMenu(); break;
     case ScreenId::BRUCE_SET_TARGET:  bruceTargetScroll = 0; drawBruceSetTarget(); break;
     case ScreenId::SCOPE_GRAPH:
@@ -12414,6 +13126,7 @@ static void tdisplayRedrawCurrentScreen() {
     case ScreenId::RECON_HOME:          drawReconHome(); break;
     case ScreenId::WARDRIVE:            drawWardrive(); break;
     case ScreenId::ABOUT:               drawAbout(); break;
+    case ScreenId::PUSH1T_SCREEN:       drawPush1t(); break;
     case ScreenId::BRUCE_MENU:          drawBruceMenu(); break;
     case ScreenId::BRUCE_MONITOR:       drawBruceMonitor(); break;
     case ScreenId::BRUCE_SET_TARGET:    drawBruceSetTarget(); break;
@@ -13038,8 +13751,25 @@ void loop() {
   // perform periodic auto-mode activities
   jammitModeTick();
   yoinkModeTick();
+  push1tTick();
   justGoTick();
   
+  // Refresh PUSH1T screen when active and state has changed
+  if (screen == ScreenId::PUSH1T_SCREEN) {
+    uint32_t sig = 2166136261u;
+    auto mix = [&](uint32_t v) { sig ^= v; sig *= 16777619u; };
+    mix((uint32_t)push1tWpsDetected);
+    mix((uint32_t)push1tVulnerable);
+    mix((uint32_t)push1tWpsLocked);
+    mix((uint32_t)push1tWpsVersion);
+    mix((uint32_t)(push1tProbeCount & 0xFF));
+    mix((uint32_t)autoMode);
+    mix((uint32_t)hasTarget);
+    if (sig != push1tScreenLastSig) {
+      drawPush1t();
+    }
+  }
+
   // Refresh Just Go display when active if console has new content or state changed
   if (screen == ScreenId::JUST_GO) {
     uint32_t sig = 2166136261u;
@@ -13055,6 +13785,12 @@ void loop() {
     mix((uint32_t)apCount);
     mix((uint32_t)hasTarget);
     mix((uint32_t)lockChannel);
+    mix((uint32_t)justGoTargetSucceeded);
+    mix((uint32_t)justGoTargetHadClient);
+    mix((uint32_t)justGoSessionSuccesses);
+    mix((uint32_t)justGoSessionAttempts);
+    mix((uint32_t)push1tWpsDetected);
+    mix((uint32_t)push1tVulnerable);
     if (sig != justGoLastRenderSig) {
       drawJustGo();
       justGoLastConsoleLineCount = monitorLineCount;
@@ -13185,7 +13921,7 @@ void loop() {
           setScreen(ScreenId::PORT_SCANNER); // was ABOUT - temp Net Scan shortcut
           break;
         case 7:
-          Serial.println("[ui] Home -> BRUCE_MENU");
+          Serial.println("[ui] Home -> Packet Lab");
           setScreen(ScreenId::BRUCE_MENU);
           break;
         case 8:
@@ -13430,6 +14166,12 @@ void loop() {
   if (screen == ScreenId::ABOUT || screen == ScreenId::TARGETS_PLACEHOLDER) {
     if (hit(btnBack, tx, ty)) setScreen(ScreenId::HOME);
     waitTouchRelease(); return;
+  }
+
+  // PUSH1T screen
+  if (screen == ScreenId::PUSH1T_SCREEN) {
+    push1tScreenTick_UI(tx, ty);
+    return;
   }
 
   // BRUCE_MENU
