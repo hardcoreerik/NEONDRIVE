@@ -82,7 +82,10 @@ using fs::File;
 // Touch:    Goodix GT911 multi-touch (I²C), read via M5GFX getTouch().
 // No SPI TFT bus; backlighting and LED are managed internally by M5GFX/M5Unified.
 static constexpr bool BOARD_HAS_TOUCH = true;
-static constexpr bool BOARD_HAS_SD    = true;
+// SD disabled: all SD pins are -1, so sdSpi.begin(-1,-1,-1,-1) falls back to
+// ESP32-P4 default MOSI=GPIO32 which collides with GT911 I²C SCL (also GPIO32).
+// Re-enable once correct Tab5 SD SPI pins are identified.
+static constexpr bool BOARD_HAS_SD    = false;
 static constexpr bool TFT_USES_SPI_BUS = false;
 static constexpr int BOARD_TFT_ROTATION = 1;
 static constexpr bool BOARD_TFT_INVERT = false;
@@ -650,8 +653,11 @@ static bool touch_read_point(TouchState& s) {
 #if defined(NEONDRIVE_TARGET_M5TAB5)
   // M5.update() is called at the top of loop() — getDetail() is already fresh.
   // M5GFX applies the display rotation → touch coordinate mapping automatically.
-  auto td = M5.Touch.getDetail();
-  if (td.isPressed()) {
+  // NOTE: SD card must NOT be mounted with default SPI pins on Tab5 — the
+  // default MOSI (GPIO32) aliases the GT911 I²C SCL, killing touch. Keep
+  // BOARD_HAS_SD=false until correct Tab5 SD SPI pins are mapped.
+  auto td = M5.Touch.getDetail(0);
+  if (td.isPressed() || td.wasPressed()) {
     s.down = true;
     s.x    = (int)td.x;
     s.y    = (int)td.y;
