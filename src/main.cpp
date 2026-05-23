@@ -76,15 +76,51 @@ using fs::File;
 */
 
 #if defined(NEONDRIVE_TARGET_M5TAB5)
+// ═══════════════════════════════════════════════════════════════════════════
 // M5Stack Tab5 — ESP32-P4 (dual-core RISC-V @ 400 MHz, 32 MB PSRAM, 16 MB Flash)
 //               + ESP32-C6 co-processor (WiFi 6 / BT 5).
-// Display:  5" 1280×720 IPS MIPI-DSI, driver auto-configured by M5GFX.
-// Touch:    Goodix GT911 multi-touch (I²C), read via M5GFX getTouch().
-// No SPI TFT bus; backlighting and LED are managed internally by M5GFX/M5Unified.
+// Display:  5" 1280×720 IPS MIPI-DSI, driven by M5GFX (M5.Lcd aliased as tft).
+// Touch:    Goodix GT911 (I²C: SDA=GPIO31, SCL=GPIO32), owned by M5GFX.
+//
+// ── TOUCH — HOW IT WORKS (read before changing anything) ─────────────────
+//
+//  1. M5.begin() in setup() is the ONLY touch initialiser needed.
+//     It runs the full PI4IOE I/O-expander reset sequence (8-bit OUT_SET
+//     register writes), probes the GT911 / ST7123, and wires the coordinate
+//     affine transform to match the display rotation.  Nothing else is needed.
+//
+//  2. M5.update() in loop() pumps the GT911 state machine each frame.
+//
+//  3. M5.Touch.getDetail(0) returns the current touch point.
+//     Check isPressed() || wasPressed() for a reliable tap event.
+//
+// ── TOUCH — WHAT BREAKS IT ───────────────────────────────────────────────
+//
+//  ⚠ CRITICAL — SD CARD PIN COLLISION:
+//    BOARD_HAS_SD MUST remain false until real SD SPI pins are mapped.
+//    Calling sdSpi.begin(-1,-1,-1,-1) causes the ESP32-P4 SPI driver to
+//    fall back to the default VSPI bus, assigning MOSI → GPIO32.
+//    GPIO32 is the GT911 I²C SCL.  SPI claims the pin; I²C dies silently;
+//    touch reports count=0 / x=-1 / y=-1 for the entire session even though
+//    M5.Touch.isEnabled() still returns true (it was true before SD init ran).
+//
+//    Boot-time verification — GPIO32 must appear as I2C_MASTER_SCL, not
+//    SPI_MASTER_MOSI, in the GPIO report printed after setup().
+//
+//  ✗ Do NOT call M5.Touch.begin() manually — M5GFX already ran it.
+//  ✗ Do NOT pulse the PI4IOE expander manually — M5GFX uses a full 8-bit
+//    OUT_SET write; bit-banging leaves LCD-reset lines floating.
+//  ✗ Do NOT call tft.setRotation() more than once — the first post-begin()
+//    call updates the touch affine; a second call drifts display vs touch.
+//  ✗ Do NOT add tabTouchRecovery / tabForceTouchInit scaffolding — all prior
+//    attempts failed because M5GFX owns the hardware at a lower level.
+//
+//  See CLAUDE.md §"M5Stack Tab5 — Touch Implementation" for the full story.
+// ═══════════════════════════════════════════════════════════════════════════
 static constexpr bool BOARD_HAS_TOUCH = true;
-// SD disabled: all SD pins are -1, so sdSpi.begin(-1,-1,-1,-1) falls back to
-// ESP32-P4 default MOSI=GPIO32 which collides with GT911 I²C SCL (also GPIO32).
-// Re-enable once correct Tab5 SD SPI pins are identified.
+// BOARD_HAS_SD = false — see critical warning above.
+// SD is physically present (SPI3) but must stay disabled until Tab5 SD SPI
+// pins are verified from schematic so they don't alias the GT911 I²C bus.
 static constexpr bool BOARD_HAS_SD    = false;
 static constexpr bool TFT_USES_SPI_BUS = false;
 static constexpr int BOARD_TFT_ROTATION = 1;
