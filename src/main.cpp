@@ -3704,6 +3704,21 @@ static bool      specterGhostInFlight  = false;
 static bool      specterAssocSent      = false;
 static uint32_t  specterScreenLastSig  = 0;
 
+// SP3CTER event log ring buffer (displayed on screen)
+struct SpecterLogEntry { char text[34]; uint16_t color; };
+static constexpr uint8_t SPECTER_LOG_MAX = 8;
+static SpecterLogEntry specterEventLog[SPECTER_LOG_MAX];
+static uint8_t specterLogHead  = 0;
+static uint8_t specterLogCount = 0;
+
+static void specterLogAdd(const char* msg, uint16_t col = 0xFFFF) {
+  strncpy(specterEventLog[specterLogHead].text, msg, 33);
+  specterEventLog[specterLogHead].text[33] = '\0';
+  specterEventLog[specterLogHead].color = col;
+  specterLogHead  = (specterLogHead  + 1) % SPECTER_LOG_MAX;
+  if (specterLogCount < SPECTER_LOG_MAX) specterLogCount++;
+}
+
 // Just Go adaptive feedback state
 static bool justGoY0inkExtendedOnce = false;
 static bool justGoPostStimulusWindow = false;
@@ -6222,6 +6237,13 @@ static void specterAddClient(const uint8_t* mac) {
   if ((mac[0] & 0x01) != 0) return; // skip multicast
   for (uint8_t i = 0; i < specterClientCount; i++)
     if (memcmp(specterClientMacs[i], mac, 6) == 0) return;
+  // Log new client discovery (yellow, only first 8 to avoid spam)
+  if (specterClientCount < 8) {
+    char logbuf[34];
+    snprintf(logbuf, sizeof(logbuf), "? Client %02x:%02x:%02x",
+             mac[3], mac[4], mac[5]);
+    specterLogAdd(logbuf, 0xFFE0);  // yellow
+  }
   if (specterClientCount < 8) memcpy(specterClientMacs[specterClientCount++], mac, 6);
 }
 
@@ -6273,6 +6295,15 @@ static void specterHandleEapol(const uint8_t* frame, uint32_t len) {
   else if (msg == 3) t->m3 = true;
   else if (msg == 4) t->m4 = true;
 
+  // Log EAPOL message (cyan for M1/M3 from AP, white for M2/M4 from STA)
+  {
+    char logbuf[34];
+    const char* mname = msg==1?"M1":msg==2?"M2":msg==3?"M3":"M4";
+    snprintf(logbuf, sizeof(logbuf), "%s %02x:%02x:%02x",
+             mname, staMac[3], staMac[4], staMac[5]);
+    specterLogAdd(logbuf, (msg==1||msg==3) ? 0x07FF : 0xFFFF);  // cyan/white
+  }
+
   // On M1: attempt PMKID extraction
   if (msg == 1 && specterPmkidCount < SPECTER_PMKID_MAX) {
     uint8_t pmkid[16];
@@ -6287,6 +6318,9 @@ static void specterHandleEapol(const uint8_t* frame, uint32_t len) {
         memcpy(p.apMac,  apMac,  6);
         memcpy(p.staMac, staMac, 6);
         specterWriteHc22000();
+        char logbuf[34];
+        snprintf(logbuf, sizeof(logbuf), "! PMKID #%u CAPTURED", specterPmkidCount);
+        specterLogAdd(logbuf, 0x07E0);  // green
         Serial.printf("[SP3CTER] PMKID #%d captured! %02x%02x%02x%02x...\n",
                       specterPmkidCount, pmkid[0],pmkid[1],pmkid[2],pmkid[3]);
       }
@@ -6340,6 +6374,10 @@ static void specterSendGhostAuth() {
   memcpy(auth + 10, specterFakeStaMac, 6);
   memcpy(auth + 16, bssid,             6);
   esp_wifi_80211_tx(WIFI_IF_AP, auth, sizeof(auth), false);
+  // Log ghost event (magenta)
+  char ghostlog[34];
+  snprintf(ghostlog, sizeof(ghostlog), "> Ghost #%lu auth sent", (unsigned long)(specterGhostCount+1));
+  specterLogAdd(ghostlog, 0xF81F);  // magenta
 }
 
 static void specterSendGhostAssoc() {
@@ -6524,7 +6562,15 @@ static void engageAutoMode(AutoMode mode) {
     memset(specterPmkids,    0, sizeof(specterPmkids));
     memset(specterHsTracks,  0, sizeof(specterHsTracks));
     memset(specterClientMacs,0, sizeof(specterClientMacs));
+    specterLogHead  = 0;
+    specterLogCount = 0;
+    memset(specterEventLog, 0, sizeof(specterEventLog));
     specterRandomizeSta();
+    {
+      char logbuf[34];
+      snprintf(logbuf, sizeof(logbuf), "Session started CH:%d", target.channel);
+      specterLogAdd(logbuf, 0x07FF);  // cyan
+    }
     Serial.printf("[SP3CTER] engaged: target='%s' ch=%d\n",
                   target.ssid.c_str(), target.channel);
   } else if (mode == AutoMode::SCOPE) {
@@ -12466,130 +12512,329 @@ static void push1tScreenTick_UI(int tx, int ty) {
 
 static void drawSpecter() {
   tft.fillScreen(TFT_BLACK);
-  drawHeader("SP3CTER // GHOST PMKID");
+  drawHeader("NEONDRIVE :: SP3CTER");
   drawUniversalBackground();
 
-  const UiRect content = computeContentRect();
   const UiRect bottom  = computeBottomBarRect();
-  const int safeLeft   = uiActionDockSafeLeft();
-  const int gap        = 4;
-  const int rightW     = min(110, content.w * 2 / 5);
-  const int leftW      = max(100, min(safeLeft, content.x + content.w) - content.x - rightW - gap);
-  const int leftX      = content.x;
-  const int rightX     = leftX + leftW + gap;
-  const int y0         = content.y + 2;
+  const int    cY      = computeContentRect().y;  // top of content area
+  const int    cH      = bottom.y - cY - 2;       // height of content area
+  const int    mL      = UI_SAFE_MARGIN;           // left margin
+  const int    mR      = UI_SAFE_MARGIN;           // right margin
+  const int    scrW    = tft.width();
+  const int    usable  = scrW - mL - mR;          // total usable width
+  const int    colGap  = 5;
+
+  // Three columns: Left (target + ghost) | Center (PMKID + log) | Right (clients + HS)
+  const int lW = max(100, usable * 28 / 100);          // ~28%
+  const int rW = max(90,  usable * 32 / 100);          // ~32%
+  const int cW = usable - lW - rW - colGap * 2;        // remainder
+  const int lX = mL;
+  const int cX = lX + lW + colGap;
+  const int rX = cX + cW + colGap;
+
+  const bool engaged = (autoMode == AutoMode::SP3CTER);
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
 
-  // ── Target card ──────────────────────────────────────────────────────────
-  const int tgtH = 48;
-  tft.drawRoundRect(leftX, y0, leftW, tgtH, 4, TFT_CYAN);
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString("TARGET", leftX + 4, y0 + 2);
+  // ═══════════════════════════════════════════════════════════════
+  //  LEFT COLUMN — Selected Target + Ghost Status + HC path
+  // ═══════════════════════════════════════════════════════════════
+
+  // ── Target card ──────────────────────────────────────────────
+  const int tgtCardH = min(90, cH * 38 / 100);
+  tft.drawRoundRect(lX, cY, lW, tgtCardH, 4, 0x07FF);  // cyan border
+  tft.setTextColor(0x07FF, TFT_BLACK);
+  tft.drawString("SELECTED TARGET", lX + 4, cY + 3);
+  tft.drawFastHLine(lX + 1, cY + 12, lW - 2, 0x07FF);
+
   if (hasTarget) {
     String ssid = target.ssid.isEmpty() ? String("(hidden)") : target.ssid;
-    while (ssid.length() > 4 && tft.textWidth(ssid) > leftW - 8) ssid.remove(ssid.length()-1);
+    while (ssid.length() > 4 && tft.textWidth(ssid.c_str()) > lW - 8)
+      ssid.remove(ssid.length() - 1);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString(ssid, leftX + 4, y0 + 13);
-    char r1[48]; snprintf(r1,sizeof(r1),"%s  CH:%d  %ddBm", authToStr(target.auth), target.channel, target.rssi);
-    String rs = r1; while(rs.length()>4 && tft.textWidth(rs)>leftW-8) rs.remove(rs.length()-1);
-    tft.setTextColor(TFT_CYAN, TFT_BLACK); tft.drawString(rs, leftX+4, y0+24);
-    String bssid = target.bssid;
-    while(bssid.length()>4 && tft.textWidth(bssid)>leftW-8) bssid.remove(bssid.length()-1);
-    tft.setTextColor(TFT_DARKGREY, TFT_BLACK); tft.drawString(bssid, leftX+4, y0+36);
+    tft.drawString(ssid.c_str(), lX + 4, cY + 15);
+
+    // Lock icon if encrypted
+    if (target.auth != WIFI_AUTH_OPEN) {
+      tft.setTextColor(0x07E0, TFT_BLACK);
+      tft.drawString("[ENC]", lX + lW - 32, cY + 15);
+    }
+
+    char bssidBuf[20];
+    strncpy(bssidBuf, target.bssid.c_str(), 19);
+    tft.setTextColor(0x7BEF, TFT_BLACK);
+    tft.drawString(bssidBuf, lX + 4, cY + 27);
+
+    char chRssi[24];
+    snprintf(chRssi, sizeof(chRssi), "CH:%-3d  %d dBm", target.channel, target.rssi);
+    tft.setTextColor(0x07FF, TFT_BLACK);
+    tft.drawString(chRssi, lX + 4, cY + 39);
+
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(authToStr(target.auth), lX + 4, cY + 51);
+
+    // Vendor / Auth short
+    char secBuf[22];
+    snprintf(secBuf, sizeof(secBuf), "RSSI: %d dBm", target.rssi);
+    tft.setTextColor(0x7BEF, TFT_BLACK);
+    tft.drawString(secBuf, lX + 4, cY + 63);
+
   } else {
     tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.drawString("No target — press SET TGT", leftX+4, y0+20);
+    tft.drawString("No target set", lX + 4, cY + 22);
+    tft.setTextColor(0x7BEF, TFT_BLACK);
+    tft.drawString("Press SET TGT below", lX + 4, cY + 34);
   }
 
-  // ── PMKID hero row ────────────────────────────────────────────────────────
-  const int pmkidY = y0 + tgtH + gap;
-  const int pmkidH = 26;
-  uint16_t pmkCol = specterPmkidCount > 0 ? TFT_GREEN : TFT_DARKGREY;
-  tft.fillRoundRect(leftX, pmkidY, leftW, pmkidH, 3, pmkCol);
-  tft.setTextColor(TFT_BLACK, pmkCol);
-  tft.setTextDatum(MC_DATUM);
-  char pmkTitle[32];
-  snprintf(pmkTitle, sizeof(pmkTitle), "PMKID  %u collected", specterPmkidCount);
-  tft.drawString(pmkTitle, leftX + leftW/2, pmkidY + 8);
-  // Show first PMKID preview
-  if (specterPmkidCount > 0) {
-    char prev[24];
-    const uint8_t* p = specterPmkids[0].pmkid;
-    snprintf(prev, sizeof(prev), "%02x%02x%02x%02x %02x%02x%02x%02x...", p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7]);
-    tft.drawString(prev, leftX + leftW/2, pmkidY + 18);
+  // ── Ghost Status panel ────────────────────────────────────────
+  const int ghostY = cY + tgtCardH + 5;
+  const int ghostH = min(58, cH * 24 / 100);
+  tft.drawRoundRect(lX, ghostY, lW, ghostH, 3, 0xF81F);  // magenta border
+  tft.setTextColor(0xF81F, TFT_BLACK);
+  tft.drawString("GHOST TRIGGER", lX + 4, ghostY + 3);
+  tft.drawFastHLine(lX + 1, ghostY + 12, lW - 2, 0xF81F);
+
+  char ghostCtr[28];
+  snprintf(ghostCtr, sizeof(ghostCtr), "Sent: %lu", (unsigned long)specterGhostCount);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(ghostCtr, lX + 4, ghostY + 16);
+
+  const char* ghostStatus;
+  uint16_t ghostStatusCol;
+  if (!engaged) {
+    ghostStatus = "IDLE (not engaged)";
+    ghostStatusCol = 0x7BEF;
+  } else if (specterGhostInFlight && !specterAssocSent) {
+    ghostStatus = "FIRING: auth sent";
+    ghostStatusCol = 0xF81F;
+  } else if (specterGhostInFlight && specterAssocSent) {
+    ghostStatus = "FIRING: assoc sent";
+    ghostStatusCol = 0xF81F;
+  } else {
+    const uint32_t nextMs = 8000 - min(8000UL, (unsigned long)(millis() - specterLastGhostMs));
+    char nbuf[28]; snprintf(nbuf, sizeof(nbuf), "Next in %lus", (unsigned long)(nextMs / 1000));
+    ghostStatus = nbuf;
+    ghostStatusCol = 0x07FF;
+    tft.setTextColor(ghostStatusCol, TFT_BLACK);
+    tft.drawString(ghostStatus, lX + 4, ghostY + 28);
+    ghostStatus = nullptr;  // drawn inline above
   }
+  if (ghostStatus) {
+    tft.setTextColor(ghostStatusCol, TFT_BLACK);
+    tft.drawString(ghostStatus, lX + 4, ghostY + 28);
+  }
+
+  // Fake STA MAC
+  char fakeMAC[22];
+  snprintf(fakeMAC, sizeof(fakeMAC), "%02x:%02x:%02x:%02x:%02x:%02x",
+           specterFakeStaMac[0], specterFakeStaMac[1], specterFakeStaMac[2],
+           specterFakeStaMac[3], specterFakeStaMac[4], specterFakeStaMac[5]);
+  tft.setTextColor(0x7BEF, TFT_BLACK);
+  tft.drawString(fakeMAC, lX + 4, ghostY + 40);
+
+  // ── hc22000 status ───────────────────────────────────────────
+  const int hcY = ghostY + ghostH + 5;
+  if (specterPmkidCount > 0 && captureDir[0]) {
+    tft.setTextColor(0x07E0, TFT_BLACK);
+    tft.drawString("HC22000:", lX + 4, hcY);
+    char hcPath[60];
+    snprintf(hcPath, sizeof(hcPath), "%s/specter.hc", captureDir);
+    String hcl = hcPath;
+    while (hcl.length() > 4 && tft.textWidth(hcl.c_str()) > lW - 4)
+      hcl.remove(hcl.length() - 1);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(hcl.c_str(), lX + 4, hcY + 11);
+    char frameBuf[24];
+    snprintf(frameBuf, sizeof(frameBuf), "Frames: %u PMKIDs", specterPmkidCount);
+    tft.setTextColor(0x07E0, TFT_BLACK);
+    tft.drawString(frameBuf, lX + 4, hcY + 22);
+  } else {
+    tft.setTextColor(0x7BEF, TFT_BLACK);
+    tft.drawString("No PMKIDs captured yet", lX + 4, hcY);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  CENTER COLUMN — PMKID Hero + Live Log
+  // ═══════════════════════════════════════════════════════════════
+
+  // ── PMKID harvest hero ────────────────────────────────────────
+  const int heroSectionH = cH * 42 / 100;
+  tft.drawRoundRect(cX, cY, cW, heroSectionH, 4, 0x07E0);  // green border
+  tft.setTextColor(0x07E0, TFT_BLACK);
+  tft.drawString("PMKID HARVEST", cX + 4, cY + 3);
+  tft.drawFastHLine(cX + 1, cY + 12, cW - 2, 0x07E0);
+
+  // Big PMKID count using font 6 (7-seg style)
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextFont(6);
+  tft.setTextSize(1);
+  tft.setTextColor(specterPmkidCount > 0 ? 0x07E0 : 0x39C7, TFT_BLACK);
+  char pmkBig[12];
+  snprintf(pmkBig, sizeof(pmkBig), "%06lu", (unsigned long)specterPmkidCount);
+  tft.drawString(pmkBig, cX + cW / 2, cY + 14 + 24);  // 24px = ~half font height
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  tft.setTextColor(specterPmkidCount > 0 ? 0x07E0 : 0x7BEF, TFT_BLACK);
+  tft.drawString("PMKIDs COLLECTED", cX + cW / 2, cY + 14 + 52);
   tft.setTextDatum(TL_DATUM);
 
-  // ── Handshake completeness ────────────────────────────────────────────────
-  const int hsY = pmkidY + pmkidH + gap;
-  const int hsRowH = 9;
-  const int hsRows = min((int)specterHsCount, 4);
-  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString("CLIENT           M1  M2  M3  M4", leftX + 2, hsY);
-  for (int i = 0; i < hsRows; i++) {
+  // First PMKID preview (if any)
+  if (specterPmkidCount > 0) {
+    const uint8_t* p0 = specterPmkids[0].pmkid;
+    char prev[34];
+    snprintf(prev, sizeof(prev), "%02x%02x%02x%02x%02x%02x%02x%02x...",
+             p0[0],p0[1],p0[2],p0[3],p0[4],p0[5],p0[6],p0[7]);
+    tft.setTextColor(0x07E0, TFT_BLACK);
+    tft.drawString(prev, cX + 4, cY + 14 + 62);
+  }
+
+  // ── Live log ──────────────────────────────────────────────────
+  const int logY = cY + heroSectionH + 5;
+  const int logH = bottom.y - logY - 4;
+  tft.drawRoundRect(cX, logY, cW, logH, 3, 0xFFE0);  // yellow border
+  tft.setTextColor(0xFFE0, TFT_BLACK);
+  tft.drawString("LIVE LOG", cX + 4, logY + 3);
+  tft.drawFastHLine(cX + 1, logY + 12, cW - 2, 0xFFE0);
+
+  // Draw log entries newest-first from the ring, oldest at bottom
+  const int logLineH = 9;
+  const int logLinesVisible = max(1, (logH - 15) / logLineH);
+  const int logStart = logY + 15;
+  // Iterate from newest to oldest, draw top-down
+  const int logTotal = min((int)specterLogCount, logLinesVisible);
+  for (int i = 0; i < logTotal; i++) {
+    // Entry index (newest=0 means head-1, oldest=logTotal-1)
+    int idx = ((int)specterLogHead - 1 - i + SPECTER_LOG_MAX) % SPECTER_LOG_MAX;
+    tft.setTextColor(specterEventLog[idx].color, TFT_BLACK);
+    // Clip text to column width
+    String line = specterEventLog[idx].text;
+    while (line.length() > 2 && tft.textWidth(line.c_str()) > cW - 6)
+      line.remove(line.length() - 1);
+    tft.drawString(line.c_str(), cX + 4, logStart + i * logLineH);
+  }
+  if (specterLogCount == 0) {
+    tft.setTextColor(0x7BEF, TFT_BLACK);
+    tft.drawString("Waiting for frames...", cX + 4, logStart);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  RIGHT COLUMN — Clients Seen + Handshake Completeness Table
+  // ═══════════════════════════════════════════════════════════════
+
+  const int clientSectionH = cH * 40 / 100;
+  tft.drawRoundRect(rX, cY, rW, clientSectionH, 4, 0x07FF);  // cyan border
+  char clientHdr[28];
+  snprintf(clientHdr, sizeof(clientHdr), "CLIENTS SEEN   %u", specterClientCount);
+  tft.setTextColor(0x07FF, TFT_BLACK);
+  tft.drawString(clientHdr, rX + 4, cY + 3);
+  tft.drawFastHLine(rX + 1, cY + 12, rW - 2, 0x07FF);
+
+  // Client MAC list
+  const int clRowH = 10;
+  const int clVisible = max(1, (clientSectionH - 16) / clRowH);
+  for (int i = 0; i < min((int)specterClientCount, clVisible); i++) {
+    const uint8_t* m = specterClientMacs[i];
+    char macBuf[22];
+    snprintf(macBuf, sizeof(macBuf), "%02x:%02x:%02x:%02x:%02x:%02x",
+             m[0],m[1],m[2],m[3],m[4],m[5]);
+    // Check if this client has a PMKID
+    bool hasPmkid = false;
+    for (uint8_t p = 0; p < specterPmkidCount; p++)
+      if (memcmp(specterPmkids[p].staMac, m, 6) == 0) { hasPmkid = true; break; }
+    tft.setTextColor(hasPmkid ? 0x07E0 : TFT_WHITE, TFT_BLACK);
+    String ms = macBuf;
+    while (ms.length() > 4 && tft.textWidth(ms.c_str()) > rW - 6) ms.remove(ms.length() - 1);
+    tft.drawString(ms.c_str(), rX + 4, cY + 15 + i * clRowH);
+  }
+  if (specterClientCount == 0) {
+    tft.setTextColor(0x7BEF, TFT_BLACK);
+    tft.drawString("No clients yet", rX + 4, cY + 18);
+  }
+
+  // ── Handshake Completeness Table ─────────────────────────────
+  const int hsY = cY + clientSectionH + 5;
+  const int hsH = bottom.y - hsY - 4;
+  tft.drawRoundRect(rX, hsY, rW, hsH, 3, 0xF800);  // red border (urgency)
+  tft.setTextColor(0xFFE0, TFT_BLACK);
+  tft.drawString("HS COMPLETENESS", rX + 4, hsY + 3);
+  tft.drawFastHLine(rX + 1, hsY + 12, rW - 2, 0x7BEF);
+
+  // Column header
+  const int hsTblX  = rX + 4;
+  const int hsTblY  = hsY + 15;
+  const int hsColW  = (rW - 8) / 6;  // 6 cols: MAC short, M1 M2 M3 M4 P
+  tft.setTextColor(0x7BEF, TFT_BLACK);
+  tft.drawString("CLIENT", hsTblX,              hsTblY);
+  tft.drawString("M1",     hsTblX + hsColW * 2, hsTblY);
+  tft.drawString("M2",     hsTblX + hsColW * 3, hsTblY);
+  tft.drawString("M3",     hsTblX + hsColW * 4, hsTblY);
+  tft.drawString("M4",     hsTblX + hsColW * 5, hsTblY);
+
+  const int hsRowH2   = 10;
+  const int hsVisible = max(1, (hsH - 26) / hsRowH2);
+  for (int i = 0; i < min((int)specterHsCount, hsVisible); i++) {
     const SpecterHsTrack& t = specterHsTracks[i];
-    char mac[10]; snprintf(mac, sizeof(mac), "%02x:%02x:%02x", t.staMac[3], t.staMac[4], t.staMac[5]);
+    int ry = hsTblY + 10 + i * hsRowH2;
+    char shortMac[10];
+    snprintf(shortMac, sizeof(shortMac), "%02x:%02x", t.staMac[4], t.staMac[5]);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString(mac, leftX + 2, hsY + 10 + i * hsRowH);
-    auto dot = [&](int col, bool v) {
-      tft.setTextColor(v ? TFT_GREEN : TFT_DARKGREY, TFT_BLACK);
-      tft.drawString(v ? "+" : "-", leftX + col, hsY + 10 + i * hsRowH);
+    tft.drawString(shortMac, hsTblX, ry);
+
+    auto indicator = [&](int xOff, bool v) {
+      if (v) {
+        tft.setTextColor(0x07E0, TFT_BLACK);
+        tft.drawString("\x18", hsTblX + xOff, ry);  // checkmark approx
+      } else {
+        tft.setTextColor(0xF800, TFT_BLACK);
+        tft.drawString("-", hsTblX + xOff, ry);
+      }
     };
-    dot(70, t.m1); dot(82, t.m2); dot(94, t.m3); dot(106, t.m4);
+    indicator(hsColW * 2, t.m1);
+    indicator(hsColW * 3, t.m2);
+    indicator(hsColW * 4, t.m3);
+    indicator(hsColW * 5, t.m4);
   }
   if (specterHsCount == 0) {
-    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    tft.drawString("(no EAPOL seen yet)", leftX + 2, hsY + 10);
+    tft.setTextColor(0x7BEF, TFT_BLACK);
+    tft.drawString("No EAPOL captured", hsTblX, hsTblY + 12);
   }
 
-  // ── Ghost / client stats ──────────────────────────────────────────────────
-  const int statY = hsY + 10 + max(hsRows,1) * hsRowH + 4;
-  tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
-  char stats[48];
-  snprintf(stats, sizeof(stats), "Ghosts:%lu  Clients:%u  Dedups:%u",
-           (unsigned long)specterGhostCount, specterClientCount, specterDedupHead);
-  String sl = stats; while(sl.length()>4 && tft.textWidth(sl)>leftW-4) sl.remove(sl.length()-1);
-  tft.drawString(sl, leftX + 2, statY);
+  // ═══════════════════════════════════════════════════════════════
+  //  BOTTOM BAR — 4 action buttons
+  // ═══════════════════════════════════════════════════════════════
+  const int btnCount = 4;
+  const int btnGap   = 4;
+  const int btnW4    = (bottom.w - btnGap * (btnCount - 1)) / btnCount;
 
-  // Hashcat file path
-  if (specterPmkidCount > 0 && captureDir[0]) {
-    char hcPath[80]; snprintf(hcPath, sizeof(hcPath), "%s/specter.hc22000", captureDir);
-    String hcl = hcPath; while(hcl.length()>4 && tft.textWidth(hcl)>leftW-4) hcl.remove(hcl.length()-1);
-    tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.drawString(hcl, leftX + 2, statY + 10);
-  }
+  btnSpEngage    = {bottom.x + 0*(btnW4+btnGap), bottom.y, btnW4, bottom.h,
+                    engaged ? "STOP" : "ENGAGE"};
+  btnSpGhost     = {bottom.x + 1*(btnW4+btnGap), bottom.y, btnW4, bottom.h, "GHOST NOW"};
+  btnSpSetTarget = {bottom.x + 2*(btnW4+btnGap), bottom.y, btnW4, bottom.h, "SET TGT"};
+  btnSpBack      = {bottom.x + 3*(btnW4+btnGap), bottom.y, btnW4, bottom.h, "BACK"};
 
-  // ── Right control stack ───────────────────────────────────────────────────
-  const int ctrlGap = gap;
-  const int ctrlH   = 28;
-  const int ctrlTop = y0 + (content.h - 4*(ctrlH+ctrlGap)) / 2;
-  const bool engaged = (autoMode == AutoMode::SP3CTER);
+  // ENGAGE/STOP: green when idle, red when active
+  drawButton(btnSpEngage,    engaged ? TFT_MAROON    : 0x0340,  // dark red / dark green bg
+             engaged         ? 0xF800              : 0x07E0,  // red / green border
+             TFT_WHITE);
+  drawButton(btnSpGhost,     0x000F,  0xF81F, TFT_WHITE);  // navy/magenta
+  drawButton(btnSpSetTarget, 0x0010,  0x07FF, TFT_WHITE);  // dark navy/cyan
+  drawButton(btnSpBack,      0x180E,  0x07FF, TFT_WHITE);  // midnight/cyan
 
-  btnSpEngage   = {rightX, ctrlTop + 0*(ctrlH+ctrlGap), rightW, ctrlH, engaged ? "STOP" : "ENGAGE"};
-  btnSpGhost    = {rightX, ctrlTop + 1*(ctrlH+ctrlGap), rightW, ctrlH, "GHOST NOW"};
-  btnSpSetTarget= {rightX, ctrlTop + 2*(ctrlH+ctrlGap), rightW, ctrlH, "SET TGT"};
-  btnSpPktLab   = {rightX, ctrlTop + 3*(ctrlH+ctrlGap), rightW, ctrlH, "PKT LAB"};
+  // (btnSpPktLab not shown in new layout — handled by BACK→Packet Lab from home)
+  btnSpPktLab = {0, 0, 0, 0, ""};  // zero out to prevent ghost hits
 
-  drawButton(btnSpEngage,    engaged ? TFT_MAROON : TFT_DARKGREEN, TFT_RED,     TFT_WHITE);
-  drawButton(btnSpGhost,     TFT_BLACK,                             TFT_CYAN,    TFT_WHITE);
-  drawButton(btnSpSetTarget, TFT_NAVY,                              TFT_CYAN,    TFT_WHITE);
-  drawButton(btnSpPktLab,    TFT_BLACK,                             0xFF07,      TFT_WHITE);
-
-  // ── Bottom bar ────────────────────────────────────────────────────────────
-  btnSpBack = {bottom.x, bottom.y, bottom.w, bottom.h, "Back"};
-  drawButton(btnSpBack, TFT_NAVY, TFT_CYAN, TFT_WHITE);
-
-  // Render sig
+  // ── Render signature ─────────────────────────────────────────
   uint32_t sig = 2166136261u;
   auto mix = [&](uint32_t v) { sig ^= v; sig *= 16777619u; };
   mix((uint32_t)specterPmkidCount);
   mix((uint32_t)specterHsCount);
   mix((uint32_t)specterClientCount);
   mix((uint32_t)(specterGhostCount & 0xFF));
+  mix((uint32_t)specterLogHead);
   mix((uint32_t)autoMode);
   mix((uint32_t)hasTarget);
+  mix((uint32_t)specterGhostInFlight);
   specterScreenLastSig = sig;
 
   drawBorder();
@@ -14364,8 +14609,10 @@ void loop() {
     mix((uint32_t)specterHsCount);
     mix((uint32_t)specterClientCount);
     mix((uint32_t)(specterGhostCount & 0xFF));
+    mix((uint32_t)specterLogHead);
     mix((uint32_t)autoMode);
     mix((uint32_t)hasTarget);
+    mix((uint32_t)specterGhostInFlight);
     if (sig != specterScreenLastSig) {
       drawSpecter();
     }
