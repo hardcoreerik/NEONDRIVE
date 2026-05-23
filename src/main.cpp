@@ -3283,7 +3283,7 @@ static Button btnScanMinus, btnScanPlus;
 static Button btnDeauthToggle;
 static Button btnWifiDefaultLockToggle;
 static Button btnCfgWifi;
-static Button btnStartupAutoReconnect, btnStartupDefaultLockToggle, btnStartupHypercube, btnStartupWebserver;
+static Button btnStartupAutoReconnect, btnStartupDefaultLockToggle, btnStartupHypercube, btnStartupWebserver, btnStartupAutoRotate;
 static Button btnTelemetryMinus, btnTelemetryPlus, btnTelemetryVerboseToggle;
 static Button btnMonitorTab1, btnMonitorTab2;
 static Button btnReconBack, btnReconModeDeauth, btnReconModePort;
@@ -3908,6 +3908,9 @@ static void tdisplayNavBuild() {
       tdisplayNavPush(btnBack);
       tdisplayNavPush(btnStartupAutoReconnect);
       tdisplayNavPush(btnStartupDefaultLockToggle);
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+      tdisplayNavPush(btnStartupAutoRotate);
+#endif
       break;
     case ScreenId::TELEMETRY_CONFIG:
       tdisplayNavPush(btnBack);
@@ -6480,6 +6483,10 @@ static void drawStartupConfig() {
   const int btnY2 = compact ? (content.y + 32) : (content.y + 48);
   const int btnY3 = compact ? (content.y + 62) : (content.y + 88);
   const int btnY4 = compact ? (content.y + 92) : (content.y + 128);
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  const int row5Y = compact ? (content.y + 124) : (content.y + 176);
+  const int btnY5 = compact ? (content.y + 122) : (content.y + 168);
+#endif
   const int btnW = compact ? 90 : 114;
   const int btnH = compact ? 26 : 32;
   const int btnX = w - (btnW + 12);
@@ -6523,6 +6530,18 @@ static void drawStartupConfig() {
   drawButton(btnStartupWebserver,
              cfg.startup_webserver ? TFT_DARKGREEN : TFT_MAROON,
              0x07FF, TFT_WHITE);  // cyan accent
+
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("Auto-rotate (IMU)", content.x + 4, row5Y);
+
+  btnStartupAutoRotate = {btnX, btnY5, btnW, btnH, cfg.startup_autoRotate ? "ON" : "OFF"};
+  drawButton(btnStartupAutoRotate,
+             cfg.startup_autoRotate ? TFT_DARKGREEN : TFT_MAROON,
+             0xFFE0, TFT_WHITE);
+#endif
 
   if (!compact) {
     tft.setTextDatum(TL_DATUM);
@@ -13171,8 +13190,7 @@ static void setScreen(ScreenId next) {
 #endif
 }
 
-#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
-static void tdisplayRedrawCurrentScreen() {
+static void redrawActiveScreen() {
   switch (screen) {
     case ScreenId::HOME:                drawHome(); break;
     case ScreenId::JUST_GO:             drawJustGo(); break;
@@ -13200,7 +13218,63 @@ static void tdisplayRedrawCurrentScreen() {
     case ScreenId::SCOPE_GRAPH:         drawScopeGraph(); break;
     case ScreenId::LED_CONTROL:         drawLedControl(); break;
     case ScreenId::NEON_PANIC:          drawNeonPanic(); break;
+    case ScreenId::SYNC:                drawSync(); break;
   }
+}
+
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+static uint8_t g_tab5RotationCurrent = 1;
+static uint8_t g_tab5RotationCandidate = 1;
+static uint32_t g_tab5RotationCandidateSinceMs = 0;
+static uint32_t g_tab5RotationLastSampleMs = 0;
+
+static int tab5ClassifyRotationFromAccel(float ax, float ay, float az) {
+  // Ignore near-flat/noisy poses to avoid accidental spins.
+  if (fabsf(ax) < 0.30f && fabsf(ay) < 0.30f) return -1;
+  if (fabsf(az) > 0.93f && fabsf(ax) < 0.38f && fabsf(ay) < 0.38f) return -1;
+
+  if (fabsf(ax) > fabsf(ay)) {
+    return (ax >= 0.0f) ? 3 : 1;  // Landscape right/left
+  }
+  return (ay >= 0.0f) ? 0 : 2;    // Portrait normal/inverted (flipped 180 from prior mapping)
+}
+
+static void tab5ApplyRotation(uint8_t rotation) {
+  if (rotation == g_tab5RotationCurrent) return;
+  g_tab5RotationCurrent = rotation;
+  tft.setRotation(rotation);
+  Serial.printf("[tab5-rot] apply=%u\n", (unsigned)rotation);
+  resetTouchLatch();
+  redrawActiveScreen();
+}
+
+static void tab5RotationTick() {
+  if (!cfg.startup_autoRotate) return;
+
+  const uint32_t now = millis();
+  if ((now - g_tab5RotationLastSampleMs) < 25) return; // ~40Hz
+  g_tab5RotationLastSampleMs = now;
+
+  M5.Imu.update();
+  m5::imu_data_t d = M5.Imu.getImuData();
+  int target = tab5ClassifyRotationFromAccel(d.accel.x, d.accel.y, d.accel.z);
+  if (target < 0) return;
+
+  if ((uint8_t)target != g_tab5RotationCandidate) {
+    g_tab5RotationCandidate = (uint8_t)target;
+    g_tab5RotationCandidateSinceMs = now;
+    return;
+  }
+  if ((uint8_t)target == g_tab5RotationCurrent) return;
+  if ((now - g_tab5RotationCandidateSinceMs) < 220) return;
+
+  tab5ApplyRotation((uint8_t)target);
+}
+#endif
+
+#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
+static void tdisplayRedrawCurrentScreen() {
+  redrawActiveScreen();
 }
 #endif
 
@@ -13738,6 +13812,10 @@ void setup() {
   // is purely cosmetic (output pixel order) — do NOT call setRotation again
   // elsewhere or the touch→pixel mapping will de-sync.
   tft.setRotation(1);
+  g_tab5RotationCurrent = 1;
+  g_tab5RotationCandidate = 1;
+  g_tab5RotationCandidateSinceMs = millis();
+  g_tab5RotationLastSampleMs = 0;
   tft.fillScreen(TFT_BLACK);
   drawBorder();
   Serial.printf("[tab5] display %dx%d  touch_enabled=%d\n",
@@ -13815,6 +13893,7 @@ void loop() {
   // M5.update() pumps the GT911/ST7123 touch state machine. Must be called
   // once per loop before any touch_read_point() call.
   M5.update();
+  tab5RotationTick();
 #endif
   handleSerialDebugCommands();
   bruceMenuTick();
@@ -14819,6 +14898,20 @@ void loop() {
       waitTouchRelease();
       return;
     }
+
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+    if (hit(btnStartupAutoRotate, tx, ty)) {
+      cfg.startup_autoRotate = !cfg.startup_autoRotate;
+      if (cfg.startup_autoRotate) {
+        g_tab5RotationCandidate = g_tab5RotationCurrent;
+        g_tab5RotationCandidateSinceMs = millis();
+      }
+      saveConfig(cfg);
+      drawStartupConfig();
+      waitTouchRelease();
+      return;
+    }
+#endif
 
     if (hit(btnStartupHypercube, tx, ty)) {
       cfg.ui_hypercube = !cfg.ui_hypercube;
