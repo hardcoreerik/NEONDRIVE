@@ -66,3 +66,7 @@ Please review [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes.
 ## Changelog
 
 Release notes and significant project changes are tracked in [CHANGELOG.md](CHANGELOG.md).
+
+---
+
+Developed in collaboration with AI tools.

@@ -35,6 +35,8 @@ struct AppConfig {
   bool ui_hypercube       = true;
 
   bool startup_autoReconnectPrompt = true;
+  bool startup_autoRotate          = true;
+  int  startup_manualRotation      = 1;
   bool startup_webserver           = false;
   bool wifi_defaultLockChannel     = false;
   int  telemetry_monitorIntervalMs = 500;

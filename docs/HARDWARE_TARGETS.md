@@ -62,14 +62,41 @@ The Tab5 uses two chips working in tandem:
 | **ESP32-P4** | Main CPU / Display / Application | Dual-core RISC-V @ 400 MHz, 32 MB PSRAM, 16 MB Flash |
 | **ESP32-C6** | WiFi 6 + Bluetooth 5 co-processor | Handles all RF; exposed to P4 via standard `WiFi.h` API |
 
-Display: 5" 1280×720 IPS MIPI-DSI, driver initialized by M5GFX (`ARDUINO_M5STACK_TAB5` board define).
-Touch: Goodix GT911 multi-touch (I²C), read via `tft.getTouch()`.
+Display: 5" 1280×720 IPS MIPI-DSI, driver initialised by M5GFX autodetect (`ARDUINO_M5STACK_TAB5` board define).
+Touch: Goodix GT911 capacitive multi-touch (I²C: SDA=GPIO31, SCL=GPIO32), fully managed by M5GFX.
+
+#### Touch implementation — authoritative notes
+
+Touch on Tab5 is owned entirely by M5GFX. The correct implementation is:
+
+```cpp
+// setup():
+M5.begin(cfg);          // PI4IOE reset + GT911 detect + coord mapping — all here
+
+// loop():
+M5.update();            // pump GT911 state machine
+
+// read a tap:
+auto td = M5.Touch.getDetail(0);
+if (td.isPressed() || td.wasPressed()) { /* td.x, td.y */ }
+```
+
+**Do not** add manual PI4IOE pulsing, `M5.Touch.begin()` calls, or touch
+recovery scaffolding — M5GFX owns the hardware at a lower level than any of
+those approaches can reach.
+
+**Critical:** `BOARD_HAS_SD` must stay `false` until Tab5 SD SPI pins are
+mapped. Calling `sdSpi.begin(-1,-1,-1,-1)` assigns the ESP32-P4 default
+VSPI MOSI to GPIO32, which is GT911 I²C SCL. This silently destroys the
+I²C bus after M5.begin() completes, leaving touch dead for the session.
+See `CLAUDE.md` for the full root-cause writeup.
 
 #### Known Limitations (Tab5 vs CYD/T-Display-S3)
 
 - **Raw frame injection** (`wsl_bypasser`, `bruce_wifi`) — disabled. `esp_wifi_80211_tx` and `ieee80211_raw_frame_sanity_check` are not available via the C6 co-processor bridge. All WSLBypasser and BruceWiFi call sites compile to no-ops.
 - **Deauth/Beacon/Probe flood** — no-ops on Tab5 for the same reason.
-- **SD card** — hardware present (SPI3); requires pin verification against Tab5 schematic before enabling.
+- **WiFi** — crashes on init (`H_SDIO_DRV: sdio card init failed`). The ESP32-P4→C6 SDIO link is not yet stable. All WiFi-dependent features are non-functional until resolved.
+- **SD card** — hardware present (SPI3) but disabled in firmware. Must not use default SPI pins (GPIO32 conflicts with GT911 I²C SCL). Re-enable only after verifying correct pin mapping from the Tab5 schematic.
 
 #### Flash Entry (Boot Mode)
 

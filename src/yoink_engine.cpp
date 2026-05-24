@@ -4,6 +4,7 @@
 
 #include "yoink_engine.h"
 #include "yoink_save.h"
+#include "neon_rf.h"
 #include "wsl_bypasser.h"
 #include <WiFi.h>
 #include <esp_wifi.h>
@@ -159,6 +160,10 @@ static void sendAssociationRequest(const uint8_t* bssid, const char* ssid, uint8
 // ============= WiFi Initialization =============
 
 static void startWifi() {
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+    Serial.println("[yoink] startWifi: BLOCKED on Tab5 (no local radio; C6 backend not implemented)");
+    return;
+#endif
     esp_wifi_set_promiscuous(false);
     esp_wifi_set_promiscuous_rx_cb(nullptr);
 
@@ -198,6 +203,10 @@ static void startWifi() {
 }
 
 static void stopWifi() {
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+    yoinkLog(0, "stopWifi: no-op on Tab5 (local radio not active)");
+    return;
+#endif
     esp_wifi_set_promiscuous(false);
     esp_wifi_set_promiscuous_rx_cb(nullptr);
     delay(20);
@@ -220,7 +229,9 @@ static void hopChannel() {
     if (s_channelLocked) return;
     s_hopIndex = (s_hopIndex + 1) % CHANNEL_COUNT;
     s_currentCh = CHANNEL_HOP_ORDER[s_hopIndex];
+#if !defined(NEONDRIVE_TARGET_M5TAB5)
     esp_wifi_set_channel(s_currentCh, WIFI_SECOND_CHAN_NONE);
+#endif
 }
 
 // ============= Network Table =============
@@ -1087,6 +1098,11 @@ void init() {
 }
 
 void start() {
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+    neon_rf_set_last_action("yoink_start");
+    yoinkLog(3, "start: BLOCKED on Tab5 (no local radio; C6 backend not yet implemented)");
+    return;
+#endif
     if (s_running) return;
 
     // Reset log ring

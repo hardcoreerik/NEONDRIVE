@@ -1,5 +1,6 @@
 // Deauth Hunter Implementation
 #include "deauth_hunter.h"
+#include "neon_rf.h"
 #include "esp_wifi_types.h"
 #include <cstring>
 #include <algorithm>
@@ -174,7 +175,9 @@ void DeauthHunter::setChannelFilter(uint8_t channel) {
     currentChannel = channelFilter;
     // Keep hop index aligned so unlocking resumes from the same channel.
     channelIndex = currentChannel - 1;
+#if !defined(NEONDRIVE_TARGET_M5TAB5)
     esp_wifi_set_channel(currentChannel, WIFI_SECOND_CHAN_NONE);
+#endif
     char chBuf[4];
     snprintf(chBuf, sizeof(chBuf), "%u", (unsigned)channelFilter);
     Serial.printf("[DeauthHunter] Channel filter: %s\n", chBuf);
@@ -339,5 +342,7 @@ void DeauthHunter::updateStats(const DeauthEvent& event) {
 void DeauthHunter::hopChannel() {
   channelIndex = (channelIndex + 1) % CHANNEL_COUNT;
   currentChannel = pgm_read_byte(&CHANNELS[channelIndex]);
+#if !defined(NEONDRIVE_TARGET_M5TAB5)
   esp_wifi_set_channel(currentChannel, WIFI_SECOND_CHAN_NONE);
+#endif
 }

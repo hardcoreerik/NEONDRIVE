@@ -1,7 +1,11 @@
 #pragma once
 
 #include <Arduino.h>
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+#include <M5GFX.h>
+#else
 #include <TFT_eSPI.h>
+#endif
 
 // ──────────────────────────────────────────────────────────────────────────────
 // HypercubeWidget — persistent animated 4D wireframe in the top-right corner.
@@ -40,7 +44,11 @@ enum class Activity : uint8_t {
 };
 
 // Call once in setup() — creates the sprite and seeds rotation state.
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+void begin(M5GFX& tft);
+#else
 void begin(TFT_eSPI& tft);
+#endif
 
 // Call every loop() — advances rotation and pushes sprite at ~30fps.
 void tick();

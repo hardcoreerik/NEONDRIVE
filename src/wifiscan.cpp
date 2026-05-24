@@ -1,4 +1,5 @@
 #include "wifiscan_helpers.h"
+#include "neon_rf.h"
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
@@ -16,6 +17,10 @@ static void collectScanResults(int n) {
   resetScanStorage();
   if (n < 0) {
     Serial.printf("[wifi] scan failed: %d\n", n);
+#if defined(NEONDRIVE_TARGET_M5TAB5) && defined(TAB5_TEST_C6_SCAN)
+    Serial.printf("[c6test] step=scan_once fail reason=scan_result_%d\n", n);
+    Serial.println("[c6test] ui.ap_count=0");
+#endif
     wifiIsScanning = false;
     return;
   }
@@ -48,6 +53,9 @@ static void collectScanResults(int n) {
   dedupeKeepStrongest();
   sortApsByRssiDesc();
   Serial.printf("[wifi] scan done. found=%d stored=%d\n", n, apCount);
+#if defined(NEONDRIVE_TARGET_M5TAB5) && defined(TAB5_TEST_C6_SCAN)
+  Serial.printf("[c6test] ui.ap_count=%d\n", apCount);
+#endif
   wifiIsScanning = false;
 }
 
