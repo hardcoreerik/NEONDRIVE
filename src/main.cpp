@@ -97,13 +97,10 @@ using fs::File;
 //
 // ── TOUCH — WHAT BREAKS IT ───────────────────────────────────────────────
 //
-//  ⚠ CRITICAL — SD CARD PIN COLLISION:
-//    BOARD_HAS_SD MUST remain false until real SD SPI pins are mapped.
-//    Calling sdSpi.begin(-1,-1,-1,-1) causes the ESP32-P4 SPI driver to
-//    fall back to the default VSPI bus, assigning MOSI → GPIO32.
-//    GPIO32 is the GT911 I²C SCL.  SPI claims the pin; I²C dies silently;
-//    touch reports count=0 / x=-1 / y=-1 for the entire session even though
-//    M5.Touch.isEnabled() still returns true (it was true before SD init ran).
+//  ⚠ CRITICAL — SD CARD PIN COLLISION (historical, now resolved):
+//    Pins verified from Tab5 schematic (2026-05-24). SPI mode:
+//      MISO=GPIO39, CS=GPIO42, SCK=GPIO43, MOSI=GPIO44
+//    None of these alias GT911 I²C (SDA=GPIO31, SCL=GPIO32).
 //
 //    Boot-time verification — GPIO32 must appear as I2C_MASTER_SCL, not
 //    SPI_MASTER_MOSI, in the GPIO report printed after setup().
@@ -120,10 +117,7 @@ using fs::File;
 // ═══════════════════════════════════════════════════════════════════════════
 static constexpr bool BOARD_HAS_TOUCH = true;
 static constexpr bool BOARD_HAS_IMU   = true;
-// BOARD_HAS_SD = false — see critical warning above.
-// SD is physically present (SPI3) but must stay disabled until Tab5 SD SPI
-// pins are verified from schematic so they don't alias the GT911 I²C bus.
-static constexpr bool BOARD_HAS_SD    = false;
+static constexpr bool BOARD_HAS_SD    = true;
 static constexpr bool TFT_USES_SPI_BUS = false;
 static constexpr int BOARD_TFT_ROTATION = 1;
 static constexpr bool BOARD_TFT_INVERT = false;
@@ -137,10 +131,12 @@ static constexpr int PIN_TOUCH_SDA = -1;
 static constexpr int PIN_TOUCH_SCL = -1;
 static constexpr int PIN_TOUCH_INT = -1;
 static constexpr int PIN_TOUCH_RST = -1;
-static constexpr int PIN_SD_SCLK   = -1;
-static constexpr int PIN_SD_MISO   = -1;
-static constexpr int PIN_SD_MOSI   = -1;
-static constexpr int PIN_SD_CS     = -1;
+// Tab5 SPI3 SD card pins — verified from schematic 2026-05-24.
+// None conflict with GT911 I²C (SDA=31, SCL=32).
+static constexpr int PIN_SD_SCLK   = 43;
+static constexpr int PIN_SD_MISO   = 39;
+static constexpr int PIN_SD_MOSI   = 44;
+static constexpr int PIN_SD_CS     = 42;
 static constexpr int PIN_SW1       = -1;
 // Backlight and RGB LED managed by M5GFX; no discrete PWM pins exposed here.
 static constexpr int BL_PINS[] = {-1};
@@ -699,9 +695,7 @@ static bool touch_read_point(TouchState& s) {
 #if defined(NEONDRIVE_TARGET_M5TAB5)
   // M5.update() is called at the top of loop() — getDetail() is already fresh.
   // M5GFX applies the display rotation → touch coordinate mapping automatically.
-  // NOTE: SD card must NOT be mounted with default SPI pins on Tab5 — the
-  // default MOSI (GPIO32) aliases the GT911 I²C SCL, killing touch. Keep
-  // BOARD_HAS_SD=false until correct Tab5 SD SPI pins are mapped.
+  // SD uses GPIO43/39/44/42 (SCK/MISO/MOSI/CS) — no conflict with GT911 I²C.
   auto td = M5.Touch.getDetail(0);
   if (td.isPressed() || td.wasPressed()) {
     s.down = true;
@@ -955,8 +949,50 @@ static bool macFromString(const char* str, uint8_t* mac);
 static void sendDeauthFrame(const uint8_t* bssid, const uint8_t* station, uint8_t reason);
 static String normalizeSdWebPath(String path);
 static void startAPMode();
+static void startWebServer();
+static void stopWebServer();
+static void timeServiceTick();
 static void uiMemLog(const char* tag);
 static void uiMemBudgetBoot();
+static void drawConfig();
+static void drawWifiConfig();
+static void drawStartupConfig();
+static void drawTelemetryConfig();
+static void drawWifiConnect();
+static void drawWifiPasswordModal();
+static void drawWebserver();
+static void drawMonitor();
+static void drawJustGo();
+static void drawAutomateMenu();
+static void drawScopeGraph();
+static void drawLedControl();
+static void drawSync();
+static void monitorReset();
+static void monitorPushLine(uint16_t color, const char* fmt, ...);
+static void monitorUpdateLine(int lineIdx, uint16_t color, const char* fmt, ...);
+static void monitorSetFileInfo(const char* txt);
+static void monitorLoadFileDir(const char* path);
+static void monitorGoParentDir();
+static void monitorEnterDir(const char* name);
+static void monitorLoadViewFile();
+static void monitorLoadFileDirFs(fs::FS& fsRef, const char* path, bool fromSd);
+static void push1tSendProbeRequest();
+static void specterRandomizeSta();
+static void specterSendGhostAuth();
+static void justGoStart();
+static void justGoStop();
+static void justGoTick();
+static void push1tTick();
+static void specterTick();
+static void scopeTick();
+static void scopeResetWaterfall();
+static void updateWifiConnectStatus();
+static void wifiConnectScanTick();
+static void connectToWifi(const String& ssid, const String& password);
+static void restoreEpochFromLittleFs();
+static void syncAllDropbox();
+static void syncWithWPASec();
+static void downloadWPASecResults();
 
 // AutoMode must be declared before handleCapturedPacket so the promiscuous
 // callback can filter on JAMMIT mode without a forward-declaration problem.
@@ -965,6 +1001,7 @@ static AutoMode autoMode = AutoMode::NONE;
 static void engageAutoMode(AutoMode mode);
 static void disengageAutoMode();
 static void exportThreatDataToSD();  // Forward declaration for threat export
+static bool mountSdCard(bool verbose);
 
 // ============================================================================
 // MAC SPOOFING ENGINE - Vendor OUI + MAC Pool + Per-Frame Rotation  
@@ -1095,14 +1132,62 @@ static void applyActiveSpoofMode(uint8_t mac[6]) {
 }
 
 static void exportMacPoolToSD() {
-  // Stub - will be implemented when sdReady is available
-  // For now, just log that it was called
-  Serial.printf("[SPOOF] exportMacPoolToSD called (stub)\n");
+  if (!BOARD_HAS_SD) return;
+  if (!mountSdCard(false)) {
+    Serial.println("[SPOOF] export skipped: SD not ready");
+    return;
+  }
+  if (!SD.exists("/captures")) SD.mkdir("/captures");
+
+  File f = SD.open(MAC_POOL_SD_PATH, FILE_WRITE);
+  if (!f) {
+    Serial.printf("[SPOOF] export failed: open %s\n", MAC_POOL_SD_PATH);
+    return;
+  }
+
+  for (uint8_t i = 0; i < macPoolCount; ++i) {
+    const uint8_t* m = macPoolBuffer[i];
+    f.printf("%02X:%02X:%02X:%02X:%02X:%02X\n", m[0], m[1], m[2], m[3], m[4], m[5]);
+  }
+  f.close();
+  Serial.printf("[SPOOF] exported %u MAC(s) to %s\n", macPoolCount, MAC_POOL_SD_PATH);
 }
 
 static void loadMacPoolFromSD() {
-  // Stub - will be implemented when sdReady is available
-  Serial.printf("[SPOOF] loadMacPoolFromSD called (stub)\n");
+  if (!BOARD_HAS_SD) return;
+  if (!mountSdCard(false)) {
+    Serial.println("[SPOOF] load skipped: SD not ready");
+    return;
+  }
+  if (!SD.exists(MAC_POOL_SD_PATH)) {
+    Serial.printf("[SPOOF] no saved MAC pool at %s\n", MAC_POOL_SD_PATH);
+    return;
+  }
+
+  File f = SD.open(MAC_POOL_SD_PATH, FILE_READ);
+  if (!f) {
+    Serial.printf("[SPOOF] load failed: open %s\n", MAC_POOL_SD_PATH);
+    return;
+  }
+
+  uint8_t loaded = 0;
+  while (f.available() && loaded < MAC_POOL_SIZE) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() < 17) continue;
+
+    unsigned v[6] = {};
+    if (sscanf(line.c_str(), "%2x:%2x:%2x:%2x:%2x:%2x",
+               &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) {
+      continue;
+    }
+    uint8_t mac[6];
+    for (int i = 0; i < 6; ++i) mac[i] = (uint8_t)v[i];
+    addMacToPool(mac);
+    loaded++;
+  }
+  f.close();
+  Serial.printf("[SPOOF] loaded %u MAC(s) from %s\n", loaded, MAC_POOL_SD_PATH);
 }
 
 // JustGo Attack Profiles (expert pentest modes)
@@ -2181,6 +2266,7 @@ enum class RiskyWebAction : uint8_t {
   AUTO_SCOPE,
   AUTO_JAMMIT
 };
+static bool confirmWebRiskAction(RiskyWebAction action, const char* actionLabel);
 
 static RiskyWebAction pendingRiskyWebAction = RiskyWebAction::NONE;
 static uint32_t pendingRiskyWebActionMs = 0;
@@ -2402,6 +2488,9 @@ static void usbRpcSendError(uint32_t id, const char* err) {
 }
 
 static bool saveScreenshotToSd(char* outPath, size_t outPathLen);
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+static void drawTab5ScreenshotOverlay();
+#endif
 
 static void handleSerialRpcLine(const String& lineRaw) {
   String line = lineRaw;
@@ -3345,6 +3434,8 @@ static Button btnWifiUp, btnWifiDown;
 static Button btnWifiYes, btnWifiNo;
 static Button btnTargetBack, btnTargetAutomate, btnTargetMonitor, btnTargetSniff, btnTargetLock;
 static Button btnMonitorBack;
+static Button btnMonitorPause, btnMonitorClear, btnMonitorAuto, btnMonitorFilter;
+static Button btnMonitorTabLive, btnMonitorTabSd, btnMonitorTabLfs, btnMonitorTabView;
 static Button btnAutoBack, btnAutoY0INK, btnAutoRAW, btnAutoSCOPE, btnAutoJAMMIT;
 static Button btnMonitorUpDir, btnMonitorUp, btnMonitorDown;
 // Just Go screen buttons
@@ -3393,6 +3484,12 @@ static Button btnCfgWifi;
 static Button btnStartupAutoReconnect, btnStartupDefaultLockToggle, btnStartupHypercube, btnStartupWebserver, btnStartupAutoRotate, btnStartupManualRotation;
 static Button btnTelemetryMinus, btnTelemetryPlus, btnTelemetryVerboseToggle;
 static Button btnMonitorTab1, btnMonitorTab2;
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+static Button btnTab5Screenshot;
+static uint32_t tab5ScreenshotToastUntilMs = 0;
+static bool tab5ScreenshotToastOk = false;
+static char tab5ScreenshotLastPath[48] = {0};
+#endif
 static Button btnReconBack, btnReconModeDeauth, btnReconModePort;
 static Button btnReconStart, btnReconClear;
 static Button btnReconChMinus, btnReconChPlus, btnReconLock;
@@ -3426,6 +3523,14 @@ static int monitorFileListW = 0;
 static int monitorFileListH = 0;
 static int monitorFileRowH = 14;
 static int monitorFileVisibleRows = 0;
+static bool monitorFileUseSd = true;
+static char monitorSdPath[96] = "/";
+static char monitorLfsPath[96] = "/";
+static char monitorViewPath[128] = "";
+static bool monitorViewUseSd = true;
+static int monitorViewScroll = 0;
+static char monitorViewLines[32][96];
+static int monitorViewLineCount = 0;
 
 // LED Control state (buttons are local to reduce DRAM)
 static uint8_t ledBrightness = 128;
@@ -3660,7 +3765,11 @@ static BrucePcapEntry brucePcapQueue[BRUCE_PCAP_QUEUE_SIZE];
 static volatile uint8_t brucePcapQueueHead = 0;  // write index
 static volatile uint8_t brucePcapQueueTail = 0;  // read  index
 
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+static constexpr int MONITOR_MAX_LINES = 64;
+#else
 static constexpr int MONITOR_MAX_LINES = 6;  // Reduced to save DRAM
+#endif
 struct MonitorLine {
   char text[48];  // Reduced to save DRAM
   uint16_t color;
@@ -3772,6 +3881,11 @@ static ReconPortScanner reconScanner;
 // Monitor view mode
 enum class MonitorMode : uint8_t { LIVE, FILES };
 static MonitorMode monitorMode = MonitorMode::LIVE;
+enum class MonitorTab5Tab : uint8_t { LIVE = 0, SD = 1, LITTLEFS = 2, FILE_VIEW = 3 };
+static MonitorTab5Tab monitorTab5Tab = MonitorTab5Tab::LIVE;
+static bool monitorTab5Paused = false;
+static bool monitorTab5AutoScroll = true;
+static uint8_t monitorTab5Filter = 0; // 0=ALL 1=INFO+ 2=WARN+ 3=ERR
 
 // Just Go automation state
 enum class JustGoStage : uint8_t { IDLE, SCAN, SELECT_TARGET, RUN_MODE, COOLDOWN };
@@ -10162,7 +10276,9 @@ static bool monitorAllowFileName(const char* name) {
   return monitorNameEndsWithIgnoreCase(name, ".pcap") ||
          monitorNameEndsWithIgnoreCase(name, ".pcapng") ||
          monitorNameEndsWithIgnoreCase(name, ".log") ||
-         monitorNameEndsWithIgnoreCase(name, ".txt");
+         monitorNameEndsWithIgnoreCase(name, ".txt") ||
+         monitorNameEndsWithIgnoreCase(name, ".csv") ||
+         monitorNameEndsWithIgnoreCase(name, ".json");
 }
 
 static void monitorSetFileInfo(const char* txt) {
@@ -10170,18 +10286,74 @@ static void monitorSetFileInfo(const char* txt) {
   monitorFileInfo[sizeof(monitorFileInfo) - 1] = '\0';
 }
 
-static void monitorLoadFileDir(const char* path) {
-  monitorFileCount = 0;
-  if (!path || !path[0]) path = "/";
-  if (!sdReady && !mountSdCard(false)) {
+static bool monitorColorAllowedForFilter(uint16_t c) {
+  if (monitorTab5Filter == 0) return true;
+  const bool isErr = (c == TFT_RED);
+  const bool isWarn = (c == TFT_YELLOW || c == TFT_ORANGE);
+  const bool isInfo = (c == TFT_CYAN || c == TFT_GREEN || c == TFT_MAGENTA || c == TFT_WHITE || c == TFT_DARKGREY);
+  if (monitorTab5Filter == 3) return isErr;
+  if (monitorTab5Filter == 2) return isErr || isWarn;
+  return isErr || isWarn || isInfo;
+}
+
+static bool monitorIsLikelyTextFile(fs::FS& fs, const char* path) {
+  File f = fs.open(path, FILE_READ);
+  if (!f) return false;
+  const size_t sample = 256;
+  uint8_t buf[sample];
+  size_t n = f.read(buf, sample);
+  f.close();
+  if (n == 0) return true;
+  size_t bad = 0;
+  for (size_t i = 0; i < n; i++) {
+    uint8_t b = buf[i];
+    if (b == 9 || b == 10 || b == 13) continue;
+    if (b >= 32 && b <= 126) continue;
+    bad++;
+  }
+  return bad < (n / 8);
+}
+
+static void monitorLoadViewFile() {
+  monitorViewLineCount = 0;
+  monitorViewScroll = 0;
+  if (!monitorViewPath[0]) return;
+  fs::FS& fsRef = monitorViewUseSd ? (fs::FS&)SD : (fs::FS&)LittleFS;
+  if (monitorViewUseSd && !sdReady && !mountSdCard(false)) {
     monitorSetFileInfo("SD not ready");
     return;
   }
+  if (!monitorIsLikelyTextFile(fsRef, monitorViewPath)) {
+    monitorSetFileInfo("Binary/non-text preview unsupported");
+    return;
+  }
+  File f = fsRef.open(monitorViewPath, FILE_READ);
+  if (!f) {
+    monitorSetFileInfo("Open failed");
+    return;
+  }
+  while (f.available() && monitorViewLineCount < 32) {
+    String line = f.readStringUntil('\n');
+    line.replace("\r", "");
+    line.trim();
+    strncpy(monitorViewLines[monitorViewLineCount], line.c_str(), sizeof(monitorViewLines[monitorViewLineCount]) - 1);
+    monitorViewLines[monitorViewLineCount][sizeof(monitorViewLines[monitorViewLineCount]) - 1] = '\0';
+    monitorViewLineCount++;
+  }
+  f.close();
+  if (monitorViewLineCount == 0) monitorSetFileInfo("File is empty");
+}
 
+static void monitorLoadFileDirFs(fs::FS& fsRef, const char* path, bool fromSd) {
+  monitorFileCount = 0;
+  if (!path || !path[0]) path = "/";
+  if (fromSd && !sdReady && !mountSdCard(false)) {
+    monitorSetFileInfo("SD not ready");
+    return;
+  }
   strncpy(monitorFilePath, path, sizeof(monitorFilePath) - 1);
   monitorFilePath[sizeof(monitorFilePath) - 1] = '\0';
-
-  File dir = SD.open(monitorFilePath);
+  File dir = fsRef.open(monitorFilePath);
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
     monitorSetFileInfo("Path unavailable");
@@ -10189,7 +10361,6 @@ static void monitorLoadFileDir(const char* path) {
     monitorFilePath[sizeof(monitorFilePath) - 1] = '\0';
     return;
   }
-
   while (true) {
     File entry = dir.openNextFile();
     if (!entry) break;
@@ -10197,7 +10368,6 @@ static void monitorLoadFileDir(const char* path) {
       entry.close();
       continue;
     }
-
     String nm = entry.name();
     int slash = nm.lastIndexOf('/');
     if (slash >= 0 && slash + 1 < (int)nm.length()) nm = nm.substring(slash + 1);
@@ -10205,13 +10375,11 @@ static void monitorLoadFileDir(const char* path) {
       entry.close();
       continue;
     }
-
     const bool isDir = entry.isDirectory();
     if (!isDir && !monitorAllowFileName(nm.c_str())) {
       entry.close();
       continue;
     }
-
     MonitorFileEntry& out = monitorFiles[monitorFileCount++];
     strncpy(out.name, nm.c_str(), sizeof(out.name) - 1);
     out.name[sizeof(out.name) - 1] = '\0';
@@ -10220,15 +10388,15 @@ static void monitorLoadFileDir(const char* path) {
     entry.close();
   }
   dir.close();
-
-  if (monitorFileScroll < 0) monitorFileScroll = 0;
-  if (monitorFileVisibleRows > 0) {
-    int maxScroll = monitorFileCount - monitorFileVisibleRows;
-    if (maxScroll < 0) maxScroll = 0;
-    if (monitorFileScroll > maxScroll) monitorFileScroll = maxScroll;
-  }
+  int maxScroll = monitorFileCount - monitorFileVisibleRows;
+  if (maxScroll < 0) maxScroll = 0;
+  monitorFileScroll = clampi(monitorFileScroll, 0, maxScroll);
   monitorFileLastRefreshMs = millis();
-  monitorSetFileInfo((monitorFileCount > 0) ? "Tap folder to open" : "No matching files");
+  monitorSetFileInfo((monitorFileCount > 0) ? "Tap folder/file" : "No matching files");
+}
+
+static void monitorLoadFileDir(const char* path) {
+  monitorLoadFileDirFs(SD, path, true);
 }
 
 static void monitorGoParentDir() {
@@ -10249,7 +10417,14 @@ static void monitorGoParentDir() {
     strcpy(nextPath, "/");
   }
   monitorFileScroll = 0;
-  monitorLoadFileDir(nextPath);
+  monitorLoadFileDirFs(monitorFileUseSd ? (fs::FS&)SD : (fs::FS&)LittleFS, nextPath, monitorFileUseSd);
+  if (monitorFileUseSd) {
+    strncpy(monitorSdPath, monitorFilePath, sizeof(monitorSdPath) - 1);
+    monitorSdPath[sizeof(monitorSdPath) - 1] = '\0';
+  } else {
+    strncpy(monitorLfsPath, monitorFilePath, sizeof(monitorLfsPath) - 1);
+    monitorLfsPath[sizeof(monitorLfsPath) - 1] = '\0';
+  }
 }
 
 static void monitorEnterDir(const char* name) {
@@ -10261,7 +10436,14 @@ static void monitorEnterDir(const char* name) {
     snprintf(nextPath, sizeof(nextPath), "%s/%s", monitorFilePath, name);
   }
   monitorFileScroll = 0;
-  monitorLoadFileDir(nextPath);
+  monitorLoadFileDirFs(monitorFileUseSd ? (fs::FS&)SD : (fs::FS&)LittleFS, nextPath, monitorFileUseSd);
+  if (monitorFileUseSd) {
+    strncpy(monitorSdPath, monitorFilePath, sizeof(monitorSdPath) - 1);
+    monitorSdPath[sizeof(monitorSdPath) - 1] = '\0';
+  } else {
+    strncpy(monitorLfsPath, monitorFilePath, sizeof(monitorLfsPath) - 1);
+    monitorLfsPath[sizeof(monitorLfsPath) - 1] = '\0';
+  }
 }
 
 // Track which yoink log seq we've already pushed to monitor
@@ -10283,6 +10465,16 @@ static void monitorReset() {
   monitorFileLastRefreshMs = 0;
   monitorFileScroll = 0;
   monitorFileCount = 0;
+  monitorFileUseSd = true;
+  strcpy(monitorSdPath, "/");
+  strcpy(monitorLfsPath, "/");
+  monitorViewPath[0] = '\0';
+  monitorViewLineCount = 0;
+  monitorViewScroll = 0;
+  monitorTab5Tab = MonitorTab5Tab::LIVE;
+  monitorTab5Paused = false;
+  monitorTab5AutoScroll = true;
+  monitorTab5Filter = 0;
   monitorSetFileInfo("");
   // Reset Raw mode tracking
   rawMonLastPkts = 0;
@@ -10309,6 +10501,190 @@ static void monitorReset() {
 static void drawMonitor() {
   const int w = tft.width();
   const int h = tft.height();
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  static bool s_tab5ChromeDrawn = false;
+  static int s_prevW = -1;
+  static int s_prevH = -1;
+  static int s_prevRotation = -1;
+  static bool s_prevLandscape = true;
+  static MonitorTab5Tab s_prevTab = MonitorTab5Tab::LIVE;
+  const int rotationNow = tft.getRotation() & 3;
+  const bool landscape = (w >= h);
+  const UiRect content = computeContentRect();
+  const UiRect bottom = computeBottomBarRect();
+  const int pad = landscape ? 14 : 10;
+  const int tabH = landscape ? 42 : 38;
+  const int ctlH = landscape ? 38 : 42;
+  const int fsRowH = landscape ? 30 : 36;
+  const int titleSize = landscape ? 2 : 1;
+  const int bodySize = 2;
+  const int boxX = content.x + pad;
+  const int boxY = content.y + tabH + 10;
+  const int boxW = max(120, min(w - pad * 2 - content.x, uiActionDockSafeLeft() - boxX - 4));
+  const int boxH = max(80, bottom.y - boxY - 8);
+  // Hard geometry guardrails to keep text inside panel bounds.
+  static constexpr int kPanelInsetL = 8;
+  static constexpr int kPanelInsetR = 8;
+  static constexpr int kPanelInsetT = 6;
+  static constexpr int kPanelInsetB = 8;
+  static constexpr int kPanelHeaderBandH = 26;
+  static constexpr int kPanelFooterBandH = 18;
+  const bool chromeDirty = !s_tab5ChromeDrawn || s_prevW != w || s_prevH != h || s_prevRotation != rotationNow || s_prevLandscape != landscape || s_prevTab != monitorTab5Tab;
+  const int panelInnerX = boxX + kPanelInsetL;
+  const int panelInnerY = boxY + kPanelInsetT;
+  const int panelInnerW = max(20, boxW - (kPanelInsetL + kPanelInsetR));
+  const int panelInnerH = max(20, boxH - (kPanelInsetT + kPanelInsetB));
+  const int panelTextMaxW = max(20, panelInnerW - 2);
+  const int panelRowsTopY = panelInnerY + kPanelHeaderBandH;
+  const int panelRowsBottomY = boxY + boxH - kPanelFooterBandH;
+  const int panelRowsH = max(20, panelRowsBottomY - panelRowsTopY);
+
+  if (chromeDirty) {
+    tft.fillScreen(TFT_BLACK);
+    drawHeader("Monitor Workspace");
+    drawUniversalBackground();
+  }
+
+  const int tabW = max(52, (boxW - 12) / 4);
+  btnMonitorTabLive = {boxX, content.y + 2, tabW, tabH, "LIVE"};
+  btnMonitorTabSd = {boxX + tabW + 4, content.y + 2, tabW, tabH, "SD"};
+  btnMonitorTabLfs = {boxX + (tabW + 4) * 2, content.y + 2, tabW, tabH, "LFS"};
+  btnMonitorTabView = {boxX + (tabW + 4) * 3, content.y + 2, tabW, tabH, "VIEW"};
+  btnMonitorBack = {ActionDockBoxX + ((ActionDockBoxW - 78) / 2), bottom.y, 78, UI_BUTTON_H, "Back"};
+
+  if (chromeDirty) {
+    drawButton(btnMonitorTabLive, monitorTab5Tab == MonitorTab5Tab::LIVE ? 0x03E0 : TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+    drawButton(btnMonitorTabSd, monitorTab5Tab == MonitorTab5Tab::SD ? 0x0410 : TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+    drawButton(btnMonitorTabLfs, monitorTab5Tab == MonitorTab5Tab::LITTLEFS ? 0x0410 : TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+    drawButton(btnMonitorTabView, monitorTab5Tab == MonitorTab5Tab::FILE_VIEW ? 0x780F : TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+    drawButton(btnMonitorBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
+    tft.drawRect(boxX, boxY, boxW, boxH, 0x07FF);
+  }
+  tft.fillRect(boxX + 1, boxY + 1, boxW - 2, boxH - 2, TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(titleSize);
+  tft.setTextColor(0xAFE5, TFT_BLACK);
+
+  if (monitorTab5Tab == MonitorTab5Tab::LIVE) {
+    btnMonitorPause = {boxX, bottom.y, 82, ctlH, monitorTab5Paused ? "Resume" : "Pause"};
+    btnMonitorClear = {boxX + 86, bottom.y, 74, ctlH, "Clear"};
+    btnMonitorAuto = {boxX + 164, bottom.y, 98, ctlH, monitorTab5AutoScroll ? "Auto:On" : "Auto:Off"};
+    const char* fLabel = (monitorTab5Filter == 0) ? "F:All" : (monitorTab5Filter == 1) ? "F:Info" : (monitorTab5Filter == 2) ? "F:Warn" : "F:Err";
+    btnMonitorFilter = {boxX + 266, bottom.y, 84, ctlH, fLabel};
+    drawButton(btnMonitorPause, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+    drawButton(btnMonitorClear, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+    drawButton(btnMonitorAuto, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+    drawButton(btnMonitorFilter, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+
+    tft.setTextSize(bodySize);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    char hdr[96];
+    snprintf(hdr, sizeof(hdr), "sniff=%d pps=%d sd=%d mode=%s", sniffActive ? 1 : 0, sniffPps, sdReady ? 1 : 0, autoModeStr(autoMode));
+    String hdrLine(hdr);
+    while (hdrLine.length() > 4 && tft.textWidth(hdrLine) > panelTextMaxW) hdrLine.remove(hdrLine.length() - 1);
+    tft.drawString(hdrLine, panelInnerX, panelInnerY);
+    const int startY = panelRowsTopY;
+    const int rowH = landscape ? 20 : 24;
+    int visRows = panelRowsH / rowH;
+    if (visRows < 4) visRows = 4;
+
+    int shown = 0;
+    for (int i = monitorLineCount - 1; i >= 0 && shown < visRows; --i) {
+      if (!monitorColorAllowedForFilter(monitorLines[i].color)) continue;
+      const int y = startY + shown * rowH;
+      if (y + rowH > panelRowsBottomY) break;
+      tft.setTextColor(monitorLines[i].color, TFT_BLACK);
+      String line = monitorLines[i].text;
+      while (line.length() > 4 && tft.textWidth(line) > panelTextMaxW) line.remove(line.length() - 1);
+      tft.drawString(line, panelInnerX, y);
+      shown++;
+    }
+  } else if (monitorTab5Tab == MonitorTab5Tab::SD || monitorTab5Tab == MonitorTab5Tab::LITTLEFS) {
+    monitorFileUseSd = (monitorTab5Tab == MonitorTab5Tab::SD);
+    const char* fsName = monitorFileUseSd ? "SD" : "LittleFS";
+    btnMonitorUpDir = {boxX, bottom.y, 50, ctlH, ".."};
+    btnMonitorUp = {boxX + 54, bottom.y, 38, ctlH, "^"};
+    btnMonitorDown = {boxX + 96, bottom.y, 38, ctlH, "v"};
+    drawButton(btnMonitorUpDir, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+    drawButton(btnMonitorUp, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+    drawButton(btnMonitorDown, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+
+    const char* activePath = monitorFileUseSd ? monitorSdPath : monitorLfsPath;
+    if (monitorFileLastRefreshMs == 0) {
+      monitorLoadFileDirFs(monitorFileUseSd ? (fs::FS&)SD : (fs::FS&)LittleFS, activePath, monitorFileUseSd);
+    }
+    tft.setTextSize(bodySize);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    String pathLine = String(fsName) + ": " + monitorFilePath;
+    while (pathLine.length() > 4 && tft.textWidth(pathLine) > panelTextMaxW) pathLine.remove(pathLine.length() - 1);
+    tft.drawString(pathLine, panelInnerX, panelInnerY);
+
+    monitorFileListX = panelInnerX;
+    monitorFileListY = panelRowsTopY;
+    monitorFileListW = panelInnerW;
+    monitorFileListH = panelRowsH;
+    monitorFileRowH = fsRowH;
+    monitorFileVisibleRows = max(1, monitorFileListH / monitorFileRowH);
+    int maxScroll = max(0, monitorFileCount - monitorFileVisibleRows);
+    monitorFileScroll = clampi(monitorFileScroll, 0, maxScroll);
+    for (int r = 0; r < monitorFileVisibleRows; r++) {
+      int idx = monitorFileScroll + r;
+      int y = monitorFileListY + r * monitorFileRowH;
+      if (idx >= monitorFileCount || y + monitorFileRowH > monitorFileListY + monitorFileListH) break;
+      const MonitorFileEntry& e = monitorFiles[idx];
+      tft.setTextColor(e.isDir ? TFT_YELLOW : TFT_WHITE, TFT_BLACK);
+      String line = String(e.isDir ? "[D] " : "[F] ") + e.name;
+      while (line.length() > 4 && tft.textWidth(line) > monitorFileListW - 64) line.remove(line.length() - 1);
+      tft.drawString(line, monitorFileListX + 2, y + 2);
+      if (!e.isDir) {
+        char sz[20];
+        snprintf(sz, sizeof(sz), "%lu", (unsigned long)e.size);
+        tft.setTextDatum(TR_DATUM);
+        tft.setTextColor(0x7BCF, TFT_BLACK);
+        tft.drawString(sz, monitorFileListX + monitorFileListW - 4, y + 2);
+        tft.setTextDatum(TL_DATUM);
+      }
+    }
+    tft.setTextColor(0xAFE5, TFT_BLACK);
+    String infoLine = monitorFileInfo;
+    while (infoLine.length() > 4 && tft.textWidth(infoLine) > panelTextMaxW) infoLine.remove(infoLine.length() - 1);
+    tft.drawString(infoLine, panelInnerX, boxY + boxH - kPanelFooterBandH + 1);
+  } else {
+    btnMonitorUp = {boxX, bottom.y, 40, ctlH, "^"};
+    btnMonitorDown = {boxX + 44, bottom.y, 40, ctlH, "v"};
+    drawButton(btnMonitorUp, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+    drawButton(btnMonitorDown, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+    tft.setTextSize(bodySize);
+    tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
+    String viewHdr = String(monitorViewUseSd ? "SD: " : "LFS: ") + monitorViewPath;
+    while (viewHdr.length() > 4 && tft.textWidth(viewHdr) > panelTextMaxW) viewHdr.remove(viewHdr.length() - 1);
+    tft.drawString(viewHdr, panelInnerX, panelInnerY);
+    const int rowH = landscape ? 20 : 24;
+    int vis = max(1, panelRowsH / rowH);
+    int maxScroll = max(0, monitorViewLineCount - vis);
+    monitorViewScroll = clampi(monitorViewScroll, 0, maxScroll);
+    for (int i = 0; i < vis; i++) {
+      int idx = monitorViewScroll + i;
+      if (idx >= monitorViewLineCount) break;
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      String ln = monitorViewLines[idx];
+      while (ln.length() > 4 && tft.textWidth(ln) > panelTextMaxW) ln.remove(ln.length() - 1);
+      const int y = panelRowsTopY + i * rowH;
+      if (y + rowH > panelRowsBottomY) break;
+      tft.drawString(ln, panelInnerX, y);
+    }
+  }
+
+  s_tab5ChromeDrawn = true;
+  s_prevW = w;
+  s_prevH = h;
+  s_prevRotation = rotationNow;
+  s_prevLandscape = landscape;
+  s_prevTab = monitorTab5Tab;
+
+  drawBorder();
+  return;
+#else
   const UiRect content = computeContentRect();
   const UiRect bottom = computeBottomBarRect();
   const int panelX = content.x;
@@ -10496,14 +10872,30 @@ static void drawMonitor() {
   }
   uiLogLayout("drawMonitor", content, bottom);
   uiLogButtonRect("Monitor.Back", btnMonitorBack);
+#endif
 }
 
 static void monitorTick() {
   if (screen != ScreenId::MONITOR) return;
+  static uint32_t s_monitorYoinkLastSeq = 0;
 
   uint32_t now = millis();
   if (now - monitorLastUpdateMs < (uint32_t)cfg.telemetry_monitorIntervalMs) return;
   monitorLastUpdateMs = now;
+
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  if (monitorTab5Paused && monitorTab5Tab == MonitorTab5Tab::LIVE) return;
+  if (monitorTab5Tab == MonitorTab5Tab::SD || monitorTab5Tab == MonitorTab5Tab::LITTLEFS) {
+    if ((now - monitorFileLastRefreshMs) > 1500U) {
+      monitorLoadFileDirFs(monitorTab5Tab == MonitorTab5Tab::SD ? (fs::FS&)SD : (fs::FS&)LittleFS,
+                           monitorTab5Tab == MonitorTab5Tab::SD ? monitorSdPath : monitorLfsPath,
+                           monitorTab5Tab == MonitorTab5Tab::SD);
+      drawMonitor();
+    }
+    return;
+  }
+  if (monitorTab5Tab == MonitorTab5Tab::FILE_VIEW) return;
+#endif
 
   if (monitorMode == MonitorMode::FILES) {
     if ((now - monitorFileLastRefreshMs) > 1500U) {
@@ -10592,8 +10984,8 @@ static void monitorTick() {
       bool anyNew = false;
       for (uint8_t i = 0; i < logCount; i++) {
         const YoinkLogEntry* e = YoinkEngine::getLogEntry(i);
-        if (!e || e->seq <= monitorYoinkLastSeq) continue;
-        monitorYoinkLastSeq = e->seq;
+        if (!e || e->seq <= s_monitorYoinkLastSeq) continue;
+        s_monitorYoinkLastSeq = e->seq;
         anyNew = true;
         // Color by severity: 0=info(cyan), 1=success(green), 2=warn(yellow), 3=err(red)
         uint16_t color = TFT_CYAN;
@@ -10701,8 +11093,10 @@ static void monitorTick() {
       monitorPushLine(TFT_CYAN, "DROPPED %lu   ERRORS %lu",
                       (unsigned long)sniffDroppedPackets, (unsigned long)fileTotalErrors);
       monitorPushLine(TFT_WHITE, "");
-      monitorPushLine(TFT_GREEN, "LAST PKT: %s",
-                      monitorPktTypeStr(monLastType));
+      const char* pktType = (monLastType == WIFI_PKT_MGMT) ? "MGMT" :
+                            (monLastType == WIFI_PKT_CTRL) ? "CTRL" :
+                            (monLastType == WIFI_PKT_DATA) ? "DATA" : "UNK";
+      monitorPushLine(TFT_GREEN, "LAST PKT: %s", pktType);
       monitorPushLine(TFT_GREEN, "LEN %u bytes   RSSI %d dBm",
                       (unsigned)monLastLen, monLastRssi);
       monitorPushLine(TFT_WHITE, "");
@@ -14155,6 +14549,9 @@ static void setScreen(ScreenId next) {
     case ScreenId::TARGETS_PLACEHOLDER: drawPlaceholder("Targets", "Coming soon"); break;
   }
   HypercubeWidget::notifyScreenDrawn();
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  drawTab5ScreenshotOverlay();
+#endif
 #if UI_DEBUG_MEM
   char memTag[48];
   snprintf(memTag, sizeof(memTag), "screen:%s", screenToStr(screen));
@@ -14193,6 +14590,9 @@ static void redrawActiveScreen() {
     case ScreenId::NEON_PANIC:          drawNeonPanic(); break;
     case ScreenId::SYNC:                drawSync(); break;
   }
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  drawTab5ScreenshotOverlay();
+#endif
 }
 
 #if defined(NEONDRIVE_TARGET_CYD)
@@ -14219,6 +14619,15 @@ static uint8_t g_tab5RotationCandidate = 1;
 static uint32_t g_tab5RotationCandidateSinceMs = 0;
 static uint32_t g_tab5RotationLastSampleMs = 0;
 
+static void tab5InvalidateUiLayoutCaches() {
+  monitorLayoutDrawn = false;
+  justGoLayoutDrawn = false;
+  scopeLayoutDrawn = false;
+  reconLayoutDrawn = false;
+  psLayoutDrawn = false;
+  psNeedsFullStatic = true;
+}
+
 static int tab5ClassifyRotationFromAccel(float ax, float ay, float az) {
   // Ignore near-flat/noisy poses to avoid accidental spins.
   if (fabsf(ax) < 0.30f && fabsf(ay) < 0.30f) return -1;
@@ -14236,6 +14645,7 @@ static void tab5ApplyRotation(uint8_t rotation) {
   tft.setRotation(rotation);
   Serial.printf("[tab5-rot] apply=%u\n", (unsigned)rotation);
   resetTouchLatch();
+  tab5InvalidateUiLayoutCaches();
   redrawActiveScreen();
 }
 
@@ -14278,6 +14688,52 @@ static bool saveScreenshotToSd(char* outPath, size_t outPathLen) {
 
   // Find next available filename
   char path[36];
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  for (int i = 0; i < 1000; i++) {
+    snprintf(path, sizeof(path), "/screenshots/scr_%04d.png", i);
+    if (!SD.exists(path)) break;
+  }
+
+  const int W = tft.width();
+  const int H = tft.height();
+  tft.endWrite();
+  delay(2);
+
+  size_t pngLen = 0;
+  void* pngData = tft.createPng(&pngLen, 0, 0, W, H);
+  if (!pngData || pngLen == 0) {
+    Serial.println("[screenshot] createPng failed");
+    tft.releasePngMemory();
+    return false;
+  }
+
+  File f = SD.open(path, FILE_WRITE);
+  if (!f) {
+    Serial.printf("[screenshot] open failed: %s\n", path);
+    tft.releasePngMemory();
+    return false;
+  }
+
+  const size_t written = f.write((const uint8_t*)pngData, pngLen);
+  f.close();
+  tft.releasePngMemory();
+  const bool ok = (written == pngLen);
+  if (!ok) {
+    Serial.printf("[screenshot] write error on %s (%u/%u)\n", path, (unsigned)written, (unsigned)pngLen);
+    return false;
+  }
+
+  if (outPath && outPathLen > 0) {
+    strncpy(outPath, path, outPathLen - 1);
+    outPath[outPathLen - 1] = '\0';
+  }
+  Serial.printf("[screenshot] saved %s (%u bytes)\n", path, (unsigned)pngLen);
+
+  tft.drawRect(0, 0, W, H, TFT_WHITE);
+  delay(120);
+  HypercubeWidget::notifyScreenDrawn();
+  return true;
+#else
   for (int i = 0; i < 1000; i++) {
     snprintf(path, sizeof(path), "/screenshots/scr_%04d.bmp", i);
     if (!SD.exists(path)) break;
@@ -14363,7 +14819,43 @@ static bool saveScreenshotToSd(char* outPath, size_t outPathLen) {
   delay(120);
   HypercubeWidget::notifyScreenDrawn();
   return readOk;
+#endif
 }
+
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+static void drawTab5ScreenshotOverlay() {
+  const int w = tft.width();
+  const int x = w - HypercubeWidget::REGION_PAD - HypercubeWidget::REGION_W;
+  const int y = HypercubeWidget::REGION_PAD;
+  const int bw = HypercubeWidget::REGION_W;
+  const int bh = HypercubeWidget::REGION_H;
+  btnTab5Screenshot = {x, y, bw, bh, "SHOT"};
+
+  const bool showToast = ((int32_t)(tab5ScreenshotToastUntilMs - millis()) > 0);
+  const uint16_t fill = showToast ? (tab5ScreenshotToastOk ? TFT_DARKGREEN : TFT_MAROON) : TFT_NAVY;
+  const uint16_t edge = showToast ? (tab5ScreenshotToastOk ? TFT_GREEN : TFT_RED) : TFT_CYAN;
+  tft.fillRoundRect(x, y, bw, bh, 7, fill);
+  tft.drawRoundRect(x, y, bw, bh, 7, edge);
+  tft.drawRoundRect(x + 2, y + 2, bw - 4, bh - 4, 5, tft.color565(20, 40, 40));
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_WHITE, fill);
+  tft.setTextSize(1);
+  tft.drawString(showToast ? (tab5ScreenshotToastOk ? "SAVED" : "FAIL") : "SHOT", x + (bw / 2), y + (bh / 2) - 5);
+  if (showToast && tab5ScreenshotToastOk) {
+    tft.drawString("SD", x + (bw / 2), y + (bh / 2) + 7);
+  }
+  tft.setTextDatum(TL_DATUM);
+}
+
+static void tab5ScreenshotOverlayTick() {
+  static bool s_lastToastVisible = false;
+  const bool toastVisible = ((int32_t)(tab5ScreenshotToastUntilMs - millis()) > 0);
+  if (toastVisible != s_lastToastVisible) {
+    drawTab5ScreenshotOverlay();
+    s_lastToastVisible = toastVisible;
+  }
+}
+#endif
 
 static void sw1Tick() {
   if (!sw1Enabled || PIN_SW1 < 0) return;
@@ -14991,6 +15483,9 @@ void loop() {
   bruceMonitorTick();
   updateHypercubeActivity();
   HypercubeWidget::tick();
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  tab5ScreenshotOverlayTick();
+#endif
   verboseHeartbeatTick();
 
   // WiFi connection status updates
@@ -15020,6 +15515,25 @@ void loop() {
           screenToStr(screen),
           g_lastTouchRawX, g_lastTouchRawY, g_lastTouchRawZ,
           tx, ty);
+
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  if (hit(btnTab5Screenshot, tx, ty)) {
+    char path[48] = {0};
+    const bool ok = saveScreenshotToSd(path, sizeof(path));
+    tab5ScreenshotToastOk = ok;
+    tab5ScreenshotToastUntilMs = millis() + 900;
+    if (ok) {
+      strncpy(tab5ScreenshotLastPath, path, sizeof(tab5ScreenshotLastPath) - 1);
+      tab5ScreenshotLastPath[sizeof(tab5ScreenshotLastPath) - 1] = '\0';
+      pushConsoleEventf("INFO", "SHOT", "Saved %s", tab5ScreenshotLastPath);
+    } else {
+      pushConsoleEvent("WARN", "SHOT", "Screenshot failed");
+    }
+    drawTab5ScreenshotOverlay();
+    waitTouchRelease();
+    return;
+  }
+#endif
 
   if (screen == ScreenId::NEON_PANIC) {
     ScreenId back = (neonPanicReturnScreen == ScreenId::NEON_PANIC) ? ScreenId::HOME : neonPanicReturnScreen;
@@ -15415,6 +15929,87 @@ void loop() {
 
   // MONITOR
   if (screen == ScreenId::MONITOR) {
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+    if (hit(btnMonitorBack, tx, ty)) {
+      setScreen(monitorReturnScreen);
+      waitTouchRelease();
+      return;
+    }
+    if (hit(btnMonitorTabLive, tx, ty)) {
+      monitorTab5Tab = MonitorTab5Tab::LIVE;
+      drawMonitor();
+      waitTouchRelease();
+      return;
+    }
+    if (hit(btnMonitorTabSd, tx, ty)) {
+      monitorTab5Tab = MonitorTab5Tab::SD;
+      monitorFileUseSd = true;
+      monitorLoadFileDirFs(SD, monitorSdPath, true);
+      drawMonitor();
+      waitTouchRelease();
+      return;
+    }
+    if (hit(btnMonitorTabLfs, tx, ty)) {
+      monitorTab5Tab = MonitorTab5Tab::LITTLEFS;
+      monitorFileUseSd = false;
+      monitorLoadFileDirFs(LittleFS, monitorLfsPath, false);
+      drawMonitor();
+      waitTouchRelease();
+      return;
+    }
+    if (hit(btnMonitorTabView, tx, ty)) {
+      monitorTab5Tab = MonitorTab5Tab::FILE_VIEW;
+      drawMonitor();
+      waitTouchRelease();
+      return;
+    }
+    if (monitorTab5Tab == MonitorTab5Tab::LIVE) {
+      if (hit(btnMonitorPause, tx, ty)) { monitorTab5Paused = !monitorTab5Paused; drawMonitor(); waitTouchRelease(); return; }
+      if (hit(btnMonitorClear, tx, ty)) { monitorLineCount = 0; drawMonitor(); waitTouchRelease(); return; }
+      if (hit(btnMonitorAuto, tx, ty)) { monitorTab5AutoScroll = !monitorTab5AutoScroll; drawMonitor(); waitTouchRelease(); return; }
+      if (hit(btnMonitorFilter, tx, ty)) { monitorTab5Filter = (uint8_t)((monitorTab5Filter + 1) & 0x03); drawMonitor(); waitTouchRelease(); return; }
+    } else if (monitorTab5Tab == MonitorTab5Tab::SD || monitorTab5Tab == MonitorTab5Tab::LITTLEFS) {
+      if (hit(btnMonitorUpDir, tx, ty)) { monitorGoParentDir(); drawMonitor(); waitTouchRelease(); return; }
+      if (hit(btnMonitorUp, tx, ty)) { monitorFileScroll = max(0, monitorFileScroll - 1); drawMonitor(); waitTouchRelease(); return; }
+      if (hit(btnMonitorDown, tx, ty)) {
+        int maxScroll = max(0, monitorFileCount - monitorFileVisibleRows);
+        monitorFileScroll = min(maxScroll, monitorFileScroll + 1);
+        drawMonitor();
+        waitTouchRelease();
+        return;
+      }
+      if (tx >= monitorFileListX && tx < (monitorFileListX + monitorFileListW) &&
+          ty >= monitorFileListY && ty < (monitorFileListY + monitorFileListH)) {
+        const int row = (ty - monitorFileListY) / monitorFileRowH;
+        const int idx = monitorFileScroll + row;
+        if (idx >= 0 && idx < monitorFileCount) {
+          const MonitorFileEntry& e = monitorFiles[idx];
+          if (e.isDir) {
+            monitorEnterDir(e.name);
+          } else {
+            if (strcmp(monitorFilePath, "/") == 0) {
+              snprintf(monitorViewPath, sizeof(monitorViewPath), "/%s", e.name);
+            } else {
+              snprintf(monitorViewPath, sizeof(monitorViewPath), "%s/%s", monitorFilePath, e.name);
+            }
+            monitorViewUseSd = (monitorTab5Tab == MonitorTab5Tab::SD);
+            monitorLoadViewFile();
+            monitorTab5Tab = MonitorTab5Tab::FILE_VIEW;
+          }
+          if (monitorTab5Tab == MonitorTab5Tab::SD) strncpy(monitorSdPath, monitorFilePath, sizeof(monitorSdPath) - 1);
+          else strncpy(monitorLfsPath, monitorFilePath, sizeof(monitorLfsPath) - 1);
+          drawMonitor();
+          waitTouchRelease();
+          return;
+        }
+      }
+    } else if (monitorTab5Tab == MonitorTab5Tab::FILE_VIEW) {
+      if (hit(btnMonitorUp, tx, ty)) { monitorViewScroll = max(0, monitorViewScroll - 1); drawMonitor(); waitTouchRelease(); return; }
+      if (hit(btnMonitorDown, tx, ty)) { monitorViewScroll++; drawMonitor(); waitTouchRelease(); return; }
+    }
+    waitTouchRelease();
+    return;
+#endif
     if (hit(btnMonitorBack, tx, ty)) {
       setScreen(monitorReturnScreen);
       waitTouchRelease();
