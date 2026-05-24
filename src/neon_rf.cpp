@@ -110,29 +110,36 @@ void neon_rf_init() {
     // Log the SDIO pin mapping that was compiled in via tab5_sdkconfig_override.h.
     tab5_configure_wifi_sdio_pins_once();
 
-    // Pulse C6 RESET (GPIO15) low→high before any WiFi call.
+    // Do NOT pulse GPIO15 (C6 RST) manually.
     //
-    // Root cause of "send_op_cond (1) returned 0x107":
-    //   WiFiGeneric.cpp has `//conf.pin_rst.pin = ...` commented out, so the
-    //   ESP-Hosted stack never resets the slave.  The pre-compiled
-    //   libespressif__esp_hosted.a has GPIO54 (eval board) baked in for its
-    //   internal slave-reset path — useless on Tab5.  We do it ourselves here,
-    //   early in setup(), giving the C6 ≥500 ms to boot its SDIO slave firmware
-    //   before the first WiFi call arrives from loop().
-    Serial.printf("[neon_rf] C6 RESET: asserting GPIO%d LOW\n", TAB5_SDIO_RST);
-    gpio_reset_pin((gpio_num_t)TAB5_SDIO_RST);
-    gpio_set_direction((gpio_num_t)TAB5_SDIO_RST, GPIO_MODE_OUTPUT);
-    gpio_set_level((gpio_num_t)TAB5_SDIO_RST, 0);   // assert RESET
-    delay(50);                                        // hold 50 ms
-    gpio_set_level((gpio_num_t)TAB5_SDIO_RST, 1);   // deassert RESET
-    Serial.printf("[neon_rf] C6 RESET: GPIO%d HIGH – waiting 500 ms for C6 boot\n",
-                  TAB5_SDIO_RST);
-    delay(500);                                       // C6 slave firmware boot time
-    Serial.println("[neon_rf] C6 RESET: done");
+    // The C6 running ESP-Hosted 2.12.6 slave firmware initialises its SDIO
+    // peripheral automatically at power-on.  Asserting GPIO15 LOW forces a
+    // hard reset of the C6 mid-boot, then the 500 ms wait may not be long
+    // enough for the slave to re-init before the host's CMD5 timeout fires.
+    // The M5Stack OTA tool communicates successfully with the C6 without any
+    // explicit RST pulse, confirming the C6 is ready at natural boot time.
+    //
+    // We instead simply wait here to ensure the C6 has had adequate time from
+    // power-on to reach its SDIO slave ready state before the first WiFi call.
+    Serial.println("[neon_rf] C6 boot wait: 1500 ms (no RST pulse)");
+    delay(1500);
+    Serial.println("[neon_rf] C6 boot wait: done");
 
 #if defined(TAB5_TEST_C6_SCAN)
     // Auto-test: attempt WiFi STA mode immediately to validate SDIO init.
     // Only enabled in the c6_scan test build; production firmware waits for UI.
+    //
+    // WiFi.setPins() is required on Arduino-ESP32 ≥3.3.0 (pioarduino ≥55.03.33).
+    // The old 3.2.0 wifiHostedInit() macro expansion applied our
+    // tab5_sdkconfig_override.h values, but esp_hosted_sdio_set_config() in the
+    // pre-compiled library did not propagate them to the SDMMC slot config.
+    // WiFi.setPins() uses the new sdio_pin_config_t path added in PR #11513 that
+    // correctly routes the pins through to sdmmc_host_init_slot().
+    WiFi.setPins(TAB5_SDIO_CLK, TAB5_SDIO_CMD, TAB5_SDIO_D0, TAB5_SDIO_D1,
+                 TAB5_SDIO_D2, TAB5_SDIO_D3, TAB5_SDIO_RST);
+    Serial.printf("[neon_rf] WiFi.setPins: clk=%d cmd=%d d0=%d d1=%d d2=%d d3=%d rst=%d\n",
+                  TAB5_SDIO_CLK, TAB5_SDIO_CMD, TAB5_SDIO_D0, TAB5_SDIO_D1,
+                  TAB5_SDIO_D2, TAB5_SDIO_D3, TAB5_SDIO_RST);
     Serial.println("[c6test] step=sdio_init start (auto-test in neon_rf_init)");
     neon_rf_set_last_action("c6test_auto_sdio_init");
     if (!WiFi.mode(WIFI_MODE_STA)) {

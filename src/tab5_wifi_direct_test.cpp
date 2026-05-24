@@ -6,9 +6,8 @@
 // Official Tab5 SDIO mapping from M5 docs:
 // CLK=12 CMD=13 D0=11 D1=10 D2=9 D3=8 RST=15
 //
-// Note: In this PlatformIO core, WiFi.setPins(...) is not exposed on WiFiClass.
-// We therefore rely on compile-time hosted SDIO pin override from:
-// include/tab5_sdkconfig_override.h
+// WiFi.setPins() was added in arduino-esp32 3.3.0 (pioarduino 55.03.33+, PR #11513).
+// It must be called after M5.begin() and before WiFi.mode() / WiFi.begin().
 
 static uint32_t s_lastScanMs = 0;
 
@@ -24,6 +23,9 @@ void setup() {
   M5.Display.setTextSize(2);
   M5.Display.setCursor(8, 8);
   M5.Display.println("Tab5 WiFi Direct Test");
+
+  WiFi.setPins(12, 13, 11, 10, 9, 8, 15);  // CLK CMD D0 D1 D2 D3 RST
+  Serial.println("[direct] WiFi.setPins done (CLK=12 CMD=13 D0=11 D1=10 D2=9 D3=8 RST=15)");
 
   if (!WiFi.mode(WIFI_STA)) {
     Serial.println("[direct] WiFi.mode(WIFI_STA) failed");

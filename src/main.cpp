@@ -302,9 +302,14 @@ static int g_touchZMin = 80;
 #endif
 
 #if defined(NEONDRIVE_TARGET_M5TAB5)
-// M5.Lcd is an M5GFX member of the global M5Unified instance.
-// The reference alias lets every tft.xxx() call site compile unchanged.
-static M5GFX& tft = M5.Lcd;
+// M5.Display is a plain value member of M5Unified; binding a reference to it
+// generates a compile-time-constant address (&M + offsetof(Display)) and is
+// safe regardless of static-initialization order.  Avoid M5.Lcd here: Lcd is
+// a *reference member* (M5GFX &Lcd = Display) whose internal pointer is only
+// valid after M5Unified's constructor runs.  If main.cpp's statics initialise
+// before M5Unified::M is constructed, M5.Lcd resolves to null and every
+// subsequent tft.xxx() call crashes with a load-access-fault.
+static M5GFX& tft = M5.Display;
 #else
 TFT_eSPI tft;
 #if !defined(NEONDRIVE_TARGET_BUTTON_NAV)
@@ -13938,7 +13943,13 @@ void setup() {
   Serial.println();
   Serial.printf("=== %s | Milestone D ===\n", ND_PROFILE_NAME);
   printDeviceProfileBanner();
+#if !defined(NEONDRIVE_TARGET_M5TAB5)
+  // On Tab5, neon_rf_init() is deferred to after M5.begin() because
+  // PI4IOE2 (I²C addr 0x44) powers the C6 WiFi module; it is initialised
+  // inside M5.begin() via M5GFX.  Calling WiFi.mode() before M5.begin()
+  // leaves the C6 without power → SDIO CMD5 gets no response → crash.
   neon_rf_init();
+#endif
 
 #if defined(NEONDRIVE_TARGET_BUTTON_NAV)
   if (PIN_NAV_NEXT >= 0) pinMode(PIN_NAV_NEXT, INPUT_PULLUP);
@@ -13978,6 +13989,9 @@ void setup() {
   Serial.printf("[tab5] display %dx%d  touch_enabled=%d\n",
                 tft.width(), tft.height(), (int)M5.Touch.isEnabled());
   touch_init();  // just logs the isEnabled() state
+  // PI4IOE2 (0x44) is now initialised by M5GFX: C6 WiFi power/enable bits
+  // are set HIGH.  Safe to init the RF layer and attempt SDIO contact.
+  neon_rf_init();
 #else
   backlightBringup();
   display_init();

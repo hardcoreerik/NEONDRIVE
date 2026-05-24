@@ -106,72 +106,123 @@ Before re-enabling SD:
 
 ---
 
-### WiFi on Tab5 — root cause diagnosed, C6 slave firmware missing
+### WiFi on Tab5 — **WORKING** (confirmed 2026-05-24)
 
-When any code path triggers `WiFi.begin()` or starts a scan, the ESP32-P4 tries
-to initialise the ESP32-C6 co-processor over the SDIO bus and crashes:
+WiFi scan returns results.  The ESP32-C6 co-processor has ESP-Hosted SDIO slave
+firmware v2.12.6 from the factory.  The P4 host stack is pioarduino 55.03.38-1
+(Arduino 3.3.8 / ESP-IDF 5.5.4) which ships ESP-Hosted host v2.12.3.
+
+**Working configuration:**
+- Platform: `pioarduino 55.03.38-1` (required for `WiFi.setPins()`)
+- Call `WiFi.setPins(CLK=12, CMD=13, D0=11, D1=10, D2=9, D3=8, RST=15)` **before**
+  `WiFi.mode()` in `neon_rf_init()`
+- No C6 reset pulse needed — factory firmware handles SDIO slave init on power-up
+- `delay(1500)` before `WiFi.setPins()` to give C6 time to boot
+
+**Verified boot sequence:**
+```
+[esp32-hal-hosted.c] SDIO pins: clk=12, cmd=13, d0=11, d1=10, d2=9, d3=8, rst=15
+[esp32-hal-hosted.c] ESP-Hosted initialized!
+[esp32-hal-hosted.c] Slave firmware version: 2.12.6
+[c6test] step=sdio_init OK - starting scan
+[c6test] step=scan OK found=N      ← N > 0 confirms WiFi works
+```
+
+---
+
+### WiFi on Tab5 — historical crash (pioarduino 54.03.20, now obsolete)
+
+> This section documents the crash that occurred with the old platform.
+> It is no longer relevant for any active build.
+
+With pioarduino `54.03.20` (ESP-IDF 5.3.x), `WiFi.setPins()` did not exist.
+The SDIO bus defaulted to wrong pins, the C6 never responded to CMD5, and the
+P4 host stack crashed with:
 
 ```
-sdio_mempool_create free:34016864 ...
-E (7055) sdmmc_common: sdmmc_init_ocr: send_op_cond (1) returned 0x107
-E (7055) sdio_wrapper: sdmmc_card_init failed
-E (15119) H_SDIO_DRV: sdio card init failed
+E sdmmc_common: sdmmc_init_ocr: send_op_cond (1) returned 0x107
 FreeRTOS: FreeRTOS Task "sdio_read" should not return, Aborting now!
 ```
 
-**Root cause (confirmed 2026-05-23):** The ESP32-C6 SDIO slave peripheral is not
-running. `send_op_cond returned 0x107` is an SDIO CMD5 OCR timeout — the C6 never
-responds to any SDIO command. The pioarduino platform `54.03.20` does **not** bundle
-a C6 slave firmware binary; only the ESP-Hosted slave firmware header files are
-present. Without the slave firmware flashed to the C6, the SDIO host on the P4 will
-never enumerate the bus regardless of timing, clock speed, or reset pulse.
+**Fix:** Upgrade to pioarduino 55.03.38-1 and call `WiFi.setPins()`.  No firmware
+reflash of the C6 is needed — the factory firmware already has SDIO slave support.
 
-**What was tried and definitively ruled out:**
+---
 
-| Attempt | Result |
-|---|---|
-| GPIO15 reset pulse (50 ms LOW → HIGH, 500 ms wait) in `neon_rf_init()` | No change — crash identical |
-| SDIO clock reduced to 20 MHz (from 40 MHz default) via `CONFIG_ESP_SDIO_CLOCK_FREQ_KHZ` | No change — crash identical |
-| Compile-time SDIO pin override via `tab5_sdkconfig_override.h` | Pins correct, not the issue |
-| Catching the FreeRTOS abort | Not possible — task stack corrupted by then |
+### M5GFX + Arduino 3.3.x (ESP-IDF 5.5) — I²C bus corruption (FIXED 2026-05-24)
 
-**Why GPIO15 reset has no effect:**
-- `WiFiGeneric.cpp` has `//conf.pin_rst.pin = ...` **commented out** — the SDIO
-  host config struct has no RST field.
-- The pre-compiled `libespressif__esp_hosted.a` has GPIO54 (eval board) baked in
-  for its internal `esp_hosted_slave_reset()` — cannot be changed via macro override.
-- Our manual GPIO15 pulse fires correctly but the C6 boots into its default (empty)
-  firmware, not the SDIO slave firmware the ESP-Hosted host stack expects.
+**Symptoms:** `Load access fault` crash during `M5.begin()` with pioarduino
+55.03.xx.  Address decoder shows crash inside M5GFX `i2c::init()`.
 
-**Path forward — reflash C6 with ESP-Hosted SDIO slave firmware:**
+**Root cause:** ESP-IDF 5.4 introduced a new I²C master driver API
+(`i2c_new_master_bus` / `i2c_del_master_bus` instead of the old `i2c_driver_install`).
+M5GFX 0.2.21 calls `Wire.end()` + `Wire.begin()` (via `release()` then `init()`)
+multiple times per autodetect cycle.  On IDF 5.5, repeated `i2c_del_master_bus` +
+`i2c_new_master_bus` cycles corrupt the driver's internal linked-list state;
+after ~5 cycles `bus_handle` becomes NULL and the next I²C write crashes.
 
-1. Clone `https://github.com/espressif/esp-hosted` and build the slave firmware
-   for the ESP32-C6 with SDIO transport:
+**Fix (applied to all 4 Tab5 libdeps M5GFX copies):**
+
+In `.pio/libdeps/<env>/M5GFX/src/lgfx/v1/platforms/esp32/common.cpp`:
+
+1. **`release(port)` — skip `Wire.end()` and pin reset on IDF ≥ 5.4:**
+   ```cpp
+   #if defined (ESP_IDF_VERSION_VAL) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 0))
+       // Keep the NG bus alive; only reset the M5GFX initialized flag.
+   #else
+       // ... existing Wire.end() + pinMode() teardown ...
+   #endif
    ```
-   cd esp-hosted/slave
-   idf.py set-target esp32c6
-   # Enable SDIO transport in sdkconfig (CONFIG_ESP_SDIO_SLAVE_TRANSPORT_SDIO=y)
-   idf.py build
-   ```
-2. Flash the C6 over its UART. Possible access paths on Tab5:
-   - **M-Bus Port B**: GPIO17, GPIO52 on the P4 — may be a UART passthrough to C6 TX/RX
-   - **M-Bus Port C**: GPIO7, GPIO6 on the P4
-   - **JTAG** if accessible via debug header
-3. Verify the C6 boots the SDIO slave firmware (it should print over UART0 if accessible).
-4. Re-run `firmware_m5tab5_c6_scan` — should see scan results instead of the abort.
 
-**Note:** `PI4IOE2` (I²C addr 0x44) on the Tab5 controls bits 0, 3, 7 for unknown
-peripherals. One of these may be a C6 power/enable gate. If reflashing C6 doesn't
-help, probe those bits with `i2c_master_transmit` while monitoring C6 boot output.
+2. **`init(port)` — call `Wire.begin()` exactly once per port:**
+   ```cpp
+   #if defined (ESP_IDF_VERSION_VAL) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 0))
+       { static bool s_wire_init[I2C_NUM_MAX] = {};
+         if (!s_wire_init[i2c_port]) {
+           s_wire_init[i2c_port] = true;
+           twowire->begin(...);
+         }
+       }
+   #else
+       twowire->begin(...);  // old path unchanged
+   #endif
+   ```
+
+**Warning:** these patches are in `.pio/libdeps/` which PlatformIO can regenerate.
+If libdeps are wiped, re-apply the patches from the commit history in
+`codex/tab5-compile` branch.
+
+---
+
+### `tft` reference — static initialisation order fiasco (FIXED 2026-05-24)
+
+**Symptom:** After M5.begin() completes cleanly, `tft.setRotation(1)` immediately
+crashes with `Load access fault` at `LGFXBase::setRotation` line 61:
+`lw a0,8(a0)` — `this = NULL`.
+
+**Root cause:** `static M5GFX& tft = M5.Lcd;` at file scope.
+`M5.Lcd` is a **reference member** of `M5Unified` (`M5GFX &Lcd = Display`).
+Reference members are stored internally as pointers, initialised when the class
+constructor runs.  If `main.cpp`'s statics initialise before the global
+`M5Unified M` object is constructed (undefined order across translation units),
+`M5.Lcd`'s internal pointer is still zero → `tft = nullptr` → crash.
+
+**Fix (in `src/main.cpp` line ~307):**
+```cpp
+// BAD — reference member, depends on M5Unified constructor having run:
+static M5GFX& tft = M5.Lcd;
+
+// GOOD — value member, address is a link-time constant, safe at any init order:
+static M5GFX& tft = M5.Display;
+```
+
+`M5.Display` is a plain `M5GFX` value member; `&M5.Display` is deterministic at
+link time regardless of whether `M5Unified::M` has been constructed yet.
 
 **Guarded builds:**
 - `firmware_m5tab5` (production): no WiFi calls; boots cleanly; touch/display work.
-- `firmware_m5tab5_c6_scan`: auto-tests SDIO init in `neon_rf_init()` via
-  `TAB5_TEST_C6_SCAN` guard. Use only for C6 bringup; always crashes until slave
-  firmware is present.
-
-**Do not attempt to work around the abort in firmware** — the task stack is
-corrupted by then. Fix requires physical C6 firmware reflash.
+- `firmware_m5tab5_c6_scan`: tests SDIO+WiFi scan; use `TAB5_TEST_C6_SCAN` guard.
+- Both verified working with pioarduino 55.03.38-1 as of 2026-05-24.
 
 ---
 
@@ -184,7 +235,7 @@ corrupted by then. Fix requires physical C6 firmware reflash.
 | `firmware_cyd_3_5` | CYD 3.5" (ESP32) | ✅ Stable |
 | `firmware_t_display_s3` | LilyGO T-Display-S3 | ⚠️ Beta |
 | `firmware_t_embed_cc1101` | LilyGO T-Embed CC1101 | 🚧 Untested |
-| `firmware_m5tab5` | M5Stack Tab5 (ESP32-P4) | 🔧 In progress — touch works, WiFi crashes |
+| `firmware_m5tab5` | M5Stack Tab5 (ESP32-P4) | ✅ Display + touch working, WiFi working |
 
 Flash command: `pio run -e <env> -t upload --upload-port <COMx>`
 
