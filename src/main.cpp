@@ -53,6 +53,7 @@ using fs::File;
 #include <stdarg.h>
 #include <time.h>
 #include <freertos/semphr.h>
+#include "neon_rf.h"
 #include "deauth_hunter.h"
 #include "bruce_wifi.h"
 #include "dropbox_client.h"
@@ -118,6 +119,7 @@ using fs::File;
 //  See CLAUDE.md §"M5Stack Tab5 — Touch Implementation" for the full story.
 // ═══════════════════════════════════════════════════════════════════════════
 static constexpr bool BOARD_HAS_TOUCH = true;
+static constexpr bool BOARD_HAS_IMU   = true;
 // BOARD_HAS_SD = false — see critical warning above.
 // SD is physically present (SPI3) but must stay disabled until Tab5 SD SPI
 // pins are verified from schematic so they don't alias the GT911 I²C bus.
@@ -148,6 +150,7 @@ static constexpr uint8_t LED_PWM_CHANNELS[] = {0, 1, 2};
 
 #elif defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH) || defined(ARDUINO_LILYGO_T_DISPLAY_S3)
 static constexpr bool BOARD_HAS_TOUCH = false;
+static constexpr bool BOARD_HAS_IMU   = false;
 static constexpr bool BOARD_HAS_SD = false;
 static constexpr bool TFT_USES_SPI_BUS = false;
 static constexpr int BOARD_TFT_ROTATION = 1;
@@ -186,6 +189,7 @@ static constexpr int LED_PINS[] = {-1, -1, -1};
 static constexpr uint8_t LED_PWM_CHANNELS[] = {0, 1, 2};
 #elif defined(NEONDRIVE_TARGET_TEMBED)
 static constexpr bool BOARD_HAS_TOUCH = false;
+static constexpr bool BOARD_HAS_IMU   = false;
 static constexpr bool BOARD_HAS_SD = false;
 static constexpr bool TFT_USES_SPI_BUS = true;
 static constexpr int BOARD_TFT_ROTATION = 1;
@@ -222,6 +226,7 @@ static constexpr int LED_PINS[] = {-1, -1, -1};
 static constexpr uint8_t LED_PWM_CHANNELS[] = {0, 1, 2};
 #else
 static constexpr bool BOARD_HAS_TOUCH = true;
+static constexpr bool BOARD_HAS_IMU   = false;
 static constexpr bool BOARD_HAS_SD = true;
 static constexpr bool TFT_USES_SPI_BUS = true;
 static constexpr int BOARD_TFT_ROTATION = CYD_TFT_ROTATION;
@@ -1339,6 +1344,10 @@ static void startJammitWifi();
 static void stopJammitWifi();
 
 static esp_err_t tryAlternateTx(const uint8_t* pkt, int len) {
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  (void)pkt; (void)len;
+  return neon_rf_log_unsupported("tryAlternateTx");
+#endif
   static uint32_t lastPromToggleMs = 0;
   static uint32_t lastApAttemptMs = 0;
   esp_err_t r = ESP_ERR_INVALID_STATE;
@@ -1735,12 +1744,19 @@ static int sniffPps = 0;
 static void applyChannelLockIfNeeded() {
   if (!hasTarget) return;
   if (!lockChannel) return;
-
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  return;
+#endif
   // Lock radio to the target channel (STA mode). This is passive monitoring.
   esp_wifi_set_channel((uint8_t)target.channel, WIFI_SECOND_CHAN_NONE);
 }
 
 static void startSniff() {
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  neon_rf_set_last_action("startSniff");
+  neon_rf_log_unsupported("startSniff");
+  return;
+#endif
   if (!hasTarget) return;
   if (!sdReady) mountSdCard(true);
 
@@ -1972,6 +1988,12 @@ static void stopSniff() {
   pcapCaptureActive = false;
   captureMode = CaptureMode::NONE;   // also reset capture mode
   autoMode = AutoMode::NONE;
+
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  // startSniff() is a no-op on Tab5; no local radio state to teardown.
+  Serial.println("[sniff] stopSniff: no-op on Tab5 (RF not active)");
+  return;
+#endif
 
   // Disable promiscuous mode and tear down AP gracefully (use mutex)
   if (wifiOpMutex) {
@@ -2626,6 +2648,54 @@ static void handleSerialRpcLine(const String& lineRaw) {
     return;
   }
 
+  if (cmd == "c6test") {
+    String step = (const char*)(req["step"] | "");
+    step.toLowerCase();
+    JsonDocument doc;
+    doc["ok"] = false;
+    doc["cmd"] = "c6test";
+    doc["step"] = step;
+
+    if (step == "sdio_init") {
+      esp_err_t er = neon_rf_c6test_sdio_init();
+      doc["ok"] = (er == ESP_OK);
+      doc["err"] = (int)er;
+      usbRpcSendJson(id, doc);
+      return;
+    }
+
+    if (step == "scan_once") {
+      Serial.println("[c6test] step=scan_once start");
+      doWifiScanBlocking();
+      Serial.printf("[c6test] step=scan_once ok ap_count=%d\n", apCount);
+      doc["ok"] = true;
+      doc["ap_count"] = apCount;
+      usbRpcSendJson(id, doc);
+      return;
+    }
+
+    if (step == "scan_ui_check") {
+      Serial.println("[c6test] step=scan_ui_check start");
+      Serial.printf("[c6test] ui.ap_count=%d\n", apCount);
+      if (apCount > 0) {
+        Serial.println("[c6test] step=scan_ui_check ok");
+        doc["ok"] = true;
+      } else {
+        Serial.println("[c6test] step=scan_ui_check fail reason=no_aps");
+        doc["ok"] = false;
+        doc["error"] = "no_aps";
+      }
+      doc["ap_count"] = apCount;
+      usbRpcSendJson(id, doc);
+      return;
+    }
+
+    Serial.printf("[c6test] step=%s fail reason=unknown_step\n", step.c_str());
+    doc["error"] = "unknown_step";
+    usbRpcSendJson(id, doc);
+    return;
+  }
+
   if (cmd == "ai_frames") {
     JsonDocument doc;
     doc["ok"] = false;
@@ -2636,6 +2706,14 @@ static void handleSerialRpcLine(const String& lineRaw) {
 
   if (cmd == "ai_inject_raw") {
     JsonDocument doc;
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+    neon_rf_set_last_action("usb_ai_inject_raw");
+    doc["ok"] = false;
+    doc["error"] = "rf_unsupported:tab5";
+    doc["backend"] = neon_rf_get_caps()->backend_name;
+    usbRpcSendJson(id, doc);
+    return;
+#endif
     String hex = (const char*)(req["frame"] | "");
     int channel = req["channel"] | 1;
     uint8_t payload[900];
@@ -2656,6 +2734,14 @@ static void handleSerialRpcLine(const String& lineRaw) {
 
   if (cmd == "ai_inject_deauth") {
     JsonDocument doc;
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+    neon_rf_set_last_action("usb_ai_inject_deauth");
+    doc["ok"] = false;
+    doc["error"] = "rf_unsupported:tab5";
+    doc["backend"] = neon_rf_get_caps()->backend_name;
+    usbRpcSendJson(id, doc);
+    return;
+#endif
     String bssidStr = (const char*)(req["bssid"] | "");
     String clientStr = (const char*)(req["client"] | "FF:FF:FF:FF:FF:FF");
     int reason = req["reason"] | 7;
@@ -3283,7 +3369,7 @@ static Button btnScanMinus, btnScanPlus;
 static Button btnDeauthToggle;
 static Button btnWifiDefaultLockToggle;
 static Button btnCfgWifi;
-static Button btnStartupAutoReconnect, btnStartupDefaultLockToggle, btnStartupHypercube, btnStartupWebserver, btnStartupAutoRotate;
+static Button btnStartupAutoReconnect, btnStartupDefaultLockToggle, btnStartupHypercube, btnStartupWebserver, btnStartupAutoRotate, btnStartupManualRotation;
 static Button btnTelemetryMinus, btnTelemetryPlus, btnTelemetryVerboseToggle;
 static Button btnMonitorTab1, btnMonitorTab2;
 static Button btnReconBack, btnReconModeDeauth, btnReconModePort;
@@ -3294,6 +3380,10 @@ static Button btnPSBack, btnPSStart, btnPSMode, btnPSExport, btnPSClr, btnPSFile
 static Button btnPSScrollUp, btnPSScrollDown;
 static Button btnReconHomeDeauth, btnReconHomeNetScan, btnReconHomeAnalyze, btnReconHomeBack;
 static Button btnReconPortUp, btnReconPortDown;
+#if defined(NEONDRIVE_TARGET_CYD)
+static const char* cydRotationLabel(int r);
+static void applyCydManualRotation(int rotation, bool redraw);
+#endif
 static Button btnScopeBack, btnScopeRefresh;
 
 static ScreenId monitorReturnScreen = ScreenId::TARGET_DETAILS;
@@ -6030,6 +6120,11 @@ static void push1tHandleBeacon(const uint8_t* frame, uint32_t len) {
 
 // Send a minimal 802.11 Probe Request with WPS IE to elicit a Probe Response.
 static void push1tSendProbeRequest() {
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  neon_rf_set_last_action("push1tSendProbeRequest");
+  neon_rf_log_unsupported("push1tSendProbeRequest");
+  return;
+#endif
   if (!hasTarget || !push1tBssidCached) return;
 
   // Minimal WPS IE (39 bytes):
@@ -6483,7 +6578,7 @@ static void drawStartupConfig() {
   const int btnY2 = compact ? (content.y + 32) : (content.y + 48);
   const int btnY3 = compact ? (content.y + 62) : (content.y + 88);
   const int btnY4 = compact ? (content.y + 92) : (content.y + 128);
-#if defined(NEONDRIVE_TARGET_M5TAB5)
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_CYD)
   const int row5Y = compact ? (content.y + 124) : (content.y + 176);
   const int btnY5 = compact ? (content.y + 122) : (content.y + 168);
 #endif
@@ -6541,6 +6636,14 @@ static void drawStartupConfig() {
   drawButton(btnStartupAutoRotate,
              cfg.startup_autoRotate ? TFT_DARKGREEN : TFT_MAROON,
              0xFFE0, TFT_WHITE);
+#elif defined(NEONDRIVE_TARGET_CYD)
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("UI rotation", content.x + 4, row5Y);
+
+  btnStartupManualRotation = {btnX, btnY5, btnW, btnH, cydRotationLabel(cfg.startup_manualRotation)};
+  drawButton(btnStartupManualRotation, TFT_DARKGREY, TFT_CYAN, TFT_WHITE);
 #endif
 
   if (!compact) {
@@ -8611,6 +8714,12 @@ function saveKeys() {
   // The WSL bypasser override is already installed so all mgmt frame
   // subtypes (deauth, disassoc, auth, probe, beacon, custom) pass through.
   webServer.on("/api/ai/inject_raw", HTTP_POST, [](){
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+    neon_rf_set_last_action("web_ai_inject_raw");
+    webServer.send(501, "application/json",
+        "{\"ok\":false,\"error\":\"rf_unsupported:tab5\",\"backend\":\"tab5-none\"}");
+    return;
+#endif
     if (!webServer.hasArg("plain")) {
       webServer.send(400, "application/json", "{\"ok\":false,\"error\":\"no body\"}");
       return;
@@ -8673,6 +8782,12 @@ function saveKeys() {
   // AI chooses reason code and burst count based on vendor/chipset profile.
   // Omitting "client" defaults to broadcast (kicks all associated stations).
   webServer.on("/api/ai/inject_deauth", HTTP_POST, [](){
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+    neon_rf_set_last_action("web_ai_inject_deauth");
+    webServer.send(501, "application/json",
+        "{\"ok\":false,\"error\":\"rf_unsupported:tab5\",\"backend\":\"tab5-none\"}");
+    return;
+#endif
     if (!webServer.hasArg("plain")) {
       webServer.send(400, "application/json", "{\"ok\":false,\"error\":\"no body\"}");
       return;
@@ -10229,6 +10344,12 @@ static void layoutReconBackButtonUnderActionDock(int modeRowY, int modeRowH) {
 }
 
 static bool startReconDeauthHunter(bool forceDisconnect) {
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  neon_rf_set_last_action("startReconDeauthHunter");
+  neon_rf_log_unsupported("startReconDeauthHunter");
+  reconStatusLine = "Deauth Hunter: not supported (Tab5 / no C6 backend)";
+  return false;
+#endif
   if (wifiStaHasValidIp() && !forceDisconnect) {
     reconDeauthConfirmUntilMs = millis() + 5000U;
     reconStatusLine = "Connected STA detected: tap START again to disconnect and hunt";
@@ -10262,8 +10383,10 @@ static void stopReconDeauthHunter() {
   if (!reconActive && !DeauthHunter::isEnabled()) return;
   DeauthHunter::setEnabled(false);
   DeauthHunter::stop();
+#if !defined(NEONDRIVE_TARGET_M5TAB5)
   esp_wifi_set_promiscuous(false);
   esp_wifi_set_promiscuous_rx_cb(nullptr);
+#endif
   reconActive = false;
   reconStatusLine = "Deauth Hunter stopped";
 }
@@ -11191,6 +11314,10 @@ static void portScannerTick() {
 
 // ---------- Wardrive Screen ----------
 static void setScreen(ScreenId next);  // forward declaration
+#if defined(NEONDRIVE_TARGET_CYD)
+static const char* cydRotationLabel(int r);
+static void applyCydManualRotation(int rotation, bool redraw);
+#endif
 static bool wardriveActive = false;
 
 static void drawWardrive() {
@@ -11568,6 +11695,12 @@ static void jammitInitSaveFiles() {
 
 // Set up WiFi in STA + WSL bypass + promiscuous (mirrors YoinkEngine startWifi)
 static void startJammitWifi() {
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  neon_rf_set_last_action("startJammitWifi");
+  neon_rf_log_unsupported("startJammitWifi");
+  jammitLog("JAMMIT blocked on Tab5 (no local radio; C6 backend not implemented)");
+  return;
+#endif
   esp_wifi_set_promiscuous(false);
   esp_wifi_set_promiscuous_rx_cb(nullptr);
   WiFi.softAPdisconnect(true);
@@ -11601,6 +11734,11 @@ static void startJammitWifi() {
 
 // Tear down JAMMIT WiFi and restore STA mode
 static void stopJammitWifi() {
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  // startJammitWifi() is a no-op on Tab5; nothing to teardown.
+  sniffActive = false;
+  return;
+#endif
   if (wifiOpMutex && xSemaphoreTake(wifiOpMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
     esp_wifi_set_promiscuous(false);
     esp_wifi_set_promiscuous_rx_cb(nullptr);
@@ -13222,6 +13360,24 @@ static void redrawActiveScreen() {
   }
 }
 
+#if defined(NEONDRIVE_TARGET_CYD)
+static const char* cydRotationLabel(int r) {
+  switch (r & 3) {
+    case 0: return "ROT 0";
+    case 1: return "ROT 1";
+    case 2: return "ROT 2";
+    default: return "ROT 3";
+  }
+}
+
+static void applyCydManualRotation(int rotation, bool redraw) {
+  cfg.startup_manualRotation = clampi(rotation, 0, 3);
+  tft.setRotation(cfg.startup_manualRotation);
+  resetTouchLatch();
+  if (redraw) redrawActiveScreen();
+}
+#endif
+
 #if defined(NEONDRIVE_TARGET_M5TAB5)
 static uint8_t g_tab5RotationCurrent = 1;
 static uint8_t g_tab5RotationCandidate = 1;
@@ -13782,6 +13938,7 @@ void setup() {
   Serial.println();
   Serial.printf("=== %s | Milestone D ===\n", ND_PROFILE_NAME);
   printDeviceProfileBanner();
+  neon_rf_init();
 
 #if defined(NEONDRIVE_TARGET_BUTTON_NAV)
   if (PIN_NAV_NEXT >= 0) pinMode(PIN_NAV_NEXT, INPUT_PULLUP);
@@ -13859,6 +14016,9 @@ void setup() {
     saveConfig(temp);
   }
   cfg = temp;
+#if defined(NEONDRIVE_TARGET_CYD)
+  applyCydManualRotation(cfg.startup_manualRotation, false);
+#endif
   HypercubeWidget::setEnabled(cfg.ui_hypercube);
   applyBacklightLevel(255);
   applyStatusLedState(ledBrightness, ledRed, ledGreen, ledBlue);
@@ -14906,6 +15066,17 @@ void loop() {
         g_tab5RotationCandidate = g_tab5RotationCurrent;
         g_tab5RotationCandidateSinceMs = millis();
       }
+      saveConfig(cfg);
+      drawStartupConfig();
+      waitTouchRelease();
+      return;
+    }
+#endif
+
+#if defined(NEONDRIVE_TARGET_CYD)
+    if (hit(btnStartupManualRotation, tx, ty)) {
+      int next = (cfg.startup_manualRotation + 1) & 3;
+      applyCydManualRotation(next, false);
       saveConfig(cfg);
       drawStartupConfig();
       waitTouchRelease();

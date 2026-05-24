@@ -32,6 +32,7 @@ void printConfigSerial(const AppConfig& c) {
   Serial.print("display.timeout="); Serial.println(c.display_timeout);
   Serial.print("startup.autoReconnectPrompt="); Serial.println(c.startup_autoReconnectPrompt ? "true" : "false");
   Serial.print("startup.autoRotate="); Serial.println(c.startup_autoRotate ? "true" : "false");
+  Serial.print("startup.manualRotation="); Serial.println(c.startup_manualRotation);
   Serial.print("wifi.defaultLockChannel="); Serial.println(c.wifi_defaultLockChannel ? "true" : "false");
   Serial.print("telemetry.monitorIntervalMs="); Serial.println(c.telemetry_monitorIntervalMs);
   Serial.print("telemetry.verboseSerial="); Serial.println(c.telemetry_verboseSerial ? "true" : "false");
@@ -123,6 +124,9 @@ bool loadConfig(AppConfig& out) {
   JsonObject startup = doc["startup"];
   out.startup_autoReconnectPrompt = startup["autoReconnectPrompt"] | true;
   out.startup_autoRotate          = startup["autoRotate"]          | true;
+  out.startup_manualRotation      = startup["manualRotation"]      | 1;
+  if (out.startup_manualRotation < 0) out.startup_manualRotation = 0;
+  if (out.startup_manualRotation > 3) out.startup_manualRotation = 3;
   out.startup_webserver           = startup["webserver"]           | false;
   out.wifi_defaultLockChannel = wifi["defaultLockChannel"] | false;
 
@@ -181,6 +185,7 @@ bool saveConfig(const AppConfig& in) {
   JsonObject startup = doc["startup"].to<JsonObject>();
   startup["autoReconnectPrompt"] = in.startup_autoReconnectPrompt;
   startup["autoRotate"]          = in.startup_autoRotate;
+  startup["manualRotation"]      = in.startup_manualRotation;
   startup["webserver"]           = in.startup_webserver;
   wifi["defaultLockChannel"] = in.wifi_defaultLockChannel;
 
