@@ -106,24 +106,72 @@ Before re-enabling SD:
 
 ---
 
-### WiFi on Tab5 — known crash
+### WiFi on Tab5 — root cause diagnosed, C6 slave firmware missing
 
 When any code path triggers `WiFi.begin()` or starts a scan, the ESP32-P4 tries
-to initialise the ESP32-C6 co-processor over the SDIO bus:
+to initialise the ESP32-C6 co-processor over the SDIO bus and crashes:
 
 ```
-E H_SDIO_DRV: sdio card init failed
-FreeRTOS: Task "sdio_read" should not return, Aborting now!
+sdio_mempool_create free:34016864 ...
+E (7055) sdmmc_common: sdmmc_init_ocr: send_op_cond (1) returned 0x107
+E (7055) sdio_wrapper: sdmmc_card_init failed
+E (15119) H_SDIO_DRV: sdio card init failed
+FreeRTOS: FreeRTOS Task "sdio_read" should not return, Aborting now!
 ```
 
-This is a known unresolved issue. All WiFi-dependent features (wardrive, scan,
-deauth, SP3CTER) will crash the device on Tab5 until the SDIO / C6 init problem
-is fixed. **Do not attempt to work around it by catching the abort** — the task
-stack is corrupted by then.
+**Root cause (confirmed 2026-05-23):** The ESP32-C6 SDIO slave peripheral is not
+running. `send_op_cond returned 0x107` is an SDIO CMD5 OCR timeout — the C6 never
+responds to any SDIO command. The pioarduino platform `54.03.20` does **not** bundle
+a C6 slave firmware binary; only the ESP-Hosted slave firmware header files are
+present. Without the slave firmware flashed to the C6, the SDIO host on the P4 will
+never enumerate the bus regardless of timing, clock speed, or reset pulse.
 
-Investigation starting point: verify the pioarduino platform version includes
-the correct C6 co-processor firmware blob, and that `ARDUINO_M5STACK_TAB5` is
-triggering the right SDIO host configuration in ESP-IDF.
+**What was tried and definitively ruled out:**
+
+| Attempt | Result |
+|---|---|
+| GPIO15 reset pulse (50 ms LOW → HIGH, 500 ms wait) in `neon_rf_init()` | No change — crash identical |
+| SDIO clock reduced to 20 MHz (from 40 MHz default) via `CONFIG_ESP_SDIO_CLOCK_FREQ_KHZ` | No change — crash identical |
+| Compile-time SDIO pin override via `tab5_sdkconfig_override.h` | Pins correct, not the issue |
+| Catching the FreeRTOS abort | Not possible — task stack corrupted by then |
+
+**Why GPIO15 reset has no effect:**
+- `WiFiGeneric.cpp` has `//conf.pin_rst.pin = ...` **commented out** — the SDIO
+  host config struct has no RST field.
+- The pre-compiled `libespressif__esp_hosted.a` has GPIO54 (eval board) baked in
+  for its internal `esp_hosted_slave_reset()` — cannot be changed via macro override.
+- Our manual GPIO15 pulse fires correctly but the C6 boots into its default (empty)
+  firmware, not the SDIO slave firmware the ESP-Hosted host stack expects.
+
+**Path forward — reflash C6 with ESP-Hosted SDIO slave firmware:**
+
+1. Clone `https://github.com/espressif/esp-hosted` and build the slave firmware
+   for the ESP32-C6 with SDIO transport:
+   ```
+   cd esp-hosted/slave
+   idf.py set-target esp32c6
+   # Enable SDIO transport in sdkconfig (CONFIG_ESP_SDIO_SLAVE_TRANSPORT_SDIO=y)
+   idf.py build
+   ```
+2. Flash the C6 over its UART. Possible access paths on Tab5:
+   - **M-Bus Port B**: GPIO17, GPIO52 on the P4 — may be a UART passthrough to C6 TX/RX
+   - **M-Bus Port C**: GPIO7, GPIO6 on the P4
+   - **JTAG** if accessible via debug header
+3. Verify the C6 boots the SDIO slave firmware (it should print over UART0 if accessible).
+4. Re-run `firmware_m5tab5_c6_scan` — should see scan results instead of the abort.
+
+**Note:** `PI4IOE2` (I²C addr 0x44) on the Tab5 controls bits 0, 3, 7 for unknown
+peripherals. One of these may be a C6 power/enable gate. If reflashing C6 doesn't
+help, probe those bits with `i2c_master_transmit` while monitoring C6 boot output.
+
+**Guarded builds:**
+- `firmware_m5tab5` (production): no WiFi calls; boots cleanly; touch/display work.
+- `firmware_m5tab5_c6_scan`: auto-tests SDIO init in `neon_rf_init()` via
+  `TAB5_TEST_C6_SCAN` guard. Use only for C6 bringup; always crashes until slave
+  firmware is present.
+
+**Do not attempt to work around the abort in firmware** — the task stack is
+corrupted by then. Fix requires physical C6 firmware reflash.
 
 ---
 

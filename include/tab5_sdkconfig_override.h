@@ -26,7 +26,23 @@
 #undef CONFIG_ESP_SDIO_PIN_D3
 #define CONFIG_ESP_SDIO_PIN_D3 8
 
+// RST overrides:
+// CONFIG_ESP_SDIO_GPIO_RESET_SLAVE  — used in WiFiGeneric.cpp (commented out there)
+// CONFIG_ESP_GPIO_SLAVE_RESET_SLAVE — used by pre-compiled libespressif__esp_hosted.a
+//   NOTE: the .a was compiled with GPIO54 (eval board default) and cannot be changed
+//   via macro override alone. We issue the actual GPIO15 reset pulse directly from
+//   neon_rf_init() using gpio_set_level() before any WiFi call.
 #ifdef CONFIG_ESP_SDIO_GPIO_RESET_SLAVE
 #undef CONFIG_ESP_SDIO_GPIO_RESET_SLAVE
 #define CONFIG_ESP_SDIO_GPIO_RESET_SLAVE 15
 #endif
+#ifdef CONFIG_ESP_GPIO_SLAVE_RESET_SLAVE
+#undef CONFIG_ESP_GPIO_SLAVE_RESET_SLAVE
+#define CONFIG_ESP_GPIO_SLAVE_RESET_SLAVE 15
+#endif
+
+// Reduce SDIO clock from 40 MHz (eval-board default) to 20 MHz for more robust
+// initial enumeration of the C6 slave.  H_SDIO_CLOCK_FREQ_KHZ = this value, and
+// it is expanded inline when WiFiGeneric.cpp calls INIT_DEFAULT_HOST_SDIO_CONFIG().
+#undef CONFIG_ESP_SDIO_CLOCK_FREQ_KHZ
+#define CONFIG_ESP_SDIO_CLOCK_FREQ_KHZ 20000

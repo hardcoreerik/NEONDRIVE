@@ -60,11 +60,6 @@ static void collectScanResults(int n) {
 }
 
 static bool prepareScanEnvironment() {
-#if defined(NEONDRIVE_TARGET_M5TAB5)
-#if !defined(TAB5_TEST_C6_SCAN)
-  return false;
-#endif
-#endif
   // Ensure we are out of monitor/AP state before scanning.
   esp_wifi_set_promiscuous(false);
   esp_wifi_set_promiscuous_rx_cb(nullptr);
@@ -117,14 +112,6 @@ void dedupeKeepStrongest() {
 }
 
 void doWifiScanBlocking() {
-#if defined(NEONDRIVE_TARGET_M5TAB5)
-#if !defined(TAB5_TEST_C6_SCAN)
-  neon_rf_set_last_action("doWifiScanBlocking");
-  neon_rf_log_unsupported("doWifiScanBlocking");
-  wifiIsScanning = false;
-  return;
-#endif
-#endif
   wifiIsScanning = true;
   s_asyncScanActive = false;
   s_asyncRetryCount = 0;
@@ -149,14 +136,6 @@ void doWifiScanBlocking() {
 }
 
 bool startWifiScanAsync() {
-#if defined(NEONDRIVE_TARGET_M5TAB5)
-#if !defined(TAB5_TEST_C6_SCAN)
-  neon_rf_set_last_action("startWifiScanAsync");
-  neon_rf_log_unsupported("startWifiScanAsync");
-  wifiIsScanning = false;
-  return false;
-#endif
-#endif
   wifiIsScanning = true;
   s_asyncRetryCount = 0;
   prepareScanEnvironment();

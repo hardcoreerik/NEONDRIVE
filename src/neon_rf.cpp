@@ -2,8 +2,9 @@
 #include <Arduino.h>
 #include <esp_system.h>
 #include <string.h>
-#if defined(NEONDRIVE_TARGET_M5TAB5) && (defined(TAB5_TEST_C6_SDIO) || defined(TAB5_TEST_C6_SCAN))
+#if defined(NEONDRIVE_TARGET_M5TAB5)
 #include <WiFi.h>
+#include <driver/gpio.h>
 #endif
 
 // Last RF action persisted in-memory across the current boot.
@@ -13,9 +14,11 @@
 //       on next boot to identify which action caused the crash.
 static char s_last_rf_action[64] = "";
 
-#if defined(NEONDRIVE_TARGET_M5TAB5) && (defined(TAB5_TEST_C6_SDIO) || defined(TAB5_TEST_C6_SCAN))
+#if defined(NEONDRIVE_TARGET_M5TAB5)
 // Official M5Tab5 C6 SDIO mapping (P4 host -> C6):
 // CLK=G12, CMD=G13, D0=G11, D1=G10, D2=G9, D3=G8, RST=G15
+// Applied at compile-time via include/tab5_sdkconfig_override.h so
+// WiFiGeneric.cpp's wifiHostedInit() picks up the correct pins automatically.
 static constexpr int TAB5_SDIO_CLK = 12;
 static constexpr int TAB5_SDIO_CMD = 13;
 static constexpr int TAB5_SDIO_D0  = 11;
@@ -28,7 +31,8 @@ static void tab5_configure_wifi_sdio_pins_once() {
     static bool configured = false;
     if (configured) return;
     configured = true;
-    Serial.printf("[neon_rf] tab5 hosted SDIO pins expected: clk=%d cmd=%d d0=%d d1=%d d2=%d d3=%d rst=%d\n",
+    Serial.printf("[neon_rf] tab5 SDIO pins (compile-time override active):"
+                  " clk=%d cmd=%d d0=%d d1=%d d2=%d d3=%d rst=%d\n",
                   TAB5_SDIO_CLK, TAB5_SDIO_CMD, TAB5_SDIO_D0, TAB5_SDIO_D1,
                   TAB5_SDIO_D2, TAB5_SDIO_D3, TAB5_SDIO_RST);
 }
@@ -39,23 +43,16 @@ static void tab5_configure_wifi_sdio_pins_once() {
 #if defined(NEONDRIVE_TARGET_M5TAB5)
 
 // ESP32-P4 + ESP32-C6 co-processor over SDIO.
+// WiFi scan is enabled via compile-time SDIO pin override (tab5_sdkconfig_override.h).
 static const NeonRfCaps s_caps = {
-#if defined(TAB5_TEST_C6_SCAN)
     /* supports_station_scan    */ true,
-#else
-    /* supports_station_scan    */ false,
-#endif
-    /* supports_channel_control */ false,
-    /* supports_promiscuous_rx  */ false,
-    /* supports_raw_frame_tx    */ false,
+    /* supports_channel_control */ false,  // TODO: validate esp_wifi_set_channel via C6
+    /* supports_promiscuous_rx  */ false,  // TODO: needs custom C6 slave firmware
+    /* supports_raw_frame_tx    */ false,  // TODO: esp_wifi_80211_tx via C6
     /* supports_ble             */ false,
     /* requires_remote_coprocessor  */ true,
     /* requires_custom_c6_firmware  */ false,
-#if defined(TAB5_TEST_C6_SCAN)
-    /* backend_name             */ "tab5-c6-scan",
-#else
-    /* backend_name             */ "tab5-none",
-#endif
+    /* backend_name             */ "tab5-c6",
 };
 
 bool neon_rf_is_local_radio() { return false; }
@@ -110,20 +107,53 @@ void neon_rf_init() {
     }
 
 #if defined(NEONDRIVE_TARGET_M5TAB5)
-#if defined(TAB5_TEST_C6_SDIO) || defined(TAB5_TEST_C6_SCAN)
+    // Log the SDIO pin mapping that was compiled in via tab5_sdkconfig_override.h.
     tab5_configure_wifi_sdio_pins_once();
-#endif
-#if defined(TAB5_TEST_C6_SDIO)
-    Serial.println("[neon_rf] TAB5_TEST_C6_SDIO: runtime probe enabled (boot init disabled).");
-#endif
+
+    // Pulse C6 RESET (GPIO15) low→high before any WiFi call.
+    //
+    // Root cause of "send_op_cond (1) returned 0x107":
+    //   WiFiGeneric.cpp has `//conf.pin_rst.pin = ...` commented out, so the
+    //   ESP-Hosted stack never resets the slave.  The pre-compiled
+    //   libespressif__esp_hosted.a has GPIO54 (eval board) baked in for its
+    //   internal slave-reset path — useless on Tab5.  We do it ourselves here,
+    //   early in setup(), giving the C6 ≥500 ms to boot its SDIO slave firmware
+    //   before the first WiFi call arrives from loop().
+    Serial.printf("[neon_rf] C6 RESET: asserting GPIO%d LOW\n", TAB5_SDIO_RST);
+    gpio_reset_pin((gpio_num_t)TAB5_SDIO_RST);
+    gpio_set_direction((gpio_num_t)TAB5_SDIO_RST, GPIO_MODE_OUTPUT);
+    gpio_set_level((gpio_num_t)TAB5_SDIO_RST, 0);   // assert RESET
+    delay(50);                                        // hold 50 ms
+    gpio_set_level((gpio_num_t)TAB5_SDIO_RST, 1);   // deassert RESET
+    Serial.printf("[neon_rf] C6 RESET: GPIO%d HIGH – waiting 500 ms for C6 boot\n",
+                  TAB5_SDIO_RST);
+    delay(500);                                       // C6 slave firmware boot time
+    Serial.println("[neon_rf] C6 RESET: done");
+
 #if defined(TAB5_TEST_C6_SCAN)
-    Serial.println("[neon_rf] TAB5_TEST_C6_SCAN: scan path UNBLOCKED for bringup.");
+    // Auto-test: attempt WiFi STA mode immediately to validate SDIO init.
+    // Only enabled in the c6_scan test build; production firmware waits for UI.
+    Serial.println("[c6test] step=sdio_init start (auto-test in neon_rf_init)");
+    neon_rf_set_last_action("c6test_auto_sdio_init");
+    if (!WiFi.mode(WIFI_MODE_STA)) {
+        Serial.println("[c6test] step=sdio_init FAIL reason=wifi_mode_sta");
+    } else {
+        Serial.println("[c6test] step=sdio_init OK - starting scan");
+        neon_rf_set_last_action("c6test_auto_scan");
+        int n = WiFi.scanNetworks(false, true);  // blocking, show_hidden
+        if (n < 0) {
+            Serial.printf("[c6test] step=scan FAIL result=%d\n", n);
+        } else {
+            Serial.printf("[c6test] step=scan OK found=%d\n", n);
+            for (int i = 0; i < n && i < 5; i++) {
+                Serial.printf("[c6test]   [%d] SSID=%s RSSI=%d CH=%d\n",
+                              i, WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.channel(i));
+            }
+        }
+    }
+    Serial.println("[c6test] auto-test complete");
 #endif
-#if !defined(TAB5_TEST_C6_SCAN)
-    Serial.println("[neon_rf] Tab5: local RF ops BLOCKED. C6 backend not yet implemented.");
-    Serial.println("[neon_rf] WiFi features need SDIO C6 init -- will be unblocked when resolved.");
-#endif
-#endif
+#endif  // NEONDRIVE_TARGET_M5TAB5
 }
 
 const NeonRfCaps* neon_rf_get_caps() { return &s_caps; }
