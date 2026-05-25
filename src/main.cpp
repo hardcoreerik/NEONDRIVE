@@ -3597,6 +3597,7 @@ static Button btnBack, btnSave;
 #undef local  // zutil.h (pulled in by PNGenc) defines 'local' as 'static'; conflicts with variable names below
 
 static void setScreen(ScreenId next);  // forward declaration
+static void drawWifiScan();             // forward declaration (used by handleKeyNavWifiScan)
 
 static void takeScreenshot() {
   if (!sdReady && !mountSdCard(false)) {
@@ -3713,6 +3714,56 @@ static void updateHomeFocus(int newIdx) {
 }
 
 // Process a key event from neon_hal_key_get().
+// WiFi Scanner keyboard navigation (Cardputer-only).
+// UP/DOWN scrolls the network list; Enter/Right sets the selected network as
+// target and navigates to CONFIRM_TARGET; 'S' triggers a fresh scan; Back goes home.
+#if defined(NEONDRIVE_TARGET_M5CARDPUTER)
+static void handleKeyNavWifiScan(const neon_key_t& k) {
+  if (k.key == NeonKey::BACK) {
+    setScreen(ScreenId::HOME);
+    return;
+  }
+  if (k.key == NeonKey::UP) {
+    if (apCount > 0) {
+      apSelected = (apSelected <= 0) ? 0 : apSelected - 1;
+      drawWifiScan();
+    }
+    return;
+  }
+  if (k.key == NeonKey::DOWN) {
+    if (apCount > 0) {
+      apSelected = (apSelected < apCount - 1) ? apSelected + 1 : apCount - 1;
+      drawWifiScan();
+    }
+    return;
+  }
+  if (k.key == NeonKey::ENTER || k.key == NeonKey::RIGHT) {
+    if (apSelected >= 0 && apSelected < apCount) {
+      target    = aps[apSelected];
+      hasTarget = true;
+      lockChannel = cfg.wifi_defaultLockChannel;
+      setScreen(ScreenId::CONFIRM_TARGET);
+    }
+    return;
+  }
+  if (k.key == NeonKey::CHAR) {
+    const char c = k.ch | 0x20;   // to lowercase
+    if (c == 's') {
+      // Trigger a fresh WiFi scan just like the Scan button.
+      wifiSnapshotPrimedByBssid();
+      wifiIsScanning = true;
+      drawWifiScan();
+      doWifiScanBlocking();
+      wifiIsScanning = false;
+      wifiRestorePrimedByBssid();
+      if (apSelected >= apCount) apSelected = apCount - 1;
+      drawWifiScan();
+    }
+    return;
+  }
+}
+#endif  // NEONDRIVE_TARGET_M5CARDPUTER
+
 // HOME: arrows move focus, Enter fires focused button, Back is no-op (already home).
 // Other screens: Back returns to HOME, Enter fires the Back button.
 static void handleKeyNav(neon_key_t k) {
@@ -3720,6 +3771,12 @@ static void handleKeyNav(neon_key_t k) {
     takeScreenshot();
     return;
   }
+#if defined(NEONDRIVE_TARGET_M5CARDPUTER)
+  if (screen == ScreenId::WIFI_SCAN) {
+    handleKeyNavWifiScan(k);
+    return;
+  }
+#endif
   if (k.key == NeonKey::BACK) {
     if (screen != ScreenId::HOME) {
       setScreen(ScreenId::HOME);
@@ -5081,7 +5138,173 @@ static void drawConfirmTarget() {
   drawBorder();
 }
 
+// ── Cardputer WiFi Scanner (240×135) ─────────────────────────────────────────
+// Clean list-only layout: no radar, no side panel.
+// 7 rows × 12px = 84px list + 11px col-header = 95px content (fills 115-20=95px ✓)
+// Bottom bar: [Back][Scan][↑][↓]  — Enter/→ sets target and goes to CONFIRM_TARGET.
+// Touch: row taps select; Back/Scan/↑/↓ buttons work as normal.
+// Keyboard: ↑↓ scroll list, Enter/→ go to target, 'S' scan, Backspace/OPT back.
+#if defined(NEONDRIVE_TARGET_M5CARDPUTER)
+static void drawWifiScanCardputer() {
+  tft.fillScreen(TFT_BLACK);
+  drawUniversalBackground();
+
+  // Header: compact title with scan state inline
+  String hdr = "WiFi Scan";
+  if (wifiIsScanning) { hdr += " [...]"; }
+  drawHeader(hdr.c_str());
+
+  const int W    = tft.width();     // 240
+  const int H    = tft.height();    // 135
+  const int lm   = g_ui->safe_margin;               // 4
+  const int cY   = g_ui->top_gap + g_ui->header_h;  // 20  (content start)
+  const int barY = H - g_ui->bottom_bar_h;           // 115 (bottom bar start)
+  const int btnH = g_ui->bottom_bar_h - 2;           // 18
+
+  // ── Bottom bar: [Back][Scan][↑][↓] ────────────────────────────────────────
+  const int bGap = 4;
+  const int bW   = (W - 2*lm - 3*bGap) / 4;  // (232-12)/4 = 55px
+  btnWifiBack     = {lm + (bW+bGap)*0, barY, bW, btnH, "Back"};
+  btnWifiScan     = {lm + (bW+bGap)*1, barY, bW, btnH, "Scan"};
+  btnWifiUp       = {lm + (bW+bGap)*2, barY, bW, btnH, " ^ "};
+  btnWifiDown     = {lm + (bW+bGap)*3, barY, bW, btnH, " v "};
+  // Zero buttons unused in this layout so touch handler ignores them
+  btnWifiRescan   = {0,0,0,0,""};
+  btnWifiTargetGo = {0,0,0,0,""};
+  btnWifiConnect  = {0,0,0,0,""};
+  drawButton(btnWifiBack, TFT_NAVY,     TFT_WHITE, TFT_WHITE);
+  drawButton(btnWifiScan, TFT_DARKCYAN, TFT_WHITE, TFT_WHITE);
+  drawButton(btnWifiUp,   TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+  drawButton(btnWifiDown, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+
+  // ── Column headers ─────────────────────────────────────────────────────────
+  // Layout (size-1 GLCD: 6px/char wide, 8px tall):
+  //  x=4  : ">" selection indicator
+  //  x=11 : SSID (clipped, 120px wide = ~20 chars)
+  //  x=133: CH (2 chars right-pad)
+  //  x=149: dBm (4 chars right-pad, "-100")
+  //  x=177: Auth (4 chars, "WPA2"/"OPEN"/"WPA3")
+  //  x=229: primed dot (W-lm-3 = 233)
+  const int colSSIDX = lm + 9;   // 13
+  const int colCHX   = 133;
+  const int colDBX   = 149;
+  const int colAuX   = 177;
+  constexpr uint16_t kHdrBg = 0x1082;  // dark blue-grey
+
+  tft.fillRect(lm, cY, W - 2*lm, 10, kHdrBg);
+  applyFontSm();
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_GREEN, kHdrBg);
+  tft.drawString("SSID",  colSSIDX, cY + 1);
+  tft.drawString("CH",    colCHX,   cY + 1);
+  tft.drawString("dBm",   colDBX,   cY + 1);
+  tft.drawString("Auth",  colAuX,   cY + 1);
+  // Count indicator right-aligned in header row
+  if (apCount > 0) {
+    char cnt[10];
+    snprintf(cnt, sizeof(cnt), "%d/%d", (apSelected >= 0 ? apSelected + 1 : 0), apCount);
+    tft.setTextDatum(TR_DATUM);
+    tft.setTextColor(TFT_CYAN, kHdrBg);
+    tft.drawString(cnt, W - lm - 1, cY + 1);
+    tft.setTextDatum(TL_DATUM);
+  }
+  tft.drawLine(lm, cY + 10, W - lm, cY + 10, TFT_DARKGREY);
+
+  // ── Network list ───────────────────────────────────────────────────────────
+  const int listY = cY + 11;          // 31
+  const int rowH  = g_ui->row_h;      // 12
+  const int nRows = min(7, (barY - listY) / rowH);  // 7
+
+  // Clamp apSelected to valid range
+  if (apCount == 0) { apSelected = -1; }
+  else if (apSelected < 0) { apSelected = 0; }
+  else if (apSelected >= apCount) { apSelected = apCount - 1; }
+
+  // Keep scroll window centred on selected row
+  if (apSelected >= 0) {
+    if (apSelected < apScroll)          apScroll = apSelected;
+    if (apSelected >= apScroll + nRows) apScroll = apSelected - nRows + 1;
+  }
+  if (apScroll < 0) apScroll = 0;
+
+  // Expose geometry for touch handler
+  wifiListTopY    = listY;
+  wifiListBottomY = listY + nRows * rowH;
+  wifiListDrawX   = lm;
+  wifiListDrawW   = W - 2*lm;
+  wifiRowH        = rowH;
+
+  // Reset all row/check buttons (touch handler iterates up to 4)
+  for (int r = 0; r < 4; r++) { btnWifiRows[r] = {0,0,0,0,""}; btnWifiChecks[r] = {0,0,0,0,""}; }
+
+  for (int r = 0; r < nRows; r++) {
+    const int idx = apScroll + r;
+    const int y   = listY + r * rowH;
+    const int rh  = rowH - 1;
+
+    if (r < 4) btnWifiRows[r] = {lm, y, W - 2*lm, rh, "AP"};
+
+    const bool     sel  = (idx == apSelected);
+    const uint16_t bg   = sel ? 0x0340 : TFT_BLACK;    // dark-green tint or black
+    const uint16_t fgSS = sel ? TFT_WHITE  : TFT_CYAN;  // SSID colour
+    const uint16_t fgNm = sel ? TFT_WHITE  : TFT_WHITE; // numeric columns
+
+    tft.fillRect(lm, y, W - 2*lm, rh, bg);
+
+    if (idx < apCount) {
+      const ApRecord& a = aps[idx];
+      applyFontSm();
+      tft.setTextDatum(TL_DATUM);
+
+      // Selection arrow
+      tft.setTextColor(sel ? TFT_YELLOW : bg, bg);
+      tft.drawString(">", lm + 1, y + 2);
+
+      // SSID — clipped to colCHX-colSSIDX-4 = 120px (~20 chars)
+      const String ssid = a.ssid.isEmpty() ? String("(hidden)") : a.ssid;
+      drawTextClipped(ssid, colSSIDX, y + 2, colCHX - colSSIDX - 4, fgSS, bg, true);
+
+      // Channel (2 chars)
+      char buf[8];
+      tft.setTextColor(fgNm, bg);
+      snprintf(buf, sizeof(buf), "%2d", a.channel);
+      tft.drawString(buf, colCHX, y + 2);
+
+      // RSSI (4 chars, e.g. " -70")
+      snprintf(buf, sizeof(buf), "%4d", a.rssi);
+      tft.drawString(buf, colDBX, y + 2);
+
+      // Auth (4 chars truncated)
+      snprintf(buf, sizeof(buf), "%.4s", authToStr(a.auth));
+      tft.setTextColor(sel ? TFT_YELLOW : TFT_WHITE, bg);
+      tft.drawString(buf, colAuX, y + 2);
+
+      // Primed target dot (magenta filled circle at row right edge)
+      if (idx < MAX_APS && wifiPrimedByIndex[idx]) {
+        tft.fillCircle(W - lm - 4, y + rowH / 2, 2, TFT_MAGENTA);
+      }
+    }
+  }
+
+  // Empty-state message
+  if (apCount == 0 && !wifiIsScanning) {
+    applyFontSm();
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.setTextDatum(TC_DATUM);
+    tft.drawString("No networks. Press [Scan] or 'S'", W / 2, listY + (nRows * rowH / 2));
+    tft.setTextDatum(TL_DATUM);
+  }
+
+  if (wifiConnectShowPasswordModal) drawWifiPasswordModal();
+  drawBorder();
+}
+#endif  // NEONDRIVE_TARGET_M5CARDPUTER
+
 static void drawWifiScan() {
+#if defined(NEONDRIVE_TARGET_M5CARDPUTER)
+  drawWifiScanCardputer();
+  return;
+#endif
   tft.fillScreen(TFT_BLACK);
   drawHeader("WiFi Scanner");
   drawUniversalBackground();
