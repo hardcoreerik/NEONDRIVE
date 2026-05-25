@@ -8,7 +8,7 @@ NEONDRIVE is a multi-target ESP32 firmware + companion workflow project for auth
 | --- | --- | --- |
 | CYD 2.4 (ESP32-2432S024 family) | `firmware_cyd_2_4` | Touch (XPT2046) |
 | CYD 3.5 (ESP32-3248S035) | `firmware_cyd_3_5` | Touch (XPT2046) |
-| LilyGO T-Display-S3 | `firmware_t_display_s3` | Touch (CST816/CST328) + hardware buttons fallback |
+| LilyGO T-Display-S3 | `firmware_t_display_s3` | Hardware buttons (short press = left/right, long press = select); no-touch profile by default |
 | M5Stack Tab5 (ESP32-P4 + C6) | `firmware_m5tab5` | Touch (GT911 via M5GFX) |
 
 - One repo supports multiple real hardware families through explicit PlatformIO environments.
@@ -50,6 +50,14 @@ Use `python -m platformio device list` to discover serial ports.
 ## Supported Targets
 
 See [docs/HARDWARE_TARGETS.md](docs/HARDWARE_TARGETS.md) for the current target matrix and support status.
+
+## Precompiled Binaries
+
+Release artifacts include device-friendly binaries in `Device-Bins/`, including:
+
+- `Device-Bins/NEONDRIVE_T-DisplayS3_<version>.bin`
+
+See [docs/RELEASES.md](docs/RELEASES.md) for packaging conventions and all target artifact names.
 
 ## CI and Quality Bar
 
