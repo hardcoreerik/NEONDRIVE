@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import re
 import shutil
 import subprocess
@@ -18,11 +19,15 @@ from pathlib import Path
 
 
 TARGETS = (
-    ("cyd_2_4", "CYD-2.4"),
-    ("cyd_3_5", "CYD-3.5"),
-    ("t_display_s3", "T-DisplayS3"),
-    ("t_embed_cc1101", "T-Embed-CC1101"),
+    ("cyd_2_4",        "CYD-2.4",        "esp32",    True),
+    ("cyd_2_8",        "CYD-2.8",        "esp32",    True),
+    ("cyd_3_5",        "CYD-3.5",        "esp32",    True),
+    ("m5tab5",         "M5Tab5",         "esp32p4",  True),
+    ("t_display_s3",   "T-DisplayS3",    "esp32s3",  False),
+    ("t_embed_cc1101", "T-Embed-CC1101", "esp32s3",  False),
+    ("cardputer_adv",  "Cardputer-Adv",  "esp32s3",  False),
 )
+# (env_key, device_name, chip, stable)
 
 
 def log(msg: str) -> None:
@@ -85,7 +90,7 @@ def main() -> int:
     if not version:
         raise ValueError("Version resolved to an empty string.")
 
-    targets_csv = ",".join([key for key, _ in TARGETS])
+    targets_csv = ",".join([key for key, *_ in TARGETS])
     release_cmd = [
         sys.executable,
         str(project_root / "scripts" / "build_release_bins.py"),
@@ -102,13 +107,31 @@ def main() -> int:
     out_dir = (project_root / args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for target_key, device_name in TARGETS:
+    manifest = {
+        "project": "NEONDRIVE",
+        "version": version,
+        "boards": [],
+    }
+    for target_key, device_name, chip, stable in TARGETS:
         src = release_dir / f"neondrive_{version}_{target_key}_fullflash.bin"
         if not src.exists():
             raise FileNotFoundError(f"Missing expected fullflash binary: {src}")
-        dst = out_dir / f"NEONDRIVE_{device_name}_{version}.bin"
+        filename = f"NEONDRIVE_{device_name}_{version}.bin"
+        dst = out_dir / filename
         shutil.copy2(src, dst)
         log(f"wrote {dst.name}")
+        manifest["boards"].append({
+            "name": device_name,
+            "file": filename,
+            "chip": chip,
+            "env": f"firmware_{target_key}",
+            "stable": stable,
+            "fullflash_offset": "0x0",
+        })
+
+    manifest_path = out_dir / "installer_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    log(f"wrote {manifest_path.name}")
 
     readme = out_dir / "README.md"
     readme.write_text(
@@ -125,6 +148,8 @@ def main() -> int:
                 "- `python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32 --port COM15 --baud 460800 write_flash 0x0 NEONDRIVE_CYD-3.5_<VERSION>.bin`",
                 "Example flash command (ESP32-S3 boards):",
                 "- `python -m platformio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port COM3 --baud 460800 write_flash 0x0 NEONDRIVE_T-DisplayS3_<VERSION>.bin`",
+                "Example flash command (ESP32-P4 Tab5):",
+                "- `python -m esptool --chip esp32p4 --port COM4 --baud 1500000 write_flash 0x0 NEONDRIVE_M5Tab5_<VERSION>.bin`",
                 "",
                 "CYD-3.5 note:",
                 "- First boot runs touch calibration and saves `/touch_cal_cyd35.json` to SD card.",

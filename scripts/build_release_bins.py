@@ -48,6 +48,14 @@ TARGETS = {
         flash_size="4MB",
         bootloader_offset="0x1000",
     ),
+    "cyd_2_8": TargetConfig(
+        key="cyd_2_8",
+        env="firmware_cyd_2_8",
+        label="CYD 2.8",
+        chip="esp32",
+        flash_size="4MB",
+        bootloader_offset="0x1000",
+    ),
     "cyd_3_5": TargetConfig(
         key="cyd_3_5",
         env="firmware_cyd_3_5",
@@ -55,6 +63,14 @@ TARGETS = {
         chip="esp32",
         flash_size="4MB",
         bootloader_offset="0x1000",
+    ),
+    "m5tab5": TargetConfig(
+        key="m5tab5",
+        env="firmware_m5tab5",
+        label="M5Stack Tab5",
+        chip="esp32p4",
+        flash_size="16MB",
+        bootloader_offset="0x2000",
     ),
     "t_display_s3": TargetConfig(
         key="t_display_s3",
@@ -70,6 +86,14 @@ TARGETS = {
         label="LilyGO T-Embed CC1101",
         chip="esp32s3",
         flash_size="16MB",
+        bootloader_offset="0x0000",
+    ),
+    "cardputer_adv": TargetConfig(
+        key="cardputer_adv",
+        env="firmware_cardputer_adv",
+        label="M5Stack Cardputer Advanced",
+        chip="esp32s3",
+        flash_size="8MB",
         bootloader_offset="0x0000",
     ),
 }
@@ -225,7 +249,15 @@ def parse_args() -> argparse.Namespace:
 
 def resolve_targets(raw: str) -> List[TargetConfig]:
     if raw == "all":
-        return [TARGETS["cyd_2_4"], TARGETS["cyd_3_5"], TARGETS["t_display_s3"], TARGETS["t_embed_cc1101"]]
+        return [
+            TARGETS["cyd_2_4"],
+            TARGETS["cyd_2_8"],
+            TARGETS["cyd_3_5"],
+            TARGETS["m5tab5"],
+            TARGETS["t_display_s3"],
+            TARGETS["t_embed_cc1101"],
+            TARGETS["cardputer_adv"],
+        ]
 
     keys = [item.strip() for item in raw.split(",") if item.strip()]
     selected = []
