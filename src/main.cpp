@@ -2379,6 +2379,8 @@ static uint32_t wifiConnectScanStartedMs = 0;
 static int wifiConnectSelectedIdx = -1; // Index of selected AP in aps[] array
 static int wifiConnectScroll = 0;       // Scroll position for AP list
 static bool wifiConnectShowPasswordModal = false;  // Show password input modal
+static bool wifiConnectShowSavedDrawer = false;
+static bool wifiConnectRevealPassword = false;
 static int wifiConnectStatusY = -1;
 static constexpr int WIFI_CONNECT_VISIBLE_ROWS = 4;
 static bool webServerRunning = false;   // Is the HTTP OTA server running?
@@ -3812,6 +3814,31 @@ static void handleKeyNav(neon_key_t k) {
     handleKeyNavWifiScan(k);
     return;
   }
+  if (screen == ScreenId::WIFI_CONNECT) {
+    if (k.key == NeonKey::CHAR) {
+      if (wifiConnectPassword.length() < 63) wifiConnectPassword += k.ch;
+      drawWifiConnect();
+      return;
+    }
+    if (k.key == NeonKey::BACK) {
+      if (!wifiConnectPassword.isEmpty()) {
+        wifiConnectPassword.remove(wifiConnectPassword.length() - 1);
+        drawWifiConnect();
+        return;
+      }
+      setScreen(ScreenId::CONFIG);
+      return;
+    }
+    if (k.key == NeonKey::ENTER) {
+      if (wifiConnectSelectedIdx >= 0 && wifiConnectSelectedIdx < apCount) {
+        const ApRecord& selectedAp = aps[wifiConnectSelectedIdx];
+        if (selectedAp.auth == WIFI_AUTH_OPEN) connectToWifi(selectedAp.ssid, "");
+        else connectToWifi(selectedAp.ssid, wifiConnectPassword);
+        drawWifiConnect();
+      }
+      return;
+    }
+  }
 #endif
   if (k.key == NeonKey::BACK) {
     if (screen != ScreenId::HOME) {
@@ -3887,6 +3914,8 @@ static Button btnWifiPwBack;
 static Button btnWifiPwSpace;
 static Button btnWifiPwClear;
 static Button btnWifiPwCancel, btnWifiPwConnect;
+static Button btnWifiPwShowHide, btnWifiPwReconnect, btnWifiPwSaved;
+static Button btnWifiSavedRows[AppConfig::MAX_SAVED_WIFI], btnWifiSavedClose;
 
 // Webserver screen buttons  
 static Button btnWebserverBack, btnWebserverStartAP, btnWebserverStartServer;
@@ -4578,9 +4607,8 @@ static void tdisplayNavBuild() {
       } else {
         tdisplayNavPush(btnWifiBack);
         tdisplayNavPush(btnWifiScan);
-        tdisplayNavPush(btnWifiRescan);
-        tdisplayNavPush(btnWifiTargetGo);
         tdisplayNavPush(btnWifiConnect);
+        tdisplayNavPush(btnWifiTargetGo);
         tdisplayNavPush(btnWifiUp);
         tdisplayNavPush(btnWifiDown);
         for (int i = 0; i < 4; i++) {
@@ -4645,11 +4673,16 @@ static void tdisplayNavBuild() {
         for (int i = 0; i < wifiPwKeyCount; i++) tdisplayNavPush(btnWifiPwKeys[i]);
         tdisplayNavPush(btnWifiPwShift);
         tdisplayNavPush(btnWifiPwMode);
+        tdisplayNavPush(btnWifiPwShowHide);
         tdisplayNavPush(btnWifiPwBack);
         tdisplayNavPush(btnWifiPwSpace);
+        tdisplayNavPush(btnWifiPwSaved);
         tdisplayNavPush(btnWifiPwClear);
         tdisplayNavPush(btnWifiPwCancel);
         tdisplayNavPush(btnWifiPwConnect);
+        tdisplayNavPush(btnWifiPwReconnect);
+        tdisplayNavPush(btnWifiSavedClose);
+        for (int i = 0; i < AppConfig::MAX_SAVED_WIFI; i++) tdisplayNavPush(btnWifiSavedRows[i]);
       } else {
         tdisplayNavPush(btnWifiConnectBack);
         tdisplayNavPush(btnWifiConnectScan);
@@ -5331,7 +5364,9 @@ static void drawWifiScanCardputer() {
     tft.setTextDatum(TL_DATUM);
   }
 
+#if !ND_HW_KEYBOARD
   if (wifiConnectShowPasswordModal) drawWifiPasswordModal();
+#endif
   drawBorder();
 }
 #endif  // NEONDRIVE_TARGET_M5CARDPUTER
@@ -5352,8 +5387,8 @@ static void drawWifiScan() {
   const UiRect bottom = computeBottomBarRect();
   const int reserveLeft = (UI_HYPERCUB_RESERVE_W > 0) ? UI_HYPERCUB_RESERVE_X : w;
   const int rightLimit = max(content.x + 120, min(content.x + content.w, reserveLeft - 6));
-  // Scale radar column from Tab5 baseline (260px @ 1280w ~= 20.3% width).
-  const int leftColW = clampi((w * 260) / 1280, compact ? 56 : 48, 260);
+  // Keep radar narrower so WiFi rows can use more width on the right panel.
+  const int leftColW = clampi((w * 220) / 1280, compact ? 56 : 48, 220);
   const int panelGap = compact ? 6 : 10;
   const int leftX = content.x;
   const int leftW = min(leftColW, rightLimit - leftX - 40);
@@ -5364,11 +5399,12 @@ static void drawWifiScan() {
   const int bottomBtnW = max(50, (rightLimit - content.x - (bottomBtnGap * 3)) / 4);
   btnWifiBack = {content.x, bottom.y, bottomBtnW, UI_BUTTON_H, "Back"};
   btnWifiScan = {content.x + (bottomBtnW + bottomBtnGap), bottom.y, bottomBtnW, UI_BUTTON_H, "Scan"};
-  btnWifiRescan = {content.x + (bottomBtnW + bottomBtnGap) * 2, bottom.y, bottomBtnW, UI_BUTTON_H, "Rescan"};
+  btnWifiConnect = {content.x + (bottomBtnW + bottomBtnGap) * 2, bottom.y, bottomBtnW, UI_BUTTON_H, "Connect"};
   btnWifiTargetGo = {content.x + (bottomBtnW + bottomBtnGap) * 3, bottom.y, bottomBtnW, UI_BUTTON_H, "Target"};
+  btnWifiRescan = {0, 0, 0, 0, ""};
   drawButton(btnWifiBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
   drawButton(btnWifiScan, TFT_DARKCYAN, TFT_WHITE, TFT_WHITE);
-  drawButton(btnWifiRescan, TFT_DARKGREEN, TFT_WHITE, TFT_WHITE);
+  drawButton(btnWifiConnect, TFT_DARKCYAN, TFT_WHITE, TFT_WHITE);
   drawButton(btnWifiTargetGo, 0x7800, TFT_MAGENTA, TFT_WHITE);
   tft.setTextDatum(TL_DATUM);
 
@@ -5414,10 +5450,6 @@ static void drawWifiScan() {
     drawTextClipped("CH " + String(a.channel) + "  " + String(a.rssi) + "dBm  " + authToStr(a.auth),
                     rightX + 6, detailLine2Y, rightW - 12, TFT_WHITE, TFT_BLACK, true);
   }
-  const int connectW = clampi(rightW / 3, compact ? 84 : 120, compact ? 120 : 180);
-  btnWifiConnect = {rightX + 6, topY + selectedH - (UI_BUTTON_H + 4), connectW, UI_BUTTON_H, "Connect"};
-  drawButton(btnWifiConnect, TFT_DARKCYAN, TFT_WHITE, TFT_WHITE);
-
   const int tableY = topY + selectedH + panelGap;
   const int scrollBtn = compact ? 18 : 24;
   wifiListTopY = tableY + 20;
@@ -5450,7 +5482,7 @@ static void drawWifiScan() {
       tft.setTextColor(sel ? TFT_WHITE : TFT_CYAN, sel ? TFT_DARKGREEN : TFT_BLACK);
       const String rowText = (a.ssid.isEmpty() ? String("(hidden)") : a.ssid) + "  " + a.bssid + "  CH" + String(a.channel) + "  " + String(a.rssi) + "dBm";
       const int rowTextX = btnWifiChecks[r].x + btnWifiChecks[r].w + 6;
-      const int rowTextW = (rightX + rightW - rowTextX) - (scrollBtn + 8);
+      const int rowTextW = (rightX + rightW - rowTextX) - 6;
       drawTextClipped(rowText, rowTextX, y + (compact ? 2 : 8), rowTextW, sel ? TFT_WHITE : TFT_CYAN, sel ? TFT_DARKGREEN : TFT_BLACK, true);
     }
   }
@@ -10213,118 +10245,180 @@ static inline int wifiConnectStatusLineY() {
 
 static void drawWifiPasswordModal() {
   if (!wifiConnectShowPasswordModal) return;
-
   const int w = tft.width();
   const int h = tft.height();
-  const int boxX = 6;
-#if defined(NEONDRIVE_TARGET_CYD35)
-  const bool largeKeyboard = true;
-#else
-  const bool largeKeyboard = false;
-#endif
-  const int boxY = largeKeyboard ? 28 : 46;
-  const int boxW = w - 12;
-  const int boxH = largeKeyboard ? (h - 34) : (h - 52);
-  const int keyW = largeKeyboard ? 34 : 24;
-  const int keyH = largeKeyboard ? 30 : 22;
-  const int keyGap = largeKeyboard ? 4 : 2;
-  const char* alphaRow1 = "1234567890";
-  const char* alphaRow2 = "qwertyuiop";
-  const char* alphaRow3 = "asdfghjkl";
-  const char* alphaRow4 = "zxcvbnm";
-  const char* symRow1 = "1234567890";
-  const char* symRow2 = "!@#$%^&*()";
-  const char* symRow3 = "-_=+[]{}\\|";
-  const char* symRow4 = ";:'\",./?";
+  const bool portrait = (h > w);
+  const bool tab5Large = (w >= 900 || h >= 900);
+  const bool compact = !tab5Large;
+  const int pad = compact ? 6 : 14;
+  const int x0 = pad;
+  const int y0 = compact ? (uiHeaderBandH() + 4) : (uiHeaderBandH() + 8);
+  const int ww = w - (pad * 2);
+  const int hh = h - y0 - pad;
+  const int panelR = compact ? 6 : 12;
+  const int keyGap = compact ? 3 : 8;
+  const int keyH = compact ? (portrait ? 22 : 20) : (portrait ? 58 : 56);
+  const int actionH = compact ? (portrait ? 24 : 22) : (portrait ? 58 : 52);
+
+  const char* alphaRow1 = "1234567890-=";
+  const char* alphaRow2 = "qwertyuiop[]";
+  const char* alphaRow3 = "asdfghjkl;'";
+  const char* alphaRow4 = "zxcvbnm,./";
+  const char* symRow1 = "!@#$%^&*()_+";
+  const char* symRow2 = "`~|{}<>?:\\";
+  const char* symRow3 = "1234567890[]";
+  const char* symRow4 = "-=,./;'";
   const char* row1 = wifiPwSymbols ? symRow1 : alphaRow1;
   const char* row2 = wifiPwSymbols ? symRow2 : alphaRow2;
   const char* row3 = wifiPwSymbols ? symRow3 : alphaRow3;
   const char* row4 = wifiPwSymbols ? symRow4 : alphaRow4;
 
-  tft.fillRoundRect(boxX, boxY, boxW, boxH, 8, TFT_BLACK);
-  tft.drawRoundRect(boxX, boxY, boxW, boxH, 8, TFT_MAGENTA);
-
-  tft.setTextDatum(TL_DATUM);
+  // Network panel
+  const int netH = compact ? 66 : (portrait ? 188 : 124);
+  tft.fillRoundRect(x0, y0, ww, netH, panelR, TFT_BLACK);
+  tft.drawRoundRect(x0, y0, ww, netH, panelR, TFT_MAGENTA);
   applyFontSm();
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString("Password Required", boxX + 10, boxY + 8);
-
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
+  tft.drawString("SELECTED NETWORK", x0 + (compact ? 6 : 14), y0 + (compact ? 5 : 10));
   String ssid = "(none)";
-  if (wifiConnectSelectedIdx >= 0 && wifiConnectSelectedIdx < apCount) ssid = aps[wifiConnectSelectedIdx].ssid;
-  tft.drawString("SSID: " + ssid, boxX + 10, boxY + 22);
-
-  String plain = wifiConnectPassword;
-  if (plain.isEmpty()) plain = "(empty)";
-  if (plain.length() > (largeKeyboard ? 44 : 32)) {
-    plain = "..." + plain.substring(plain.length() - (largeKeyboard ? 44 : 32));
+  if (wifiConnectSelectedIdx >= 0 && wifiConnectSelectedIdx < apCount) {
+    ssid = aps[wifiConnectSelectedIdx].ssid.isEmpty() ? String("(hidden)") : aps[wifiConnectSelectedIdx].ssid;
   }
-  tft.drawString("Pass: " + plain, boxX + 10, boxY + 36);
+  if (!compact) applyFontMd();
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  drawTextClipped(ssid, x0 + (compact ? 6 : 14), y0 + (compact ? 22 : 42), ww - (compact ? 12 : 24), TFT_CYAN, TFT_BLACK, true);
+  applyFontSm();
+  if (wifiConnectSelectedIdx >= 0 && wifiConnectSelectedIdx < apCount) {
+    const ApRecord& a = aps[wifiConnectSelectedIdx];
+    const int infoY = y0 + (compact ? 40 : 82);
+    drawTextClipped(authToStr(a.auth), x0 + (compact ? 6 : 14), infoY, ww / 3, TFT_GREEN, TFT_BLACK, false);
+    drawTextClipped(String(a.rssi) + " dBm", x0 + ww / 3, infoY, ww / 3, TFT_GREEN, TFT_BLACK, false);
+    drawTextClipped("BSSID " + a.bssid, x0 + (2 * ww / 3), infoY, (ww / 3) - 8, TFT_LIGHTGREY, TFT_BLACK, false);
+  }
 
+  // Password panel
+  const int pwY = y0 + netH + keyGap;
+  const int pwH = compact ? 42 : 84;
+  tft.fillRoundRect(x0, pwY, ww, pwH, panelR, TFT_BLACK);
+  tft.drawRoundRect(x0, pwY, ww, pwH, panelR, 0x781F);
+  tft.setTextColor(0xD81F, TFT_BLACK);
+  tft.drawString("PASSWORD", x0 + (compact ? 6 : 14), pwY + (compact ? 4 : 10));
+  String shown = wifiConnectPassword;
+  if (!wifiConnectRevealPassword) {
+    String masked;
+    for (size_t i = 0; i < shown.length(); i++) masked += '*';
+    shown = masked;
+  }
+  if (shown.isEmpty()) shown = "(empty)";
+  const int shownY = pwY + (compact ? 20 : 40);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  drawTextClipped(shown, x0 + (compact ? 6 : 14), shownY, ww - (compact ? 52 : 110), TFT_CYAN, TFT_BLACK, false);
+  btnWifiPwShowHide = {x0 + ww - (compact ? 44 : 96), pwY + (compact ? 14 : 22), compact ? 38 : 82, compact ? 22 : 48, wifiConnectRevealPassword ? "Hide" : "Show"};
+  drawButton(btnWifiPwShowHide, TFT_NAVY, TFT_CYAN, TFT_WHITE);
+
+  // Keyboard rows
   wifiPwKeyCount = 0;
-  auto addKey = [&](int x, int y, char baseChar) {
+  auto addKey = [&](int x, int y, int kw, char baseChar) {
     if (wifiPwKeyCount >= 40) return;
     char outChar = baseChar;
-    if (isalpha((unsigned char)baseChar)) {
+    if (isalpha((unsigned char)baseChar) && !wifiPwSymbols) {
       outChar = wifiPwShift ? (char)toupper(baseChar) : (char)tolower(baseChar);
     }
     wifiPwKeyValues[wifiPwKeyCount] = outChar;
     wifiPwKeyLabels[wifiPwKeyCount][0] = outChar;
     wifiPwKeyLabels[wifiPwKeyCount][1] = '\0';
-    btnWifiPwKeys[wifiPwKeyCount] = {x, y, keyW, keyH, wifiPwKeyLabels[wifiPwKeyCount]};
-    drawButton(btnWifiPwKeys[wifiPwKeyCount], TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+    btnWifiPwKeys[wifiPwKeyCount] = {x, y, kw, keyH, wifiPwKeyLabels[wifiPwKeyCount]};
+    drawButton(btnWifiPwKeys[wifiPwKeyCount], TFT_BLACK, TFT_MAGENTA, TFT_CYAN);
     wifiPwKeyCount++;
   };
-  auto addRow = [&](const char* keys, int y) {
-    int n = (int)strlen(keys);
-    int totalW = (n * keyW) + ((n - 1) * keyGap);
-    int x = (w - totalW) / 2;
-    for (int i = 0; i < n; i++) addKey(x + i * (keyW + keyGap), y, keys[i]);
+  auto drawRow = [&](const char* keys, int y, bool cyanRow) {
+    const int n = (int)strlen(keys);
+    const int kw = max(14, (ww - ((n - 1) * keyGap)) / n);
+    int x = x0;
+    for (int i = 0; i < n; i++) {
+      addKey(x, y, kw, keys[i]);
+      if (cyanRow) drawButton(btnWifiPwKeys[wifiPwKeyCount - 1], TFT_BLACK, TFT_CYAN, TFT_CYAN);
+      x += kw + keyGap;
+    }
   };
 
-  const int k0y = boxY + (largeKeyboard ? 64 : 56);
-  addRow(row1, k0y);
-  addRow(row2, k0y + keyH + keyGap);
-  addRow(row3, k0y + ((keyH + keyGap) * 2));
+  const int kY0 = pwY + pwH + keyGap;
+  drawRow(row1, kY0, false);
+  drawRow(row2, kY0 + keyH + keyGap, true);
 
-  int row4y = k0y + ((keyH + keyGap) * 3);
-  const int shiftW = largeKeyboard ? 58 : 44;
-  const int backW = largeKeyboard ? 58 : 44;
-  const int row4n = (int)strlen(row4);
-  const int row4TotalW = shiftW + backW + (row4n * keyW) + ((row4n + 2) * keyGap);
-  int row4x = (w - row4TotalW) / 2;
-  const char* shiftLabel = wifiPwSymbols ? "ABC" : (wifiPwShift ? "SHIFT" : "shift");
-  btnWifiPwShift = {row4x, row4y, shiftW, keyH, shiftLabel};
-  drawButton(btnWifiPwShift, wifiPwShift ? TFT_NAVY : TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
-  int x = row4x + shiftW + keyGap;
-  for (int i = 0; i < row4n; i++) addKey(x + i * (keyW + keyGap), row4y, row4[i]);
-  btnWifiPwBack = {x + row4n * (keyW + keyGap), row4y, backW, keyH, "<-"};
-  drawButton(btnWifiPwBack, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+  // Row 3 with tab + row text + backspace
+  int r3y = kY0 + ((keyH + keyGap) * 2);
+  btnWifiPwMode = {x0, r3y, compact ? 40 : 92, keyH, wifiPwSymbols ? "ABC" : "SYM"};
+  drawButton(btnWifiPwMode, 0x7A40, TFT_YELLOW, TFT_YELLOW);
+  int row3x = btnWifiPwMode.x + btnWifiPwMode.w + keyGap;
+  int row3n = (int)strlen(row3);
+  int row3kw = max(12, (ww - btnWifiPwMode.w - (compact ? 56 : 118) - ((row3n + 1) * keyGap)) / row3n);
+  for (int i = 0; i < row3n; i++) {
+    addKey(row3x + i * (row3kw + keyGap), r3y, row3kw, row3[i]);
+    drawButton(btnWifiPwKeys[wifiPwKeyCount - 1], TFT_BLACK, TFT_CYAN, TFT_CYAN);
+  }
+  btnWifiPwBack = {x0 + ww - (compact ? 52 : 108), r3y, compact ? 52 : 108, keyH, "Backsp"};
+  drawButton(btnWifiPwBack, TFT_BLACK, TFT_MAGENTA, TFT_MAGENTA);
 
-  const int row5y = row4y + keyH + keyGap;
-  const int actionGap = keyGap;
-  const int spaceW = largeKeyboard ? 130 : 88;
-  const int clearW = largeKeyboard ? 68 : 44;
-  const int modeW = largeKeyboard ? 64 : 44;
-  const int cancelW = largeKeyboard ? 88 : 64;
-  const int connectW = largeKeyboard ? 88 : 64;
-  const int row5TotalW = spaceW + clearW + modeW + cancelW + connectW + (actionGap * 4);
-  int row5x = (w - row5TotalW) / 2;
-  if (row5x < (boxX + 4)) row5x = boxX + 4;
+  // Row 4 with shift + letters + space
+  int r4y = r3y + keyH + keyGap;
+  const int shiftW = compact ? 48 : 108;
+  btnWifiPwShift = {x0, r4y, shiftW, keyH, wifiPwShift ? "SHIFT" : "Shift"};
+  drawButton(btnWifiPwShift, wifiPwShift ? TFT_NAVY : TFT_BLACK, TFT_CYAN, TFT_CYAN);
+  int row4n = (int)strlen(row4);
+  int avail = ww - shiftW - keyGap - (compact ? 90 : 180) - (row4n * keyGap);
+  int row4kw = max(12, avail / max(1, row4n));
+  int row4x = x0 + shiftW + keyGap;
+  for (int i = 0; i < row4n; i++) {
+    addKey(row4x + i * (row4kw + keyGap), r4y, row4kw, row4[i]);
+    drawButton(btnWifiPwKeys[wifiPwKeyCount - 1], TFT_BLACK, TFT_CYAN, TFT_CYAN);
+  }
+  btnWifiPwSpace = {x0 + ww - (compact ? 84 : 168), r4y, compact ? 84 : 168, keyH, "Space"};
+  drawButton(btnWifiPwSpace, TFT_BLACK, TFT_CYAN, TFT_CYAN);
 
-  btnWifiPwSpace = {row5x, row5y, spaceW, keyH, "Space"};
-  row5x += spaceW + actionGap;
-  btnWifiPwClear = {row5x, row5y, clearW, keyH, "Clear"};
-  row5x += clearW + actionGap;
-  btnWifiPwMode = {row5x, row5y, modeW, keyH, wifiPwSymbols ? "ABC" : "SYM"};
-  row5x += modeW + actionGap;
-  btnWifiPwCancel = {row5x, row5y, cancelW, keyH, "Cancel"};
-  row5x += cancelW + actionGap;
-  btnWifiPwConnect = {row5x, row5y, connectW, keyH, "Connect"};
-  drawButton(btnWifiPwSpace, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
-  drawButton(btnWifiPwClear, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
-  drawButton(btnWifiPwMode, wifiPwSymbols ? TFT_NAVY : TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
-  drawButton(btnWifiPwCancel,  TFT_MAROON, TFT_WHITE, TFT_WHITE);
-  drawButton(btnWifiPwConnect, TFT_DARKGREEN, TFT_WHITE, TFT_WHITE);
+  // Action row
+  int r5y = r4y + keyH + keyGap;
+  const int actGap = keyGap;
+  const int actCount = 5;
+  const int actW = max(44, (ww - (actGap * (actCount - 1))) / actCount);
+  btnWifiPwSaved = {x0 + (actW + actGap) * 0, r5y, actW, actionH, "Saved"};
+  btnWifiPwClear = {x0 + (actW + actGap) * 1, r5y, actW, actionH, "Clear"};
+  btnWifiPwCancel = {x0 + (actW + actGap) * 2, r5y, actW, actionH, "Cancel"};
+  btnWifiPwConnect = {x0 + (actW + actGap) * 3, r5y, actW, actionH, "Connect"};
+  btnWifiPwReconnect = {x0 + (actW + actGap) * 4, r5y, actW, actionH, "Reconnect"};
+  drawButton(btnWifiPwSaved, TFT_NAVY, TFT_CYAN, TFT_WHITE);
+  drawButton(btnWifiPwClear, TFT_BLACK, TFT_CYAN, TFT_CYAN);
+  drawButton(btnWifiPwCancel, TFT_BLACK, TFT_RED, TFT_RED);
+  drawButton(btnWifiPwConnect, TFT_DARKGREEN, TFT_GREEN, TFT_GREEN);
+  drawButton(btnWifiPwReconnect, TFT_BLACK, TFT_YELLOW, TFT_YELLOW);
+
+  if (wifiConnectShowSavedDrawer) {
+    const int dw = compact ? (ww - 8) : min(ww - 18, (portrait ? ww - 18 : ww / 2));
+    const int dx = compact ? (x0 + 4) : (x0 + ww - dw - 8);
+    const int dy = pwY + 2;
+    const int dh = max(80, (r5y + actionH) - dy - 4);
+    tft.fillRoundRect(dx, dy, dw, dh, panelR, TFT_BLACK);
+    tft.drawRoundRect(dx, dy, dw, dh, panelR, TFT_MAGENTA);
+    tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
+    tft.drawString("SAVED NETWORKS", dx + 6, dy + 6);
+    btnWifiSavedClose = {dx + dw - (compact ? 36 : 60), dy + 4, compact ? 32 : 54, compact ? 18 : 24, "X"};
+    drawButton(btnWifiSavedClose, TFT_MAROON, TFT_MAGENTA, TFT_WHITE);
+    for (int i = 0; i < AppConfig::MAX_SAVED_WIFI; i++) btnWifiSavedRows[i] = {0,0,0,0,""};
+    int rowY = dy + (compact ? 24 : 34);
+    const int rowH = compact ? 18 : 30;
+    for (int i = 0; i < cfg.wifi_savedCount && i < AppConfig::MAX_SAVED_WIFI; i++) {
+      if (rowY + rowH > dy + dh - 4) break;
+      String lbl = cfg.wifi_savedSsid[i].isEmpty() ? String("(empty)") : cfg.wifi_savedSsid[i];
+      btnWifiSavedRows[i] = {dx + 6, rowY, dw - 12, rowH, ""};
+      tft.drawRect(btnWifiSavedRows[i].x, btnWifiSavedRows[i].y, btnWifiSavedRows[i].w, btnWifiSavedRows[i].h, TFT_CYAN);
+      drawTextClipped(lbl, btnWifiSavedRows[i].x + 4, rowY + (compact ? 3 : 7), btnWifiSavedRows[i].w - 8, TFT_CYAN, TFT_BLACK, false);
+      rowY += rowH + 4;
+    }
+  } else {
+    btnWifiSavedClose = {0,0,0,0,""};
+    for (int i = 0; i < AppConfig::MAX_SAVED_WIFI; i++) btnWifiSavedRows[i] = {0,0,0,0,""};
+  }
 }
 
 static void drawWifiConnect() {
@@ -10335,6 +10429,7 @@ static void drawWifiConnect() {
   const int w = tft.width();
   const int h = tft.height();
   const bool compact = (h <= 180);
+  const bool tab5Large = (w >= 900 || h >= 600);
   const int wifiStatus = WiFi.status();
 
 #if defined(NEONDRIVE_TARGET_CYD)
@@ -10355,11 +10450,13 @@ static void drawWifiConnect() {
   const int rowH = max(18, (listBottomY - listTopY) / WIFI_CONNECT_VISIBLE_ROWS);
 #else
   const int btnGap = compact ? 4 : 6;
-  const int btnH = compact ? 24 : 30;
+  const int btnH = tab5Large ? 40 : (compact ? 24 : 30);
   const int btnY = h - (compact ? 30 : 36);
   const int btnX0 = 8;
   const int controlsW = max(compact ? 208 : 236, uiRightLimitForBand(btnY, btnH) - 8);
-  const int btnW = max(48, (controlsW - (btnGap * 3)) / 4);
+  const bool hideBottomConnect = tab5Large;
+  const int bottomBtnCount = hideBottomConnect ? 3 : 4;
+  const int btnW = max(48, (controlsW - (btnGap * (bottomBtnCount - 1))) / bottomBtnCount);
   const int selectedY = compact ? (uiHeaderBandH() + 2) : 24;
   const int statusY = selectedY + 12;
   const int hintY = statusY + 12;
@@ -10375,8 +10472,13 @@ static void drawWifiConnect() {
 
   btnWifiConnectBack = {btnX0 + (btnW + btnGap) * 0, btnY, btnW, btnH, "Back"};
   btnWifiConnectScan = {btnX0 + (btnW + btnGap) * 1, btnY, btnW, btnH, "Scan"};
-  btnWifiConnectSubmit = {btnX0 + (btnW + btnGap) * 2, btnY, btnW, btnH, "Connect"};
-  btnWifiConnectDisconnect = {btnX0 + (btnW + btnGap) * 3, btnY, btnW, btnH, "Disc"};
+  if (hideBottomConnect) {
+    btnWifiConnectSubmit = {0, 0, 0, 0, ""};
+    btnWifiConnectDisconnect = {btnX0 + (btnW + btnGap) * 2, btnY, btnW, btnH, "Disc"};
+  } else {
+    btnWifiConnectSubmit = {btnX0 + (btnW + btnGap) * 2, btnY, btnW, btnH, "Connect"};
+    btnWifiConnectDisconnect = {btnX0 + (btnW + btnGap) * 3, btnY, btnW, btnH, "Disc"};
+  }
 
   const int scrollBtn = clampi(ActionDockBoxW, compact ? 18 : 22, compact ? 24 : 30);
   int scrollTopY = uiActionDockSafeBottom() + 3;
@@ -10390,7 +10492,9 @@ static void drawWifiConnect() {
 
   drawButton(btnWifiConnectBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
   drawButton(btnWifiConnectScan, TFT_DARKCYAN, TFT_MAGENTA, TFT_WHITE);
-  drawButton(btnWifiConnectSubmit, TFT_DARKGREEN, TFT_MAGENTA, TFT_WHITE);
+  if (!hideBottomConnect) {
+    drawButton(btnWifiConnectSubmit, TFT_DARKGREEN, TFT_MAGENTA, TFT_WHITE);
+  }
   drawButton(btnWifiConnectDisconnect, wifiStatus == WL_CONNECTED ? TFT_MAROON : TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
   drawButton(btnWifiConnectUp, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
   drawButton(btnWifiConnectDown, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
@@ -10413,63 +10517,66 @@ static void drawWifiConnect() {
     return s;
   };
 
-  tft.setTextDatum(TL_DATUM);
-  applyFontSm();
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  String selectedLine = "Selected: (none)";
-  if (wifiConnectSelectedIdx >= 0 && wifiConnectSelectedIdx < apCount) {
-    const ApRecord& a = aps[wifiConnectSelectedIdx];
-    selectedLine = "Selected: " + (a.ssid.isEmpty() ? String("(hidden)") : a.ssid) +
-                   " | CH " + String(a.channel) + " | " + String(a.rssi) + "dBm";
-  }
-  selectedLine = trimToWidth(selectedLine, uiRightLimitForBand(selectedY, 14) - 8);
-  tft.drawString(selectedLine, listX, selectedY);
-
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  if (wifiConnectScanActive) tft.drawString("Scanning...", listX, statusY);
-  else tft.drawString("APs: " + String(apCount), listX, statusY);
-
-  if (wifiConnectScanActive) tft.drawString("Please wait...", listX, hintY);
-  else tft.drawString("Tap row to select network", listX, hintY);
-
-  for (int r = 0; r < WIFI_CONNECT_VISIBLE_ROWS; r++) {
-    const int idx = wifiConnectScroll + r;
-    const int y = listTopY + (r * rowH);
-    const bool sel = (idx == wifiConnectSelectedIdx);
-    btnWifiConnectList[r] = {listX, y, listW, rowH - 2};
-
-    if (idx < apCount) {
-      const ApRecord& a = aps[idx];
-      const uint16_t bgColor = sel ? TFT_DARKGREEN : TFT_BLACK;
-      const uint16_t borderColor = sel ? TFT_MAGENTA : TFT_DARKGREY;
-      tft.fillRect(listX, y, listW, rowH - 2, bgColor);
-      tft.drawRect(listX, y, listW, rowH - 2, borderColor);
-
-      tft.setTextColor(sel ? TFT_WHITE : TFT_CYAN, bgColor);
-      const int textY = y + ((rowH <= 18) ? 4 : ((rowH - 10) / 2));
-      String rowText = (a.ssid.isEmpty() ? String("(hidden)") : a.ssid) +
-                       " | CH" + String(a.channel) + " | " + authToStr(a.auth) +
-                       " | " + String(a.rssi) + "dBm";
-      rowText = trimToWidth(rowText, listW - 6);
-      tft.drawString(rowText, listX + 2, textY);
-    } else {
-      tft.fillRect(listX, y, listW, rowH - 2, TFT_BLACK);
-      tft.drawRect(listX, y, listW, rowH - 2, TFT_DARKGREY);
-    }
-  }
-  tft.fillRect(0, statusLineY - 2, w, 16, TFT_BLACK);
-  if (wifiStatus == WL_CONNECTED) {
+  if (!wifiConnectShowPasswordModal) {
+    tft.setTextDatum(TL_DATUM);
+    applyFontSm();
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.drawString("Status: Connected  " + WiFi.localIP().toString(), listX, statusLineY);
-  } else if (wifiConnectInProgress) {
-    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    tft.drawString("Status: Connecting...", listX, statusLineY);
-  } else {
-    tft.setTextColor(TFT_CYAN, TFT_BLACK);
-    tft.drawString("Status: " + wifiConnectStatus, listX, statusLineY);
-  }
+    String selectedLine = "Selected: (none)";
+    if (wifiConnectSelectedIdx >= 0 && wifiConnectSelectedIdx < apCount) {
+      const ApRecord& a = aps[wifiConnectSelectedIdx];
+      selectedLine = "Selected: " + (a.ssid.isEmpty() ? String("(hidden)") : a.ssid) +
+                     " | CH " + String(a.channel) + " | " + String(a.rssi) + "dBm";
+    }
+    selectedLine = trimToWidth(selectedLine, uiRightLimitForBand(selectedY, 14) - 8);
+    tft.drawString(selectedLine, listX, selectedY);
 
-  if (wifiConnectShowPasswordModal) {
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    if (wifiConnectScanActive) tft.drawString("Scanning...", listX, statusY);
+    else tft.drawString("APs: " + String(apCount), listX, statusY);
+
+    if (wifiConnectScanActive) tft.drawString("Please wait...", listX, hintY);
+    else tft.drawString("Tap row to select network", listX, hintY);
+
+    for (int r = 0; r < WIFI_CONNECT_VISIBLE_ROWS; r++) {
+      const int idx = wifiConnectScroll + r;
+      const int y = listTopY + (r * rowH);
+      const bool sel = (idx == wifiConnectSelectedIdx);
+      btnWifiConnectList[r] = {listX, y, listW, rowH - 2};
+
+      if (idx < apCount) {
+        const ApRecord& a = aps[idx];
+        const uint16_t bgColor = sel ? TFT_DARKGREEN : TFT_BLACK;
+        const uint16_t borderColor = sel ? TFT_MAGENTA : TFT_DARKGREY;
+        tft.fillRect(listX, y, listW, rowH - 2, bgColor);
+        tft.drawRect(listX, y, listW, rowH - 2, borderColor);
+
+        tft.setTextColor(sel ? TFT_WHITE : TFT_CYAN, bgColor);
+        const int textY = y + ((rowH <= 18) ? 4 : ((rowH - 10) / 2));
+        String rowText = (a.ssid.isEmpty() ? String("(hidden)") : a.ssid) +
+                         " | CH" + String(a.channel) + " | " + authToStr(a.auth) +
+                         " | " + String(a.rssi) + "dBm";
+        rowText = trimToWidth(rowText, listW - 6);
+        tft.drawString(rowText, listX + 2, textY);
+      } else {
+        tft.fillRect(listX, y, listW, rowH - 2, TFT_BLACK);
+        tft.drawRect(listX, y, listW, rowH - 2, TFT_DARKGREY);
+      }
+    }
+    tft.fillRect(0, statusLineY - 2, w, 16, TFT_BLACK);
+    if (wifiStatus == WL_CONNECTED) {
+      tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      tft.drawString("Status: Connected  " + WiFi.localIP().toString(), listX, statusLineY);
+    } else if (wifiConnectInProgress) {
+      tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+      tft.drawString("Status: Connecting...", listX, statusLineY);
+    } else {
+      tft.setTextColor(TFT_CYAN, TFT_BLACK);
+      tft.drawString("Status: " + wifiConnectStatus, listX, statusLineY);
+    }
+  } else {
+    for (int i = 0; i < WIFI_CONNECT_VISIBLE_ROWS; i++) {
+      btnWifiConnectList[i] = {0, 0, 0, 0};
+    }
     drawWifiPasswordModal();
   }
 
@@ -10778,8 +10885,11 @@ static void drawWebserver() {
 static void refreshWifiStatusLine() {
   if (screen != ScreenId::WIFI_CONNECT && screen != ScreenId::WIFI_SCAN) return;
   if (screen == ScreenId::WIFI_SCAN) return;
+  if (wifiConnectShowPasswordModal) return;
   const int w = tft.width();
   const int statusY = wifiConnectStatusLineY();
+  const UiRect bottom = computeBottomBarRect();
+  if (statusY >= (bottom.y - 2)) return;
   // Clear status line area
   tft.fillRect(0, statusY - 2, w, 18, TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
@@ -17087,7 +17197,7 @@ void loop() {
       drawWifiScan();
     };
 
-    if (hit(btnWifiScan, tx, ty) || hit(btnWifiRescan, tx, ty)) {
+    if (hit(btnWifiScan, tx, ty)) {
       runWifiScanAndRestore();
       return;
     }
@@ -17108,15 +17218,19 @@ void loop() {
       }
       const ApRecord& selectedAp = aps[apSelected];
       wifiConnectSelectedIdx = apSelected;
-      if (selectedAp.auth == WIFI_AUTH_OPEN) {
-        connectToWifi(selectedAp.ssid, "");
-      } else {
+      wifiConnectSsid = selectedAp.ssid.isEmpty() ? "(hidden)" : selectedAp.ssid;
+      wifiConnectNeedsPassword = (selectedAp.auth != WIFI_AUTH_OPEN);
+      wifiPwShift = false;
+      wifiPwSymbols = false;
+      wifiConnectRevealPassword = false;
+      wifiConnectShowSavedDrawer = false;
+      wifiConnectShowPasswordModal = wifiConnectNeedsPassword && !ND_HW_KEYBOARD;
+      if (wifiConnectNeedsPassword) {
         wifiConnectPassword = (cfg.wifi_ssid == selectedAp.ssid) ? cfg.wifi_password : "";
-        wifiPwShift = false;
-        wifiPwSymbols = false;
-        wifiConnectShowPasswordModal = true;
+      } else {
+        wifiConnectPassword = "";
       }
-      drawWifiScan();
+      setScreen(ScreenId::WIFI_CONNECT);
       waitTouchRelease();
       return;
     }
@@ -18063,6 +18177,38 @@ void loop() {
   // WIFI_CONNECT
   if (screen == ScreenId::WIFI_CONNECT) {
     if (wifiConnectShowPasswordModal) {
+      // Keep bottom nav Back responsive even while modal is open.
+      if (hit(btnWifiConnectBack, tx, ty)) {
+        wifiConnectShowSavedDrawer = false;
+        wifiConnectShowPasswordModal = false;
+        Serial.println("[ui] Returning to WIFI_SCAN from WIFI_CONNECT (modal)");
+        setScreen(ScreenId::WIFI_SCAN);
+        waitTouchRelease();
+        return;
+      }
+      if (hit(btnWifiSavedClose, tx, ty)) {
+        wifiConnectShowSavedDrawer = false;
+        drawWifiConnect();
+        waitTouchRelease();
+        return;
+      }
+      for (int i = 0; i < AppConfig::MAX_SAVED_WIFI; i++) {
+        if (hit(btnWifiSavedRows[i], tx, ty) && i < cfg.wifi_savedCount) {
+          wifiConnectShowSavedDrawer = false;
+          wifiConnectPassword = cfg.wifi_savedPassword[i];
+          const String savedSsid = cfg.wifi_savedSsid[i];
+          for (int a = 0; a < apCount; a++) {
+            if (aps[a].ssid == savedSsid) {
+              wifiConnectSelectedIdx = a;
+              break;
+            }
+          }
+          wifiConnectStatus = "Loaded saved credentials";
+          drawWifiConnect();
+          waitTouchRelease();
+          return;
+        }
+      }
       for (int i = 0; i < wifiPwKeyCount; i++) {
         if (hit(btnWifiPwKeys[i], tx, ty)) {
           if (wifiConnectPassword.length() < 63) {
@@ -18092,6 +18238,12 @@ void loop() {
         waitTouchRelease();
         return;
       }
+      if (hit(btnWifiPwShowHide, tx, ty)) {
+        wifiConnectRevealPassword = !wifiConnectRevealPassword;
+        drawWifiConnect();
+        waitTouchRelease();
+        return;
+      }
       if (hit(btnWifiPwBack, tx, ty)) {
         if (!wifiConnectPassword.isEmpty()) wifiConnectPassword.remove(wifiConnectPassword.length() - 1);
         drawWifiPasswordModal();
@@ -18104,6 +18256,12 @@ void loop() {
         waitTouchRelease();
         return;
       }
+      if (hit(btnWifiPwSaved, tx, ty)) {
+        wifiConnectShowSavedDrawer = !wifiConnectShowSavedDrawer;
+        drawWifiConnect();
+        waitTouchRelease();
+        return;
+      }
       if (hit(btnWifiPwSpace, tx, ty)) {
         if (wifiConnectPassword.length() < 63) wifiConnectPassword += " ";
         drawWifiPasswordModal();
@@ -18111,8 +18269,9 @@ void loop() {
         return;
       }
       if (hit(btnWifiPwCancel, tx, ty)) {
-        wifiConnectShowPasswordModal = false;
-        wifiConnectStatus = "Password entry canceled";
+        wifiConnectPassword = "";
+        wifiConnectShowSavedDrawer = false;
+        wifiConnectStatus = "Canceled";
         drawWifiConnect();
         waitTouchRelease();
         return;
@@ -18132,8 +18291,22 @@ void loop() {
           return;
         }
         const ApRecord& selectedAp = aps[wifiConnectSelectedIdx];
-        wifiConnectShowPasswordModal = false;
         connectToWifi(selectedAp.ssid, wifiConnectPassword);
+        drawWifiConnect();
+        waitTouchRelease();
+        return;
+      }
+      if (hit(btnWifiPwReconnect, tx, ty)) {
+        if (!cfg.wifi_ssid.isEmpty()) {
+          wifiConnectPassword = cfg.wifi_password;
+          connectToWifi(cfg.wifi_ssid, cfg.wifi_password);
+          wifiConnectStatus = "Reconnecting to saved network";
+        } else if (cfg.wifi_savedCount > 0) {
+          connectToWifi(cfg.wifi_savedSsid[0], cfg.wifi_savedPassword[0]);
+          wifiConnectStatus = "Reconnecting saved[0]";
+        } else {
+          wifiConnectStatus = "No saved network";
+        }
         drawWifiConnect();
         waitTouchRelease();
         return;
@@ -18145,8 +18318,8 @@ void loop() {
 
     // Back button
     if (hit(btnWifiConnectBack, tx, ty)) {
-      Serial.println("[ui] Returning to CONFIG from WIFI_CONNECT");
-      setScreen(ScreenId::CONFIG);
+      Serial.println("[ui] Returning to WIFI_SCAN from WIFI_CONNECT");
+      setScreen(ScreenId::WIFI_SCAN);
       waitTouchRelease();
       return;
     }
@@ -18186,9 +18359,11 @@ void loop() {
           wifiConnectPassword = (cfg.wifi_ssid == selectedAp.ssid) ? cfg.wifi_password : "";
           wifiPwShift = false;
           wifiPwSymbols = false;
-          wifiConnectShowPasswordModal = true;
-          wifiConnectStatus = "Enter password for: " + selectedAp.ssid;
-          Serial.printf("[wifi] Password prompt opened for '%s'\n", selectedAp.ssid.c_str());
+          wifiConnectShowPasswordModal = !ND_HW_KEYBOARD;
+          wifiConnectStatus = ND_HW_KEYBOARD
+                            ? "Type password then press Connect"
+                            : "Enter password for: " + selectedAp.ssid;
+          Serial.printf("[wifi] Password entry for '%s'\n", selectedAp.ssid.c_str());
         }
         drawWifiConnect();
       } else {

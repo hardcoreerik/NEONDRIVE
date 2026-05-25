@@ -1,5 +1,5 @@
 #include "packetlab_wifi.h"
-#if !defined(NEONDRIVE_TARGET_M5TAB5)
+#if !defined(NEONDRIVE_TARGET_M5TAB5) && !defined(NEONDRIVE_TARGET_M5CARDPUTER)
 #include <esp_wifi.h>
 #include <cstring>
 #include <freertos/FreeRTOS.h>
@@ -586,4 +586,4 @@ void PACKETLABMenuTick() {
     PACKETLABAttackTick();
 }
 
-#endif // !NEONDRIVE_TARGET_M5TAB5
+#endif // !NEONDRIVE_TARGET_M5TAB5 && !NEONDRIVE_TARGET_M5CARDPUTER
