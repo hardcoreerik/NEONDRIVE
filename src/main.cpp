@@ -54,6 +54,7 @@ using fs::File;
 #include <time.h>
 #include <freertos/semphr.h>
 #include "neon_rf.h"
+#include "hal/neon_hal.h"
 #include "deauth_hunter.h"
 #include "bruce_wifi.h"
 #include "dropbox_client.h"
@@ -2920,13 +2921,15 @@ static bool hit(const Button& b, int px, int py) {
 static constexpr int HOME_BTN_COLS = 3;
 static constexpr int HOME_BTN_ROWS = 3;
 static constexpr int HOME_BTN_COUNT = 9;
-#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
-static constexpr uint8_t UI_BUTTON_TEXT_SIZE = 1;
-#elif defined(NEONDRIVE_TARGET_M5TAB5)
-static constexpr uint8_t UI_BUTTON_TEXT_SIZE = 4;
-#else
-static constexpr uint8_t UI_BUTTON_TEXT_SIZE = 2;
-#endif
+// UI metrics — populated from neon_hal_ui_metrics() in initUiMetrics().
+// All draw code reads from g_ui; no #ifdef blocks in feature code.
+static const neon_hal_ui_t *g_ui = nullptr;
+
+// Forward declarations — defined after initUiMetrics() below.
+static void applyFontSm();
+static void applyFontMd();
+static void applyFontLg();
+static void applyFontMono();
 
 // utility for picking neon border colour; indexed same order as labels below.
 static uint16_t homeBtnBorderColor(int idx) {
@@ -2956,11 +2959,24 @@ static void drawButton(const Button& b, uint16_t fill, uint16_t border, uint16_t
   // Keep labels inside button bounds; shrink only when needed.
   const bool isJustGoHomeLabel = (b.label && strcmp(b.label, "Just Go") == 0);
   const int labelInsetPx = isJustGoHomeLabel ? 4 : 10;
-  int labelSize = UI_BUTTON_TEXT_SIZE;
-  tft.setTextSize(labelSize);
-  while (labelSize > 1 && tft.textWidth(b.label) > (drawW - labelInsetPx)) {
-    labelSize--;
+  // Named-font path (Tab5): try md → sm → fall back to integer size 2.
+  // Integer path (CYD): decrement text size until text fits.
+  if (g_ui && g_ui->font_md) {
+    applyFontMd();
+    if (tft.textWidth(b.label) > (drawW - labelInsetPx)) {
+      applyFontSm();
+      if (tft.textWidth(b.label) > (drawW - labelInsetPx)) {
+        tft.setFont(nullptr);
+        applyFontMd();
+      }
+    }
+  } else {
+    int labelSize = g_ui ? g_ui->text_size_md : 2;
     tft.setTextSize(labelSize);
+    while (labelSize > 1 && tft.textWidth(b.label) > (drawW - labelInsetPx)) {
+      --labelSize;
+      tft.setTextSize(labelSize);
+    }
   }
   tft.drawString(b.label, drawX + (drawW / 2), drawY + (drawH / 2));
 }
@@ -3085,11 +3101,19 @@ static void drawHomeButton(const Button& b, uint16_t border, uint16_t text) {
 
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(text, TFT_BLACK);
-  int labelSize = UI_BUTTON_TEXT_SIZE;
-  tft.setTextSize(labelSize);
-  while (labelSize > 1 && tft.textWidth(b.label) > (drawW - 10)) {
-    labelSize--;
+  if (g_ui && g_ui->font_sm) {
+    applyFontSm();
+    if (tft.textWidth(b.label) > (drawW - 10)) {
+      tft.setFont(nullptr);
+      applyFontSm();
+    }
+  } else {
+    int labelSize = g_ui ? g_ui->text_size_sm : 1;
     tft.setTextSize(labelSize);
+    while (labelSize > 1 && tft.textWidth(b.label) > (drawW - 10)) {
+      --labelSize;
+      tft.setTextSize(labelSize);
+    }
   }
   tft.drawString(b.label, cx, drawY + iconH + (labelBandH / 2));
 }
@@ -3182,19 +3206,39 @@ static inline void uiMemLog(const char*) {}
 static inline void uiMemBudgetBoot() {}
 #endif
 
-#if defined(NEONDRIVE_TARGET_BUTTON_NAV)
-static constexpr int UI_SAFE_MARGIN = 4;
-static constexpr int UI_TOP_GAP = 4;
-static constexpr int UI_BOTTOM_BAR_H = 30;
-static constexpr int UI_BUTTON_H = 24;
-static constexpr int UI_BUTTON_GAP = 4;
-#else
-static constexpr int UI_SAFE_MARGIN = 8;
-static constexpr int UI_TOP_GAP = 6;
-static constexpr int UI_BOTTOM_BAR_H = 36;
-static constexpr int UI_BUTTON_H = 30;
-static constexpr int UI_BUTTON_GAP = 6;
+// Layout constants — set from g_ui in initUiMetrics(), called early in setup().
+static int UI_SAFE_MARGIN  = 8;
+static int UI_TOP_GAP      = 6;
+static int UI_BOTTOM_BAR_H = 36;
+static int UI_BUTTON_H     = 30;
+static int UI_BUTTON_GAP   = 6;
+
+static void initUiMetrics() {
+  g_ui = neon_hal_ui_metrics();
+  UI_SAFE_MARGIN  = g_ui->safe_margin;
+  UI_TOP_GAP      = g_ui->top_gap;
+  UI_BOTTOM_BAR_H = g_ui->bottom_bar_h;
+  UI_BUTTON_H     = g_ui->btn_h;
+  UI_BUTTON_GAP   = g_ui->btn_gap;
+}
+
+// Apply a named font (Tab5) or fall back to integer text-size (CYD).
+// Always call this instead of tft.setTextSize() directly.
+static void applyFont(const void *font, int fallback_size) {
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  if (font) {
+    tft.setFont(static_cast<const lgfx::IFont *>(font));
+    tft.setTextSize(1);
+    return;
+  }
+  tft.setFont(nullptr);
 #endif
+  tft.setTextSize(fallback_size);
+}
+static void applyFontSm()   { applyFont(g_ui ? g_ui->font_sm   : nullptr, g_ui ? g_ui->text_size_sm : 1); }
+static void applyFontMd()   { applyFont(g_ui ? g_ui->font_md   : nullptr, g_ui ? g_ui->text_size_md : 2); }
+static void applyFontLg()   { applyFont(g_ui ? g_ui->font_lg   : nullptr, g_ui ? g_ui->text_size_lg : 3); }
+static void applyFontMono() { applyFont(g_ui ? g_ui->font_mono : nullptr, g_ui ? g_ui->text_size_sm : 1); }
 static void drawCyberBackdrop();
 
 struct UiRect {
@@ -3212,7 +3256,7 @@ struct UiPanel {
 static inline int uiScreenW() { return tft.width(); }
 static inline int uiScreenH() { return tft.height(); }
 static inline int uiHeaderBandH() {
-  return (uiScreenH() <= 180) ? 18 : 30;
+  return g_ui ? g_ui->header_h : ((uiScreenH() <= 180) ? 18 : 30);
 }
 static inline int uiTopBarH() { return uiHeaderBandH(); }
 static inline int uiActionDockSafeLeft() {
@@ -3339,11 +3383,7 @@ static void drawHeaderTitleOverlay() {
   if (!currentHeaderTitle || currentHeaderTitle[0] == '\0') return;
   layoutActionDockBox();
   tft.setTextDatum(TL_DATUM);
-#if defined(NEONDRIVE_TARGET_M5TAB5)
-  tft.setTextSize(4);
-#else
-  tft.setTextSize((tft.height() <= 180) ? 1 : 2);
-#endif
+  applyFontLg();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   String headerTitle = String(currentHeaderTitle);
   const int maxTitleW = uiActionDockSafeLeft() - 8;
@@ -3380,7 +3420,7 @@ static void drawHeader(const char* title) {
       tft.fillRoundRect(badgeX, badgeY, badgeW, badgeH, 3, TFT_DARKGREY);
       tft.drawRoundRect(badgeX, badgeY, badgeW, badgeH, 3, TFT_MAGENTA);
       tft.setTextDatum(TL_DATUM);
-      tft.setTextSize(1);
+      applyFontSm();
       tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
       tft.drawString("Companion Sync", badgeX + 6, badgeY + 2);
       companionSyncBadgeWasDrawn = true;
@@ -3410,7 +3450,7 @@ static void drawCompanionSyncBadgeTick() {
     tft.fillRoundRect(badgeX, badgeY, badgeW, badgeH, 3, TFT_DARKGREY);
     tft.drawRoundRect(badgeX, badgeY, badgeW, badgeH, 3, TFT_MAGENTA);
     tft.setTextDatum(TL_DATUM);
-    tft.setTextSize(1);
+    applyFontSm();
     tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
     tft.drawString("Companion Sync", badgeX + 6, badgeY + 2);
     companionSyncBadgeWasDrawn = true;
@@ -3672,7 +3712,7 @@ static void drawSliderKnob(int sliderY, int knobX) {
 
 static void drawLedControlDynamic() {
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
 
   // Slider labels and value readouts.
   const int hueLabelY = LED_HUE_Y - 18;
@@ -4040,12 +4080,11 @@ static void tdisplayNavDrawHeaderStatus() {
   layoutActionDockBox();
 
   const bool compact = (tft.height() <= 180);
-  const int titleSize = compact ? 1 : 2;
   const int titleX = 8;
   const int titleY = 8;
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(titleSize);
+  if (compact) { applyFontSm(); } else { applyFontMd(); }
   String headerTitle = String(currentHeaderTitle);
   const int maxTitleW = uiActionDockSafeLeft() - 8;
   if (maxTitleW > 8) {
@@ -4065,7 +4104,7 @@ static void tdisplayNavDrawHeaderStatus() {
   if (statusW < 38) return;
 
   tft.fillRect(statusX, titleY - 1, statusW, compact ? 10 : 14, TFT_BLACK);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
 
   String msg = "SEL: " + tdisplayNavCurrentLabel();
@@ -4452,7 +4491,7 @@ static void drawHomeHypercubeFrame() {
   tft.drawRoundRect(x, y, w, h, 6, TFT_CYAN);
   tft.drawRoundRect(x + 2, y + 2, w - 4, h - 4, 5, 0x2104);
   tft.setTextDatum(TC_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("HYPERCUBE", x + (w / 2), y + h - 14);
 }
@@ -4494,7 +4533,7 @@ static void drawHome() {
   }
 
   tft.setTextDatum(BC_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   if (tft.height() <= 180) {
     tft.drawString("BTN1=Next  BTN2=Select", tft.width() / 2, tft.height() - 6);
@@ -4518,11 +4557,11 @@ static void drawHomeReconnectPromptOverlay() {
   tft.fillRoundRect(boxX + 2, boxY + 2, boxW - 4, boxH - 4, 12, TFT_BLACK);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(2);
+  applyFontMd();
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("Reconnect WiFi?", boxX + 12, boxY + 12);
 
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   String ssid = cfg.wifi_ssid.isEmpty() ? "(none)" : cfg.wifi_ssid;
   if (ssid.length() > 24) ssid = ssid.substring(0, 21) + "...";
@@ -4553,11 +4592,11 @@ static void drawHomeTargetsPromptOverlay() {
   tft.fillRoundRect(boxX + 2, boxY + 2, boxW - 4, boxH - 4, 12, TFT_BLACK);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(2);
+  applyFontMd();
   tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
   tft.drawString("No scan data", boxX + 12, boxY + 12);
 
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Run a WiFi scan now?", boxX + 12, boxY + 52);
 
@@ -4580,7 +4619,7 @@ static void drawPlaceholder(const char* title, const char* msg) {
   drawUniversalBackground();
 
   tft.setTextDatum(MC_DATUM);
-  tft.setTextSize(2);
+  applyFontMd();
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
   tft.drawString(msg, tft.width() / 2, tft.height() / 2);
 
@@ -4606,7 +4645,7 @@ static void drawWifiRow(int idx, int y, bool selected) {
   const ApRecord& a = aps[idx];
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(fg, bg);
 
   const int line1Y = y + ((wifiRowH >= 32) ? 4 : 2);
@@ -4646,11 +4685,11 @@ static void drawWifiConfirmOverlay() {
   tft.fillRoundRect(boxX + 2, boxY + 2, boxW - 4, boxH - 4, 12, TFT_BLACK);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(compact ? 1 : 2);
+  if (compact) { applyFontSm(); } else { applyFontMd(); }
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("Set Target?", boxX + 12, boxY + 12);
 
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   
   // Display pending target details
@@ -4699,11 +4738,11 @@ static void drawConfirmTarget() {
   tft.fillRoundRect(boxX + 2, boxY + 2, boxW - 4, boxH - 4, 12, TFT_BLACK);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(compact ? 1 : 2);
+  if (compact) { applyFontSm(); } else { applyFontMd(); }
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("Proceed to Target?", boxX + 12, boxY + 12);
 
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   if (hasTarget) {
     tft.drawString(String("SSID: ") + target.ssid, boxX + 12, boxY + (compact ? 30 : 44));
@@ -4785,7 +4824,7 @@ static void drawWifiScan() {
 
   // Status line
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   if (wifiIsScanning) {
     tft.drawString("Scanning...", wifiListXLocal, statusY);
@@ -4818,7 +4857,7 @@ static void drawWifiScan() {
   // Selected line directly under title text.
   tft.fillRect(0, selectedY - 2, w, 14, TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
   const int selectedMaxW = uiRightLimitForBand(selectedY, 14) - 8;
   String selectedLine = "Selected: (none)";
@@ -4915,10 +4954,10 @@ static void drawTargetDetails() {
 
   tft.drawRect(mainX, targetY, mainW, targetH, TFT_MAGENTA);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(compact ? 1 : 2);
+  if (compact) { applyFontSm(); } else { applyFontMd(); }
   tft.setTextColor(lockChannel ? TFT_RED : TFT_CYAN, TFT_BLACK);
   tft.drawString(lockChannel ? "TARGET LOCKED" : "TARGET", mainX + 6, targetY + 5);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
 
   auto drawTrimmed = [&](String s, int x, int y, int maxW, uint16_t col) {
@@ -4946,10 +4985,10 @@ static void drawTargetDetails() {
   // Per request: Live HUD extends to screen right/bottom with a 5px margin.
   const int hudW = rightEdge - mainX;
   tft.drawRect(mainX, hudY, hudW, hudH, TFT_CYAN);
-  tft.setTextSize(compact ? 1 : 2);
+  if (compact) { applyFontSm(); } else { applyFontMd(); }
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("LIVE HUD", mainX + 6, hudY + 4);
-  tft.setTextSize(1);
+  applyFontSm();
 
   int lineY = hudY + (compact ? 18 : 24);
   const int lineGap = compact ? 12 : 14;
@@ -4996,7 +5035,7 @@ static void drawAutomateMenu() {
 
   // Target info
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   if (hasTarget) {
     tft.drawString(String("Target: ") + target.ssid, content.x + 4, content.y + 2);
@@ -5026,7 +5065,7 @@ static void drawAutomateMenu() {
   drawButton(btnAutoJAMMIT, autoMode == AutoMode::JAMMIT ? TFT_DARKGREEN : TFT_DARKGREY,  TFT_MAGENTA, TFT_WHITE);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
   const int activeY = top + (bh * 2) + gapY + 4;
   tft.drawString("Active:", 10, activeY);
@@ -5034,7 +5073,7 @@ static void drawAutomateMenu() {
 
   // Footer hints
   tft.setTextDatum(BC_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
   tft.drawString("Tap mode button to apply", w / 2, bottom.y - 2);
 
@@ -5745,7 +5784,7 @@ static void drawJustGo() {
   const int statusH = 20;
   tft.drawRoundRect(leftX, y0, leftW + rightW + 4, statusH, 4, TFT_CYAN);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(justGoActive ? TFT_GREEN : TFT_DARKGREY, TFT_BLACK);
   tft.drawString(justGoActive ? "RUNNING" : "IDLE", leftX + 4, y0 + 5);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
@@ -5830,7 +5869,7 @@ static void drawJustGo() {
   const int statsH = max(56, bottom.y - statsY - 24);
   tft.drawRoundRect(rightX, statsY, rightW, statsH, 4, TFT_CYAN);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("STATS", rightX + 4, statsY + 2);
 
@@ -6096,7 +6135,7 @@ static void drawScopeGraph() {
   drawBorder();
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("SCOPE", contentX, titleY);
 
@@ -6918,7 +6957,7 @@ static void engageAutoMode(AutoMode mode) {
 
 static void drawConfigRow(const char* label, int y, const char* value) {
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString(label, 10, y);
 
@@ -6947,7 +6986,7 @@ static void drawConfig() {
   const int panelW = max(140, panelRight - panelX);
   tft.drawRoundRect(panelX, panelY, panelW, panelH, 5, TFT_DARKGREY);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("System + connectivity controls", panelX + 5, panelY + 6);
 
@@ -7022,14 +7061,14 @@ static void drawConfig() {
     tft.drawRoundRect(panelX, panelY, panelW, panelH, 6, TFT_DARKGREY);
     tft.fillRoundRect(panelX + 1, panelY + 1, panelW - 2, panelH - 2, 6, TFT_BLACK);
     tft.setTextDatum(TL_DATUM);
-    tft.setTextSize(1);
+    applyFontSm();
     tft.setTextColor(TFT_CYAN, TFT_BLACK);
     tft.drawString("Adapter | WiFi Link | Web + AP", panelX + 5, panelY + 4);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.drawString("Startup | Telemetry | LED", panelX + 5, panelY + 14);
   } else {
     tft.setTextDatum(TL_DATUM);
-    tft.setTextSize(1);
+    applyFontSm();
     tft.setTextColor(TFT_CYAN, TFT_BLACK);
     tft.drawString("BTN1=Next  BTN2=Select", content.x + 2, content.y - 10);
   }
@@ -7078,7 +7117,7 @@ static void drawSync() {
 
   // ── Dropbox ──────────────────────────────────────────────────────────────
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(0x07FF, TFT_BLACK);
   tft.drawString("Dropbox", lblX, y);
   y += 12;
@@ -7087,7 +7126,7 @@ static void drawSync() {
   drawButton(btnSyncDropbox, cfg.dropbox_token.isEmpty() ? TFT_DARKGREY : 0x0228, TFT_WHITE, TFT_WHITE);
   y += btnH + 4;
 
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(strncmp(syncDropboxStatus, "OK", 2) == 0 ? TFT_GREEN : TFT_DARKGREY, TFT_BLACK);
   const char* dbLine = syncDropboxStatus[0] ? syncDropboxStatus
                        : cfg.dropbox_folder.isEmpty() ? "No folder set"
@@ -7104,7 +7143,7 @@ static void drawSync() {
   drawButton(btnSyncWpasec, cfg.wpasec_apikey.isEmpty() ? TFT_DARKGREY : TFT_BLUE, TFT_WHITE, TFT_WHITE);
   y += btnH + 4;
 
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(wpasecSyncStatus.startsWith("Uploaded") ? TFT_GREEN :
                    wpasecSyncStatus.startsWith("API") ? TFT_RED : TFT_DARKGREY, TFT_BLACK);
   String wpaLine = wpasecSyncStatus.isEmpty() ? "Scans /captures for .pcap & .22000" : wpasecSyncStatus;
@@ -7120,7 +7159,7 @@ static void drawSync() {
   drawButton(btnSyncWigle, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
   y += btnH + 4;
 
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
   tft.drawString("Use web UI: /wigle", lblX, y);
 
@@ -7157,7 +7196,7 @@ static void drawStartupConfig() {
   const int btnX = w - (btnW + 12);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Reconnect on boot", content.x + 4, row1Y);
 
@@ -7167,7 +7206,7 @@ static void drawStartupConfig() {
              TFT_CYAN, TFT_WHITE);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Default channel lock", content.x + 4, row2Y);
 
@@ -7177,7 +7216,7 @@ static void drawStartupConfig() {
              TFT_MAGENTA, TFT_WHITE);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Corner cube widget", content.x + 4, row3Y);
 
@@ -7187,7 +7226,7 @@ static void drawStartupConfig() {
              TFT_YELLOW, TFT_WHITE);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Auto-start webserver", content.x + 4, row4Y);
 
@@ -7198,7 +7237,7 @@ static void drawStartupConfig() {
 
 #if defined(NEONDRIVE_TARGET_M5TAB5)
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Auto-rotate (IMU)", content.x + 4, row5Y);
 
@@ -7208,7 +7247,7 @@ static void drawStartupConfig() {
              0xFFE0, TFT_WHITE);
 #elif defined(NEONDRIVE_TARGET_CYD)
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("UI rotation", content.x + 4, row5Y);
 
@@ -7218,7 +7257,7 @@ static void drawStartupConfig() {
 
   if (!compact) {
     tft.setTextDatum(TL_DATUM);
-    tft.setTextSize(1);
+    applyFontSm();
     tft.setTextColor(TFT_CYAN, TFT_BLACK);
     tft.drawString("Saved to /config.json", content.x + 4, content.y + 172);
   }
@@ -7251,7 +7290,7 @@ static void drawTelemetryConfig() {
   const int toggleX = w - (toggleW + 12);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Monitor refresh interval", content.x + 4, label1Y);
 
@@ -7296,7 +7335,7 @@ static void drawLedControl() {
   applyStatusLedState(ledBrightness, ledRed, ledGreen, ledBlue);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("Physical CYD status LED calibration", content.x + 4, calibrationTextY);
   drawLedControlDynamic();
@@ -7327,8 +7366,8 @@ static void drawWifiConfig() {
   const int panelW = max(120, min(uiActionDockSafeLeft() - 5, w - 10) - panelX);
   tft.drawRoundRect(panelX, panelY, panelW, panelH, 5, TFT_DARKGREY);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
-  tft.setTextSize(1);
+  applyFontSm();
+  applyFontSm();
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("WiFi adapter timing + defaults", panelX + 5, panelY + 6);
 
@@ -7355,7 +7394,7 @@ static void drawWifiConfig() {
   const int w3 = drawRowBox(r3);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
 
   // Row 0: Hop interval
@@ -7369,11 +7408,11 @@ static void drawWifiConfig() {
   btnHopMinus = {hopMinusX, hopBtnY, hopBtnW, hopBtnH, "-"};
   btnHopPlus  = {hopPlusX, hopBtnY, hopBtnW, hopBtnH, "+"};
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.drawString("Hop interval", content.x + 6, r0 + 7);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.setTextDatum(TR_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.drawString(hopVal, hopMinusX - 6, r0 + 7);
   tft.setTextDatum(TL_DATUM);
   drawButton(btnHopMinus, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
@@ -7390,12 +7429,12 @@ static void drawWifiConfig() {
   btnScanMinus = {scanMinusX, scanBtnY, scanBtnW, scanBtnH, "-"};
   btnScanPlus  = {scanPlusX, scanBtnY, scanBtnW, scanBtnH, "+"};
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Scan duration", content.x + 6, r1 + 7);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.setTextDatum(TR_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.drawString(scanVal, scanMinusX - 6, r1 + 7);
   tft.setTextDatum(TL_DATUM);
   drawButton(btnScanMinus, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
@@ -7408,7 +7447,7 @@ static void drawWifiConfig() {
   const int tglX2 = content.x + w2 - tglW - 4;
   btnDeauthToggle = {tglX2, tglY2, tglW, tglH, cfg.wifi_enableDeauth ? "ON" : "OFF"};
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Enable deauth", content.x + 6, r2 + 7);
   drawButton(btnDeauthToggle, cfg.wifi_enableDeauth ? TFT_DARKGREEN : TFT_MAROON, TFT_WHITE, TFT_WHITE);
@@ -7418,7 +7457,7 @@ static void drawWifiConfig() {
   const int tglX3 = content.x + w3 - tglW - 4;
   btnWifiDefaultLockToggle = {tglX3, tglY3, tglW, tglH, cfg.wifi_defaultLockChannel ? "ON" : "OFF"};
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Default lock", content.x + 6, r3 + 7);
   drawButton(btnWifiDefaultLockToggle,
@@ -7430,7 +7469,7 @@ static void drawWifiConfig() {
   const int ssidY = bottom.y - 14;
   tft.fillRect(content.x, ssidY - 2, w - (content.x * 2), 12, TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   String ssidLine = "Saved network: " + (cfg.wifi_ssid.isEmpty() ? String("(not set)") : cfg.wifi_ssid);
   while (ssidLine.length() > 4 && tft.textWidth(ssidLine) > (w - (content.x * 2) - 2)) {
@@ -7498,12 +7537,12 @@ static void drawWifiConfig() {
 
   if (compact) {
     tft.setTextDatum(BL_DATUM);
-    tft.setTextSize(1);
+    applyFontSm();
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
     tft.drawString("BTN1=Next  BTN2=Select", 6, h - 6);
   } else {
     tft.setTextDatum(BL_DATUM);
-    tft.setTextSize(1);
+    applyFontSm();
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
     tft.drawString("Config stored in /config.json (LittleFS). Run: pio run -t uploadfs", 6, h - 6);
   }
@@ -9566,7 +9605,7 @@ static void drawWifiPasswordModal() {
   tft.drawRoundRect(boxX, boxY, boxW, boxH, 8, TFT_MAGENTA);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("Password Required", boxX + 10, boxY + 8);
 
@@ -9735,7 +9774,7 @@ static void drawWifiConnect() {
   };
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
   String selectedLine = "Selected: (none)";
   if (wifiConnectSelectedIdx >= 0 && wifiConnectSelectedIdx < apCount) {
@@ -10013,7 +10052,7 @@ static void drawWebserver() {
   drawButton(btnWebserverDownloadResults, TFT_DARKCYAN, TFT_WHITE, TFT_WHITE);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
 
   // Top status window (requested position under title text).
@@ -10103,7 +10142,7 @@ static void refreshWifiStatusLine() {
   // Clear status line area
   tft.fillRect(0, statusY - 2, w, 18, TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   int ws = WiFi.status();
   if (ws == WL_CONNECTED) {
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
@@ -10516,8 +10555,7 @@ static void drawMonitor() {
   const int tabH = landscape ? 42 : 38;
   const int ctlH = landscape ? 38 : 42;
   const int fsRowH = landscape ? 30 : 36;
-  const int titleSize = landscape ? 2 : 1;
-  const int bodySize = 2;
+  // bodySize / titleSize replaced by applyFontSm/Md() at each use site
   const int boxX = content.x + pad;
   const int boxY = content.y + tabH + 10;
   const int boxW = max(120, min(w - pad * 2 - content.x, uiActionDockSafeLeft() - boxX - 4));
@@ -10562,7 +10600,7 @@ static void drawMonitor() {
   }
   tft.fillRect(boxX + 1, boxY + 1, boxW - 2, boxH - 2, TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(titleSize);
+  if (landscape) { applyFontMd(); } else { applyFontSm(); }
   tft.setTextColor(0xAFE5, TFT_BLACK);
 
   if (monitorTab5Tab == MonitorTab5Tab::LIVE) {
@@ -10576,7 +10614,7 @@ static void drawMonitor() {
     drawButton(btnMonitorAuto, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
     drawButton(btnMonitorFilter, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
 
-    tft.setTextSize(bodySize);
+    applyFontMd();
     tft.setTextColor(TFT_CYAN, TFT_BLACK);
     char hdr[96];
     snprintf(hdr, sizeof(hdr), "sniff=%d pps=%d sd=%d mode=%s", sniffActive ? 1 : 0, sniffPps, sdReady ? 1 : 0, autoModeStr(autoMode));
@@ -10613,7 +10651,7 @@ static void drawMonitor() {
     if (monitorFileLastRefreshMs == 0) {
       monitorLoadFileDirFs(monitorFileUseSd ? (fs::FS&)SD : (fs::FS&)LittleFS, activePath, monitorFileUseSd);
     }
-    tft.setTextSize(bodySize);
+    applyFontMd();
     tft.setTextColor(TFT_CYAN, TFT_BLACK);
     String pathLine = String(fsName) + ": " + monitorFilePath;
     while (pathLine.length() > 4 && tft.textWidth(pathLine) > panelTextMaxW) pathLine.remove(pathLine.length() - 1);
@@ -10654,7 +10692,7 @@ static void drawMonitor() {
     btnMonitorDown = {boxX + 44, bottom.y, 40, ctlH, "v"};
     drawButton(btnMonitorUp, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
     drawButton(btnMonitorDown, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
-    tft.setTextSize(bodySize);
+    applyFontMd();
     tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
     String viewHdr = String(monitorViewUseSd ? "SD: " : "LFS: ") + monitorViewPath;
     while (viewHdr.length() > 4 && tft.textWidth(viewHdr) > panelTextMaxW) viewHdr.remove(viewHdr.length() - 1);
@@ -10739,7 +10777,7 @@ static void drawMonitor() {
   tft.drawRect(panelX, statusBoxY, panelW, statusBoxH, TFT_DARKGREY);
   tft.setTextDatum(TL_DATUM);
   tft.setTextFont(1);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(armed ? TFT_GREEN : TFT_YELLOW, TFT_BLACK);
   if (isYoink) {
     char yHdr[48];
@@ -10780,7 +10818,7 @@ static void drawMonitor() {
 
     tft.fillRect(boxX + 1, boxY + 1, boxW - 2, boxH - 2, TFT_BLACK);
     tft.setTextDatum(TL_DATUM);
-    tft.setTextSize(1);
+    applyFontSm();
     tft.setTextColor(TFT_CYAN, TFT_BLACK);
     String pathLine = String("SD: ") + monitorFilePath;
     while (pathLine.length() > 4 && tft.textWidth(pathLine) > (boxW - 10)) {
@@ -10830,7 +10868,7 @@ static void drawMonitor() {
     const int maxTextW = max(20, boxW - 24);
     tft.setTextDatum(TL_DATUM);
     tft.setTextFont(1);
-    tft.setTextSize(1);
+    applyFontSm();
     for (int i = 0; i < MONITOR_MAX_LINES; i++) {
       // Newest entries render first at the top of the console.
       const int srcIdx = monitorLineCount - 1 - i;
@@ -11258,7 +11296,7 @@ static void drawReconConsole(bool fullRedraw = false) {
   uint16_t displayStart = (logCount > maxVisibleLines) ? (logCount - maxVisibleLines) : 0;
   tft.setTextDatum(TL_DATUM);
   tft.setTextFont(1);
-  tft.setTextSize(1);
+  applyFontSm();
 
   for (uint16_t i = displayStart; i < logCount; i++) {
     const DeauthEvent* evt = DeauthHunter::getLogEntry(i);
@@ -11343,7 +11381,7 @@ static void drawReconDeauthPanel(int panelTop, int panelBottom) {
 
   const DeauthStats& stats = DeauthHunter::getStats();
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_CYAN, 0x0841);
   tft.drawString("DEAUTHS:", panelX + 4, statsY + 4);
   tft.drawString("PPS:", panelX + 4, statsY + 18);
@@ -11408,7 +11446,7 @@ static void drawReconPortPanel(int panelTop, int panelBottom) {
   drawButton(btnReconPortExport, TFT_NAVY, TFT_CYAN, TFT_WHITE);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_CYAN, 0x0024);
   if (wifiOk) {
     char subnetBuf[24];
@@ -11573,7 +11611,7 @@ static void drawRecon() {
   if (!reconStatusLine.isEmpty()) {
     const int statusY = modeY - 10;
     tft.fillRect(UI_SAFE_MARGIN, statusY - 2, w - (UI_SAFE_MARGIN * 2), 10, TFT_BLACK);
-    tft.setTextSize(1);
+    applyFontSm();
     tft.setTextDatum(TL_DATUM);
     tft.setTextColor(TFT_ORANGE, TFT_BLACK);
     tft.drawString(reconStatusLine, UI_SAFE_MARGIN + 2, statusY);
@@ -11687,7 +11725,7 @@ static void psDrawNeonPanel(int x, int y, int w, int h, uint16_t border, const c
   if (title && title[0] != '\0') {
     tft.fillRect(x + 8, y - 1, min(w - 16, 160), 11, TFT_BLACK);
     tft.setTextDatum(TL_DATUM);
-    tft.setTextSize(1);
+    applyFontSm();
     tft.setTextColor(border, TFT_BLACK);
     tft.drawString(title, x + 10, y + 2);
   }
@@ -11798,7 +11836,7 @@ static void psDrawHeaderStatic() {
   tft.fillRect(0, 0, w, hdrH, TFT_BLACK);
   tft.drawFastHLine(0, hdrH - 1, w, tft.color565(20, 28, 32));
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(2);
+  applyFontMd();
   tft.setTextColor(TFT_RED, TFT_BLACK);
   tft.drawString("NET SCAN", 34, 6);
   tft.drawCircle(16, 16, 8, TFT_GREEN);
@@ -11820,8 +11858,8 @@ static void psDrawHeaderDynamic() {
   tft.fillRect(modeX, 2, cubeBoxX - modeX - 4, 48, TFT_BLACK);
   tft.fillRect(8, 32, cubeBoxX - 16, 16, TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
-  tft.setTextSize(1);
+  applyFontSm();
+  applyFontSm();
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("MODE", modeX, 6);
   btnPSDeep = {modeX + 38, 4, 72, 18, modeLabel};
@@ -11865,7 +11903,7 @@ static void psDrawHostsDynamic() {
     tft.fillRect(1, ry, psHostsPanel.contentRect.w - 8, hostRowH - 2, rowBg);
     psDrawHostStatusDot(*hrec, 7, ry + 8);
     tft.setTextDatum(TL_DATUM);
-    tft.setTextSize(1);
+    applyFontSm();
     drawTextClipped(hrec->ip.toString(), 15, ry + 2, psHostsPanel.contentRect.w - 24, sel ? TFT_WHITE : 0x87E0, rowBg, false);
     char macBuf[20];
     snprintf(macBuf, sizeof(macBuf), "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -11893,10 +11931,10 @@ static void psDrawTargetDynamic() {
   tft.fillRect(0, 0, psTargetPanel.contentRect.w, psTargetPanel.contentRect.h, TFT_BLACK);
   if (selHost) {
     const int tx = 10;
-    tft.setTextSize(2);
+    applyFontMd();
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
     drawTextClipped(selHost->ip.toString(), tx + 8, 0, psTargetPanel.contentRect.w - tx - 10, TFT_GREEN, TFT_BLACK, false);
-    tft.setTextSize(1);
+    applyFontSm();
     char macBuf[20];
     snprintf(macBuf, sizeof(macBuf), "%02X:%02X:%02X:%02X:%02X:%02X",
              selHost->mac[0], selHost->mac[1], selHost->mac[2], selHost->mac[3], selHost->mac[4], selHost->mac[5]);
@@ -11995,10 +12033,10 @@ static void psDrawStatusDynamic() {
   tft.fillRect(0, 44, psStatusPanel.contentRect.w, max(0, psStatusPanel.contentRect.h - 44), TFT_BLACK);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.setTextSize(2);
+  applyFontMd();
   char pctBuf[8]; snprintf(pctBuf, sizeof(pctBuf), "%d%%", pct);
   tft.drawString(pctBuf, psStatusPanel.contentRect.w / 2, 22);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextDatum(TL_DATUM);
   char hostsBuf[32];
   snprintf(hostsBuf, sizeof(hostsBuf), "HOSTS %u/%lu", (unsigned)total, (unsigned long)portScanner.totalHostCandidates());
@@ -12183,7 +12221,7 @@ static void drawWardrive() {
   const int lineH = 18;
 
   // GPS status row
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextDatum(TL_DATUM);
   if (!GpsService::isRunning()) {
     tft.setTextColor(TFT_RED, TFT_BLACK);
@@ -12270,7 +12308,7 @@ static void drawReconHome() {
   const int h = tft.height();
   tft.fillScreen(TFT_BLACK);
   layoutActionDockBox();
-  tft.setTextDatum(TL_DATUM); tft.setTextSize(1);
+  tft.setTextDatum(TL_DATUM); applyFontSm();
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("RECON", 8, 8);
   const int bx=20, bww=w-40, bh=38, gap=10, by0=40;
@@ -12718,7 +12756,7 @@ void drawBruceSetTarget() {
   bruceTargetScroll = clampi(bruceTargetScroll, 0, maxScroll);
 
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextDatum(TL_DATUM);
   char meta[72];
   if (apCount > 0) {
@@ -12841,7 +12879,7 @@ void drawBruceMenu() {
 
   // Status text block.
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   const int statusY = content.y + 2;
   const int statusH = bruceIsAttacking() ? 24 : 12;
   const int statusTextW = max(60, zoneW - 6);
@@ -12949,7 +12987,7 @@ static void drawPush1t() {
   const int tgtH = 52;
   tft.drawRoundRect(leftX, y0, leftW, tgtH, 4, TFT_MAGENTA);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
   tft.drawString("TARGET", leftX + 4, y0 + 2);
   if (hasTarget) {
@@ -12999,7 +13037,7 @@ static void drawPush1t() {
   tft.setTextColor(TFT_BLACK, heroCol);
   tft.setTextDatum(MC_DATUM);
   tft.drawString(heroText,    leftX + leftW / 2, heroY + 14);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_BLACK, heroCol);
   tft.drawString(heroSubText, leftX + leftW / 2, heroY + 28);
   tft.setTextDatum(TL_DATUM);
@@ -13007,7 +13045,7 @@ static void drawPush1t() {
   // ── WPS detail rows ───────────────────────────────────────────────────────
   const int detY  = heroY + heroH + gap;
   const int detLH = 10;
-  tft.setTextSize(1);
+  applyFontSm();
 
   auto detRow = [&](int dy, const char* label, const char* val, uint16_t col) {
     tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
@@ -13158,7 +13196,7 @@ static void drawSpecter() {
   const bool engaged = (autoMode == AutoMode::SP3CTER);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
 
   // ═══════════════════════════════════════════════════════════════
   //  LEFT COLUMN — Selected Target + Ghost Status + HC path
@@ -13291,13 +13329,13 @@ static void drawSpecter() {
   // Big PMKID count using font 6 (7-seg style)
   tft.setTextDatum(MC_DATUM);
   tft.setTextFont(6);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(specterPmkidCount > 0 ? 0x07E0 : 0x39C7, TFT_BLACK);
   char pmkBig[12];
   snprintf(pmkBig, sizeof(pmkBig), "%06lu", (unsigned long)specterPmkidCount);
   tft.drawString(pmkBig, cX + cW / 2, cY + 14 + 24);  // 24px = ~half font height
   tft.setTextFont(1);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(specterPmkidCount > 0 ? 0x07E0 : 0x7BEF, TFT_BLACK);
   tft.drawString("PMKIDs COLLECTED", cX + cW / 2, cY + 14 + 52);
   tft.setTextDatum(TL_DATUM);
@@ -13658,7 +13696,7 @@ static void drawBruceMonitorTerminal() {
 
   // --- Attack status strip (below header, 40-64) ---
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.fillRect(0, 40, w, 24, TFT_BLACK);
 
   if (attacking) {
@@ -13734,7 +13772,7 @@ static void drawBruceMonitor() {
 
   // --- Attack status strip (below header) ---
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.fillRect(0, 40, w, 24, TFT_BLACK);
 
   if (attacking) {
@@ -14084,7 +14122,7 @@ static void bruceMenuTick_UI(int tx, int ty) {
     drawHeader("Error");
     const bool compact = (tft.height() <= 180);
     tft.setTextDatum(TL_DATUM);
-    tft.setTextSize(1);
+    applyFontSm();
     tft.setTextColor(TFT_RED, TFT_BLACK);
     tft.drawString("No target selected!", 10, compact ? 72 : 100);
     tft.drawString("Press 'Set Target' first", 10, compact ? 88 : 120);
@@ -14219,7 +14257,7 @@ static void drawModeBootTunnel(int w, int h) {
   drawNeonSpinner(cx, cy, (int)((float)min(w, h) * 0.24f), TFT_CYAN, TFT_MAGENTA);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(0xE71F, bg);
   tft.drawString("NEONDRIVE // BOOT TUNNEL", 6, 6);
 }
@@ -14255,7 +14293,7 @@ static void drawModeBlueprintReality(int w, int h) {
   drawNeonSpinner(cx, cy, spinnerR, TFT_CYAN, TFT_MAGENTA);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(0xDFFF, bg);
   tft.drawString("NEONDRIVE // BLUEPRINT -> REALITY", 6, 6);
 }
@@ -14283,17 +14321,17 @@ static void drawModePwnCounter(int w, int h) {
   tft.fillRoundRect(panelX, panelY, panelW, panelH, 6, 0x0862);
   tft.drawRoundRect(panelX, panelY, panelW, panelH, 6, TFT_CYAN);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_CYAN, 0x0862);
   tft.drawString("NETWORKS AUDITED", panelX + 8, panelY + 10);
   tft.setTextColor(TFT_WHITE, 0x0862);
-  tft.setTextSize(2);
+  applyFontMd();
   tft.drawString(String(auditedNow), panelX + 8, panelY + 24);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_MAGENTA, 0x0862);
   tft.drawString("PWNED COUNTER", panelX + 8, panelY + 56);
   tft.setTextColor(0xFFE0, 0x0862);
-  tft.setTextSize(2);
+  applyFontMd();
   tft.drawString(String(pwnedNow), panelX + 8, panelY + 70);
 
   const int spinnerCx = w - 68;
@@ -14301,7 +14339,7 @@ static void drawModePwnCounter(int w, int h) {
   drawNeonSpinner(spinnerCx, spinnerCy, (int)((float)min(w, h) * 0.16f), TFT_CYAN, TFT_MAGENTA);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(0xF7DF, bg);
   tft.drawString("NEONDRIVE // RED TEAM STATUS", 6, 6);
 }
@@ -14324,7 +14362,7 @@ static void drawModeStealth(int w, int h) {
   drawNeonSpinner(cx, cy, (int)((float)min(w, h) * 0.20f), 0x7BFF, 0x780F);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(0xBDF7, bg);
   tft.drawString("NEONDRIVE // STEALTH BOOT", 6, 6);
 }
@@ -14340,7 +14378,7 @@ static void drawNeonPanicFrame() {
   }
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString(neonPanicModeLabel(neonPanicMode), 6, h - 22);
   tft.setTextColor(0xC618, TFT_BLACK);
@@ -14375,11 +14413,11 @@ static void drawAbout() {
   int y = content.y + 4;
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextSize(compact ? 1 : 2);
+  if (compact) { applyFontSm(); } else { applyFontMd(); }
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
   tft.drawString(ND_PROFILE_NAME, x, y);
 
-  tft.setTextSize(1);
+  applyFontSm();
   y += compact ? 14 : 24;
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("Device", x, y);
@@ -14839,7 +14877,7 @@ static void drawTab5ScreenshotOverlay() {
   tft.drawRoundRect(x + 2, y + 2, bw - 4, bh - 4, 5, tft.color565(20, 40, 40));
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_WHITE, fill);
-  tft.setTextSize(1);
+  applyFontSm();
   tft.drawString(showToast ? (tab5ScreenshotToastOk ? "SAVED" : "FAIL") : "SHOT", x + (bw / 2), y + (bh / 2) - 5);
   if (showToast && tab5ScreenshotToastOk) {
     tft.drawString("SD", x + (bw / 2), y + (bh / 2) + 7);
@@ -15262,6 +15300,7 @@ static void initCyd35TouchCalibrationFromSdOrWizard() {
 void setup() {
   Serial.begin(115200);
   delay(100);
+  initUiMetrics();
   Serial.println();
   Serial.printf("=== %s | Milestone D ===\n", ND_PROFILE_NAME);
   printDeviceProfileBanner();

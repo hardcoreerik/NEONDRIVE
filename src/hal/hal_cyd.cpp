@@ -40,6 +40,50 @@ void neon_hal_display_size(int *width, int *height)
 #endif
 }
 
+// ── UI metrics ────────────────────────────────────────────────────────────────
+//
+// Values match the existing hardcoded constants exactly — CYD behaviour is
+// unchanged.  All font pointers are nullptr; applyFont() falls through to
+// tft.setTextSize(text_size_*) using the default GLCD bitmap font.
+//
+// CYD 3.5" gets slightly larger values to make use of the extra pixels.
+
+static const neon_hal_ui_t s_cyd_ui = {
+#if defined(NEONDRIVE_TARGET_CYD35)
+    /* safe_margin  */ 10,
+    /* top_gap      */ 6,
+    /* header_h     */ 32,
+    /* bottom_bar_h */ 40,
+    /* btn_h        */ 32,
+    /* btn_gap      */ 6,
+    /* row_h        */ 18,
+    /* pad          */ 5,
+    /* border_r     */ 6,
+    /* font_sm      */ nullptr, /* font_md */ nullptr,
+    /* font_lg      */ nullptr, /* font_mono */ nullptr,
+    /* text_size_sm */ 1, /* text_size_md */ 2, /* text_size_lg */ 3,
+#else
+    // CYD 2.4" / 2.8" / T-Display-S3 / T-Embed — match existing constants
+    /* safe_margin  */ 8,
+    /* top_gap      */ 6,
+    /* header_h     */ 30,
+    /* bottom_bar_h */ 36,
+    /* btn_h        */ 30,
+    /* btn_gap      */ 6,
+    /* row_h        */ 16,
+    /* pad          */ 4,
+    /* border_r     */ 6,
+    /* font_sm      */ nullptr, /* font_md */ nullptr,
+    /* font_lg      */ nullptr, /* font_mono */ nullptr,
+    /* text_size_sm */ 1, /* text_size_md */ 2, /* text_size_lg */ 3,
+#endif
+};
+
+const neon_hal_ui_t *neon_hal_ui_metrics(void)
+{
+    return &s_cyd_ui;
+}
+
 // ── WiFi ──────────────────────────────────────────────────────────────────────
 
 void neon_hal_wifi_init(void)

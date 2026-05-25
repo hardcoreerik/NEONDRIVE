@@ -74,3 +74,36 @@ struct neon_touch_t {
  * Does NOT call update() internally — caller owns the frame pump.
  */
 neon_touch_t neon_hal_touch_get(void);
+
+// ── UI metrics ────────────────────────────────────────────────────────────────
+
+/**
+ * Platform-specific UI layout dimensions and font pointers.
+ * Font pointers are const void* for library independence; cast to
+ * lgfx::IFont* inside applyFont() when NEONDRIVE_TARGET_M5TAB5 is defined.
+ * All pointer fields are nullptr on non-Tab5 targets (fall back to
+ * tft.setTextSize(text_size_*) using the default GLCD bitmap font).
+ */
+struct neon_hal_ui_t {
+    int safe_margin;    ///< outer padding from screen edge
+    int top_gap;        ///< gap below top edge before header
+    int header_h;       ///< header band height
+    int bottom_bar_h;   ///< bottom navigation bar height
+    int btn_h;          ///< standard button height
+    int btn_gap;        ///< gap between buttons
+    int row_h;          ///< list/table row height
+    int pad;            ///< inner padding inside panels
+    int border_r;       ///< border radius for rounded rects
+
+    const void *font_sm;   ///< small body font (nullptr → text_size_sm)
+    const void *font_md;   ///< medium / button font (nullptr → text_size_md)
+    const void *font_lg;   ///< large / header font  (nullptr → text_size_lg)
+    const void *font_mono; ///< monospace / data font (nullptr → text_size_sm)
+
+    int text_size_sm;   ///< fallback setTextSize for non-Tab5 small
+    int text_size_md;   ///< fallback setTextSize for non-Tab5 medium
+    int text_size_lg;   ///< fallback setTextSize for non-Tab5 large
+};
+
+/** Return pointer to this platform's UI metrics (never NULL). */
+const neon_hal_ui_t *neon_hal_ui_metrics(void);

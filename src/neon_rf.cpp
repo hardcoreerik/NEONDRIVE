@@ -17,8 +17,10 @@ static char s_last_rf_action[64] = "";
 #if defined(NEONDRIVE_TARGET_M5TAB5)
 // Official M5Tab5 C6 SDIO mapping (P4 host -> C6):
 // CLK=G12, CMD=G13, D0=G11, D1=G10, D2=G9, D3=G8, RST=G15
-// Applied at compile-time via include/tab5_sdkconfig_override.h so
-// WiFiGeneric.cpp's wifiHostedInit() picks up the correct pins automatically.
+// WiFi.setPins() is required on pioarduino 55.03.38-1 / Arduino-ESP32 ≥3.3.0.
+// The compile-time tab5_sdkconfig_override.h macros alone do NOT reach the
+// SDMMC slot config in the pre-compiled libespressif__esp_hosted.a; only
+// WiFi.setPins() (sdio_pin_config_t path, PR #11513) does.
 static constexpr int TAB5_SDIO_CLK = 12;
 static constexpr int TAB5_SDIO_CMD = 13;
 static constexpr int TAB5_SDIO_D0  = 11;
@@ -27,12 +29,15 @@ static constexpr int TAB5_SDIO_D2  = 9;
 static constexpr int TAB5_SDIO_D3  = 8;
 static constexpr int TAB5_SDIO_RST = 15;
 
+// Must be called before any WiFi.mode() / WiFi.begin() call.
+// Idempotent — safe to call from multiple code paths.
 static void tab5_configure_wifi_sdio_pins_once() {
     static bool configured = false;
     if (configured) return;
     configured = true;
-    Serial.printf("[neon_rf] tab5 SDIO pins (compile-time override active):"
-                  " clk=%d cmd=%d d0=%d d1=%d d2=%d d3=%d rst=%d\n",
+    WiFi.setPins(TAB5_SDIO_CLK, TAB5_SDIO_CMD, TAB5_SDIO_D0, TAB5_SDIO_D1,
+                 TAB5_SDIO_D2, TAB5_SDIO_D3, TAB5_SDIO_RST);
+    Serial.printf("[neon_rf] WiFi.setPins: clk=%d cmd=%d d0=%d d1=%d d2=%d d3=%d rst=%d\n",
                   TAB5_SDIO_CLK, TAB5_SDIO_CMD, TAB5_SDIO_D0, TAB5_SDIO_D1,
                   TAB5_SDIO_D2, TAB5_SDIO_D3, TAB5_SDIO_RST);
 }
@@ -107,7 +112,8 @@ void neon_rf_init() {
     }
 
 #if defined(NEONDRIVE_TARGET_M5TAB5)
-    // Log the SDIO pin mapping that was compiled in via tab5_sdkconfig_override.h.
+    // Call WiFi.setPins() before any WiFi.mode() — required on pioarduino 55.03.38-1.
+    // The one-shot guard inside ensures this is safe to call from multiple paths.
     tab5_configure_wifi_sdio_pins_once();
 
     // Do NOT pulse GPIO15 (C6 RST) manually.
@@ -128,18 +134,8 @@ void neon_rf_init() {
 #if defined(TAB5_TEST_C6_SCAN)
     // Auto-test: attempt WiFi STA mode immediately to validate SDIO init.
     // Only enabled in the c6_scan test build; production firmware waits for UI.
-    //
-    // WiFi.setPins() is required on Arduino-ESP32 ≥3.3.0 (pioarduino ≥55.03.33).
-    // The old 3.2.0 wifiHostedInit() macro expansion applied our
-    // tab5_sdkconfig_override.h values, but esp_hosted_sdio_set_config() in the
-    // pre-compiled library did not propagate them to the SDMMC slot config.
-    // WiFi.setPins() uses the new sdio_pin_config_t path added in PR #11513 that
-    // correctly routes the pins through to sdmmc_host_init_slot().
-    WiFi.setPins(TAB5_SDIO_CLK, TAB5_SDIO_CMD, TAB5_SDIO_D0, TAB5_SDIO_D1,
-                 TAB5_SDIO_D2, TAB5_SDIO_D3, TAB5_SDIO_RST);
-    Serial.printf("[neon_rf] WiFi.setPins: clk=%d cmd=%d d0=%d d1=%d d2=%d d3=%d rst=%d\n",
-                  TAB5_SDIO_CLK, TAB5_SDIO_CMD, TAB5_SDIO_D0, TAB5_SDIO_D1,
-                  TAB5_SDIO_D2, TAB5_SDIO_D3, TAB5_SDIO_RST);
+    // WiFi.setPins() was already called unconditionally above via
+    // tab5_configure_wifi_sdio_pins_once() — do not call it again here.
     Serial.println("[c6test] step=sdio_init start (auto-test in neon_rf_init)");
     neon_rf_set_last_action("c6test_auto_sdio_init");
     if (!WiFi.mode(WIFI_MODE_STA)) {

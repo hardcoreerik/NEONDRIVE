@@ -1,6 +1,6 @@
-# NEONDRIVE — Codex / Claude Code Reference
+# NEONDRIVE — Codex / Codex Reference
 
-This file is read automatically at the start of every Codex and Claude Code session.
+This file is read automatically at the start of every Codex and Codex session.
 Keep it accurate. When you fix a hardware bug, document the root cause here.
 
 ---
@@ -111,7 +111,7 @@ clobber the touch bus.
 
 ---
 
-### WiFi on Tab5 — **WORKING** (confirmed 2026-05-24, re-confirmed after UI refactor)
+### WiFi on Tab5 — **WORKING** (confirmed 2026-05-24)
 
 WiFi scan returns results.  The ESP32-C6 co-processor has ESP-Hosted SDIO slave
 firmware v2.12.6 from the factory.  The P4 host stack is pioarduino 55.03.38-1
@@ -119,27 +119,18 @@ firmware v2.12.6 from the factory.  The P4 host stack is pioarduino 55.03.38-1
 
 **Working configuration:**
 - Platform: `pioarduino 55.03.38-1` (required for `WiFi.setPins()`)
-- `WiFi.setPins(CLK=12, CMD=13, D0=11, D1=10, D2=9, D3=8, RST=15)` is called
-  inside `tab5_configure_wifi_sdio_pins_once()` in `src/neon_rf.cpp`, which runs
-  unconditionally at the top of `neon_rf_init()` for all Tab5 builds.
+- Call `WiFi.setPins(CLK=12, CMD=13, D0=11, D1=10, D2=9, D3=8, RST=15)` **before**
+  `WiFi.mode()` in `neon_rf_init()`
 - No C6 reset pulse needed — factory firmware handles SDIO slave init on power-up
-- `delay(1500)` after `WiFi.setPins()` to give C6 time to boot
-
-**Critical implementation rule — `WiFi.setPins()` must NOT be build-guarded:**
-The sdkconfig macro override (`include/tab5_sdkconfig_override.h`) does **not**
-reach the SDMMC slot config in the pre-compiled `libespressif__esp_hosted.a`.
-`WiFi.setPins()` is the only path that works (sdio_pin_config_t, PR #11513).
-It must be called unconditionally for every Tab5 build — not only under
-`TAB5_TEST_C6_SCAN` or similar guards.  `tab5_configure_wifi_sdio_pins_once()`
-has a one-shot guard so it is safe to call from multiple code paths.
+- `delay(1500)` before `WiFi.setPins()` to give C6 time to boot
 
 **Verified boot sequence:**
 ```
-[neon_rf] WiFi.setPins: clk=12 cmd=13 d0=11 d1=10 d2=9 d3=8 rst=15
-[neon_rf] C6 boot wait: 1500 ms (no RST pulse)
 [esp32-hal-hosted.c] SDIO pins: clk=12, cmd=13, d0=11, d1=10, d2=9, d3=8, rst=15
 [esp32-hal-hosted.c] ESP-Hosted initialized!
 [esp32-hal-hosted.c] Slave firmware version: 2.12.6
+[c6test] step=sdio_init OK - starting scan
+[c6test] step=scan OK found=N      ← N > 0 confirms WiFi works
 ```
 
 ---
@@ -240,87 +231,6 @@ link time regardless of whether `M5Unified::M` has been constructed yet.
 
 ---
 
-## HAL UI Metrics — Tab5 layout and fonts (added 2026-05-24)
-
-### Overview
-
-All UI layout dimensions and font selections go through the HAL, not `#ifdef` blocks in feature code.
-`neon_hal_ui_metrics()` returns a `const neon_hal_ui_t *` for the current target.
-`initUiMetrics()` in `main.cpp` reads the struct once at boot and populates the global layout variables.
-
-**Files:**
-- `src/hal/neon_hal.h` — `neon_hal_ui_t` struct + `neon_hal_ui_metrics()` declaration
-- `src/hal/hal_m5tab5.cpp` — Tab5 values: proportional to 1280×720, named M5GFX fonts
-- `src/hal/hal_cyd.cpp` — CYD/T-Display values: pixel constants matching original hardcoded layout, all font pointers `nullptr`
-
-### How to draw text on Tab5
-
-Never call `tft.setTextSize()` directly in feature code. Use the four helper functions:
-
-```cpp
-applyFontSm();   // Montserrat 20pt — body text, labels, data rows
-applyFontMd();   // Montserrat 28pt — buttons, section headers
-applyFontLg();   // Montserrat 36pt — screen/panel titles
-applyFontMono(); // FreeMono 18pt   — hex dumps, raw packet data, addresses
-```
-
-On CYD these fall back to `tft.setTextSize(1/2/3)` automatically — no `#ifdef` needed.
-
-### How to use layout constants
-
-Read dimensions from the globals set by `initUiMetrics()`:
-
-```cpp
-UI_SAFE_MARGIN   // outer padding from screen edge  (Tab5: 24, CYD: 8)
-UI_TOP_GAP       // gap above header                (Tab5: 16, CYD: 6)
-UI_BOTTOM_BAR_H  // bottom nav bar height           (Tab5: 112, CYD: 36)
-UI_BUTTON_H      // standard tap target height      (Tab5: 72, CYD: 30)
-UI_BUTTON_GAP    // gap between buttons             (Tab5: 20, CYD: 6)
-```
-
-For row height, padding, border radius, and header height use `g_ui`:
-```cpp
-g_ui->row_h      // list row height     (Tab5: 48, CYD: 16)
-g_ui->pad        // inner padding       (Tab5: 16, CYD: 4)
-g_ui->border_r   // rounded rect radius (Tab5: 12, CYD: 6)
-g_ui->header_h   // header band height  (Tab5: 80, CYD: 30)
-```
-
-### Font symbols — correct namespace
-
-M5GFX fonts live in `lgfx::fonts::`, not `lgfx::`:
-
-```cpp
-// CORRECT
-&lgfx::fonts::lv_font_montserrat_20
-&lgfx::fonts::lv_font_montserrat_28
-&lgfx::fonts::lv_font_montserrat_36
-&lgfx::fonts::FreeMono18pt7b
-
-// WRONG — 'lv_font_montserrat_20' is not a member of 'lgfx'
-&lgfx::lv_font_montserrat_20
-```
-
-Available Montserrat sizes: 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48.
-Available FreeMono sizes: 9pt, 12pt, 18pt, 24pt (plus Bold and Oblique variants).
-Include `<lgfx/v1/lgfx_fonts.hpp>` to use them.
-
-### Tuning Tab5 layout values
-
-Edit `s_tab5_ui` in `src/hal/hal_m5tab5.cpp`.  All values are in pixels on a 1280×720 canvas.
-Do not touch `hal_cyd.cpp` values — they are calibrated to match the original CYD layout exactly.
-
-### Anti-patterns
-
-| Pattern | Why it's wrong |
-|---|---|
-| `tft.setTextSize(2)` in feature code | Bypasses HAL; renders at wrong size on Tab5 |
-| `#if defined(NEONDRIVE_TARGET_M5TAB5)` for font/size selection | HAL exists for this; keep feature code target-agnostic |
-| Adding new pixel constants as `constexpr int` in `main.cpp` | Add to `neon_hal_ui_t` instead and provide values in both HAL files |
-| Calling `tft.setFont(...)` directly | Use `applyFontSm/Md/Lg/Mono()` so CYD fallback still works |
-
----
-
 ## PlatformIO Environments
 
 | Environment | Board | Status |
@@ -335,11 +245,6 @@ Do not touch `hal_cyd.cpp` values — they are calibrated to match the original 
 Flash command: `pio run -e <env> -t upload --upload-port <COMx>`
 
 Tab5 download mode: hold RESET ~2 s until green LED blinks rapidly, then release.
-
-**Tab5 flash on Windows** — esptool crashes with `UnicodeEncodeError` on the chip info output unless UTF-8 is forced:
-```powershell
-$env:PYTHONUTF8=1; & "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -e firmware_m5tab5 -t upload --upload-port COM4
-```
 
 ---
 

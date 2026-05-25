@@ -36,6 +36,47 @@ void neon_hal_display_size(int *width, int *height)
     if (height) *height = 720;
 }
 
+// ── UI metrics ────────────────────────────────────────────────────────────────
+//
+// All layout values are proportional to 1280×720.
+// Fonts are pre-compiled bitmaps from M5GFX — no filesystem, no pixel-doubling.
+//
+//   header_h     =  80 px  ≈ H×0.111  (Montserrat-36 ~42 px + 19 px padding)
+//   row_h        =  48 px  ≈ H×0.067  (Montserrat-28 ~34 px + 14 px padding)
+//   bottom_bar_h = 112 px  ≈ H×0.156
+//   btn_h        =  72 px  ≈ H×0.100  (comfortable capacitive tap target)
+//   safe_margin  =  24 px  ≈ W×0.019
+//   pad          =  16 px
+//   border_r     =  12 px
+
+#include <lgfx/v1/lgfx_fonts.hpp>
+
+static const neon_hal_ui_t s_tab5_ui = {
+    /* safe_margin  */ 24,
+    /* top_gap      */ 16,
+    /* header_h     */ 80,
+    /* bottom_bar_h */ 112,
+    /* btn_h        */ 72,
+    /* btn_gap      */ 20,
+    /* row_h        */ 48,
+    /* pad          */ 16,
+    /* border_r     */ 12,
+
+    /* font_sm      */ &lgfx::fonts::lv_font_montserrat_20,
+    /* font_md      */ &lgfx::fonts::lv_font_montserrat_28,
+    /* font_lg      */ &lgfx::fonts::lv_font_montserrat_36,
+    /* font_mono    */ &lgfx::fonts::FreeMono18pt7b,
+
+    /* text_size_sm */ 1,
+    /* text_size_md */ 1,
+    /* text_size_lg */ 1,
+};
+
+const neon_hal_ui_t *neon_hal_ui_metrics(void)
+{
+    return &s_tab5_ui;
+}
+
 // ── WiFi ──────────────────────────────────────────────────────────────────────
 
 void neon_hal_wifi_init(void)
