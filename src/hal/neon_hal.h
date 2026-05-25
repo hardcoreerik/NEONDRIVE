@@ -12,7 +12,8 @@
  * Current implementations:
  *   hal_m5tab5.cpp        — M5Stack Tab5 (ESP32-P4 + ESP32-C6 SDIO WiFi 6)
  *   hal_cardputer_adv.cpp — M5Stack Cardputer Advanced (ESP32-S3, 240×135, keyboard)
- *   hal_cyd.cpp           — CYD 2.4/2.8/3.5", T-Display-S3, T-Embed-CC1101
+ *   hal_cyd.cpp           — CYD 2.4/2.8/3.5", T-Embed-CC1101
+ *   hal_t_display_s3.cpp  — LilyGO T-Display-S3
  *
  * Status: scaffold.  Stubs are in place; implementations expand as features
  *         are ported per-target.  Call sites in main.cpp will be migrated

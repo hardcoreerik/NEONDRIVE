@@ -18,7 +18,10 @@
 #define NEONDRIVE_TARGET_BUTTON_NAV 1
 #endif
 #if defined(NEONDRIVE_TARGET_TDISPLAY_S3) && !defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
+// This target is button-nav by default. Enable only for known touch variants.
+#if defined(NEONDRIVE_TDISPLAY_S3_HAS_TOUCH) && (NEONDRIVE_TDISPLAY_S3_HAS_TOUCH == 1)
 #define NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH 1
+#endif
 #endif
 #if defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
 #define NEONDRIVE_TARGET_TEMBED 1
@@ -805,6 +808,9 @@ static bool touch_read_point(TouchState& s) {
   return false;
 #elif defined(NEONDRIVE_TARGET_M5CARDPUTER)
   // Cardputer has no touch screen — navigation is keyboard-only.
+  return false;
+#elif defined(NEONDRIVE_TARGET_BUTTON_NAV)
+  // Button-nav targets without explicit touch support.
   return false;
 #else
   // NOTE: On some CYD/XPT2046 boards, ts.touched() can get "stuck true" after redraws.
@@ -15571,6 +15577,8 @@ static void touch_init() {
     ts.begin();
     ts.setRotation(0);
   }
+#elif defined(NEONDRIVE_TARGET_BUTTON_NAV)
+  Serial.println("[input] button navigation enabled (no touch)");
 #else
   ts.begin();
   ts.setRotation(0);

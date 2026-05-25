@@ -1,9 +1,8 @@
 /**
- * hal_cyd.cpp — CYD / T-Display-S3 / T-Embed HAL implementation
- * ==============================================================
- * Covers all non-Tab5 targets:
+ * hal_cyd.cpp — CYD / T-Embed HAL implementation
+ * ==============================================
+ * Covers:
  *   - CYD 2.4" / 2.8" / 3.5" (ILI9341/ST7789, XPT2046 resistive touch)
- *   - LilyGO T-Display-S3     (ST7789, capacitive touch)
  *   - LilyGO T-Embed-CC1101   (no touch)
  *
  * WiFi:    On-chip ESP32 classic WiFi stack.  No pin routing needed.
@@ -12,7 +11,7 @@
  *          TODO: route neon_hal_touch_get() through XPT2046 once the
  *          existing touch path in main.cpp is migrated to the HAL.
  */
-#if !defined(NEONDRIVE_TARGET_M5TAB5) && !defined(NEONDRIVE_TARGET_M5CARDPUTER)
+#if !defined(NEONDRIVE_TARGET_M5TAB5) && !defined(NEONDRIVE_TARGET_M5CARDPUTER) && !defined(NEONDRIVE_TARGET_TDISPLAY_S3)
 
 #include "neon_hal.h"
 #include <WiFi.h>
@@ -25,10 +24,6 @@ void neon_hal_display_size(int *width, int *height)
     // CYD 3.5" — ILI9488 480×320
     if (width)  *width  = 480;
     if (height) *height = 320;
-#elif defined(NEONDRIVE_TARGET_TDISPLAY_S3)
-    // LilyGO T-Display-S3 — ST7789 320×170
-    if (width)  *width  = 320;
-    if (height) *height = 170;
 #elif defined(NEONDRIVE_TARGET_TEMBED)
     // LilyGO T-Embed-CC1101 — ST7789 240×135
     if (width)  *width  = 240;
@@ -64,7 +59,7 @@ static const neon_hal_ui_t s_cyd_ui = {
     /* text_size_sm */ 1, /* text_size_md */ 2, /* text_size_lg */ 3,
     /* reserve_x    */ 0, /* reserve_y    */ 0, /* reserve_w    */ 0, /* reserve_h */ 0,
 #else
-    // CYD 2.4" / 2.8" / T-Display-S3 / T-Embed — match existing constants
+    // CYD 2.4" / 2.8" / T-Embed — match existing constants
     /* safe_margin  */ 8,
     /* top_gap      */ 6,
     /* header_h     */ 30,
@@ -128,11 +123,11 @@ neon_touch_t neon_hal_touch_get(void)
 }
 
 // ── Keyboard ──────────────────────────────────────────────────────────────────
-// CYD / T-Display-S3 / T-Embed have no physical keyboard — stub returns NONE.
+// CYD / T-Embed have no physical keyboard — stub returns NONE.
 
 neon_key_t neon_hal_key_get(void)
 {
     return { NeonKey::NONE, 0 };
 }
 
-#endif // !NEONDRIVE_TARGET_M5TAB5 && !NEONDRIVE_TARGET_M5CARDPUTER
+#endif // !NEONDRIVE_TARGET_M5TAB5 && !NEONDRIVE_TARGET_M5CARDPUTER && !NEONDRIVE_TARGET_TDISPLAY_S3
