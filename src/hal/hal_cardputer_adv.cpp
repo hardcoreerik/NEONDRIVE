@@ -116,17 +116,17 @@ neon_touch_t neon_hal_touch_get(void)
 //   state.opt    — bool, true when OPT is held
 //   state.word   — std::vector<char>, printable chars (no Enter/BS codes)
 //
-// Physical arrow keys (bottom-right of keyboard) map via the TCA8418 remap
-// to key_value_map positions [3][10..12], which produce these chars in state.word:
-//   ','       → LEFT  arrow  (key_value_map [3][10] value_first)
-//   '.'       → DOWN  arrow  (key_value_map [3][11] value_first)
-//   '>' (Shift+.) → UP arrow  (key_value_map [3][11] value_second)
-//   '/'       → RIGHT arrow  (key_value_map [3][12] value_first)
+// Cardputer ADV bottom-right nav legends are printed as punctuation keys.
+// The M5Cardputer map exposes these chars in state.word:
+//   ',' / '<'   -> left-side nav legend
+//   '.' / '>'   -> down-side nav legend
+//   '/' / '?'   -> right-side nav legend
+//   ';' / ':'   -> up-side nav legend (with Fn combos on ADV layout)
 //
 // FN+WASD is kept as an alternate navigation scheme for users who prefer it.
 //
 // Key mapping summary:
-//   , / . / > / /    → NeonKey::LEFT/DOWN/UP/RIGHT  (dedicated arrow keys)
+//   ','/'<' ';'/':' '.'/'>' '/'/'?' -> LEFT/UP/DOWN/RIGHT
 //   FN + A/S/W/D     → NeonKey::LEFT/DOWN/UP/RIGHT  (alternate)
 //   Enter            → NeonKey::ENTER  (state.enter bool)
 //   Backspace/OPT    → NeonKey::BACK   (state.del / state.opt bool)
@@ -173,19 +173,23 @@ neon_key_t neon_hal_key_get(void)
                 case 's': case 'S': result.key = NeonKey::DOWN;  return result;
                 case 'a': case 'A': result.key = NeonKey::LEFT;  return result;
                 case 'd': case 'D': result.key = NeonKey::RIGHT; return result;
+                case ';': case ':': result.key = NeonKey::UP;    return result;
+                case ',': case '<': result.key = NeonKey::LEFT;  return result;
+                case '.': case '>': result.key = NeonKey::DOWN;  return result;
+                case '/': case '?': result.key = NeonKey::RIGHT; return result;
                 default: break;
             }
         }
         return result;  // FN + unrecognised — ignore
     }
 
-    // Dedicated arrow keys (bottom-right of ADV keyboard)
+    // Bottom-right nav punctuation cluster on ADV.
     for (char c : state.word) {
         switch (c) {
-            case ',': result.key = NeonKey::LEFT;  return result;
-            case '.': result.key = NeonKey::DOWN;  return result;
-            case '>': result.key = NeonKey::UP;    return result;  // Shift + .
-            case '/': result.key = NeonKey::RIGHT; return result;
+            case ',': case '<': result.key = NeonKey::LEFT;  return result;
+            case ';': case ':': result.key = NeonKey::UP;    return result;
+            case '.': case '>': result.key = NeonKey::DOWN;  return result;
+            case '/': case '?': result.key = NeonKey::RIGHT; return result;
             default: break;
         }
     }

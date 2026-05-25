@@ -4,7 +4,7 @@
 #define ND_PROFILE_STATUS "stable"
 #define ND_PROFILE_CODE "cyd_2_4"
 #define ND_PROFILE_NAME "NEONDRIVE // CYD-2.4"
-#define ND_HOME_HEADER  "NEONDRIVE // CYD"
+#define ND_HOME_HEADER  "NEONDRIVE CYD 2.4"
 
 #define ND_DISPLAY_W 320
 #define ND_DISPLAY_H 240
