@@ -851,9 +851,26 @@ static TouchState readTouch() {
   return s;
 }
 
+// Synthetic touch vars must be declared before touchEdgeTriggered() uses them.
+#if ND_HW_KEYBOARD
+static bool g_synthTouchPending = false;
+static int  g_synthTouchX       = 0;
+static int  g_synthTouchY       = 0;
+#endif
+
 static bool touchEdgeTriggered(int &outX, int &outY) {
   static bool wasDown = false;
   if (millis() < g_touchDebounceUntilMs) return false;
+
+#if ND_HW_KEYBOARD
+  // Drain a synthetic touch injected by the keyboard nav system.
+  if (g_synthTouchPending) {
+    g_synthTouchPending = false;
+    outX = g_synthTouchX;
+    outY = g_synthTouchY;
+    return true;
+  }
+#endif
 
 #if defined(NEONDRIVE_TARGET_BUTTON_NAV)
   TouchState s = readTouch();
@@ -3562,12 +3579,105 @@ static void drawCompanionSyncBadgeTick() {
 
 static Button homeBtns[HOME_BTN_COUNT];
 
+// ── Keyboard focus state (Cardputer) ─────────────────────────────────────────
+#if ND_HW_KEYBOARD
+static int  g_focusIdx          = 0;   // focused button index on HOME screen
+#endif
+
 // ---------- Home -> Targets smart flow (Milestone D v6) ----------
 static bool homeTargetsPromptActive = false;
 static bool homeReconnectPromptActive = false;
 static Button btnHomePromptYes, btnHomePromptNo;
 
 static Button btnBack, btnSave;
+
+// ── Keyboard navigation helpers (Cardputer) ──────────────────────────────────
+// Placed here so all referenced globals (homeBtns, synth touch vars, btnBack)
+// are already declared above.
+// setScreen is defined later but called from handleKeyNav — forward declare it.
+#if ND_HW_KEYBOARD
+static void setScreen(ScreenId next);  // forward declaration for handleKeyNav
+#endif
+#if ND_HW_KEYBOARD
+
+// Draw (or erase) the focus ring for the currently focused HOME button.
+// Call after drawHome() to stamp the initial ring, and after focus changes.
+static void drawFocusRing() {
+  if (screen != ScreenId::HOME) return;
+  if (g_focusIdx < 0 || g_focusIdx >= HOME_BTN_COUNT) return;
+  const Button& b = homeBtns[g_focusIdx];
+  if (b.label == nullptr || b.label[0] == '\0' || b.w == 0) return;
+  // drawHomeButton renders at 95% of the cell — the 5% margin is free for the ring.
+  tft.drawRect(b.x, b.y, b.w, b.h, TFT_WHITE);
+}
+
+// Move focus to newIdx, refreshing only the two affected button cells.
+static void updateHomeFocus(int newIdx) {
+  if (g_focusIdx >= 0 && g_focusIdx < HOME_BTN_COUNT) {
+    const Button& ob = homeBtns[g_focusIdx];
+    if (ob.w > 0) {
+      tft.fillRect(ob.x, ob.y, ob.w, ob.h, TFT_BLACK);
+      drawHomeButton(ob, homeBtnBorderColor(g_focusIdx), TFT_WHITE);
+    }
+  }
+  g_focusIdx = newIdx;
+  if (g_focusIdx >= 0 && g_focusIdx < HOME_BTN_COUNT) {
+    const Button& nb = homeBtns[g_focusIdx];
+    if (nb.w > 0) {
+      tft.fillRect(nb.x, nb.y, nb.w, nb.h, TFT_BLACK);
+      drawHomeButton(nb, homeBtnBorderColor(g_focusIdx), TFT_WHITE);
+      drawFocusRing();
+    }
+  }
+}
+
+// Process a key event from neon_hal_key_get().
+// HOME: arrows move focus, Enter fires focused button, Back is no-op (already home).
+// Other screens: Back returns to HOME, Enter fires the Back button.
+static void handleKeyNav(neon_key_t k) {
+  if (k.key == NeonKey::BACK) {
+    if (screen != ScreenId::HOME) {
+      setScreen(ScreenId::HOME);
+      drawFocusRing();
+    }
+    return;
+  }
+
+  if (screen == ScreenId::HOME) {
+    if (k.key == NeonKey::ENTER) {
+      const Button& b = homeBtns[g_focusIdx];
+      if (b.label && b.label[0] != '\0' && b.w > 0) {
+        g_synthTouchPending = true;
+        g_synthTouchX = b.x + b.w / 2;
+        g_synthTouchY = b.y + b.h / 2;
+      }
+      return;
+    }
+    int next = g_focusIdx;
+    if (k.key == NeonKey::LEFT)  next = max(0, g_focusIdx - 1);
+    if (k.key == NeonKey::RIGHT) next = min(HOME_BTN_COUNT - 1, g_focusIdx + 1);
+    if (k.key == NeonKey::UP)    next = max(0, g_focusIdx - HOME_BTN_COLS);
+    if (k.key == NeonKey::DOWN)  next = min(HOME_BTN_COUNT - 1, g_focusIdx + HOME_BTN_COLS);
+    // Skip empty slots when moving right or down
+    if (k.key == NeonKey::RIGHT || k.key == NeonKey::DOWN) {
+      while (next < HOME_BTN_COUNT &&
+             (homeBtns[next].label == nullptr || homeBtns[next].label[0] == '\0')) {
+        next++;
+      }
+      if (next >= HOME_BTN_COUNT) next = g_focusIdx;
+    }
+    if (next != g_focusIdx) updateHomeFocus(next);
+    return;
+  }
+
+  // Non-HOME: Enter fires the Back button if one is visible on this screen.
+  if (k.key == NeonKey::ENTER && btnBack.w > 0) {
+    g_synthTouchPending = true;
+    g_synthTouchX = btnBack.x + btnBack.w / 2;
+    g_synthTouchY = btnBack.y + btnBack.h / 2;
+  }
+}
+#endif // ND_HW_KEYBOARD
 
 static Button btnWifiBack, btnWifiScan, btnWifiRescan, btnWifiTargetGo, btnWifiConnect;
 static Button btnWifiUp, btnWifiDown;
@@ -4661,6 +4771,9 @@ static void drawHome() {
   drawBorder();
   if (homeReconnectPromptActive) drawHomeReconnectPromptOverlay();
   if (homeTargetsPromptActive) drawHomeTargetsPromptOverlay();
+#if ND_HW_KEYBOARD
+  drawFocusRing();
+#endif
 }
 
 static void drawHomeReconnectPromptOverlay() {
@@ -14661,7 +14774,12 @@ static void setScreen(ScreenId next) {
     Serial.printf("[ui] screen -> %s\n", screenToStr(screen));
   }
   switch (screen) {
-    case ScreenId::HOME:              drawHome(); break;
+    case ScreenId::HOME:
+#if ND_HW_KEYBOARD
+      g_focusIdx = 0;
+#endif
+      drawHome();
+      break;
     case ScreenId::JUST_GO:
       justGoLayoutDrawn = false;
       if (!justGoActive) {
@@ -15603,6 +15721,15 @@ void loop() {
   tab5RotationTick();
 #endif
 #endif // NEONDRIVE_USES_M5GFX
+
+#if ND_HW_KEYBOARD
+  {
+    neon_key_t k = neon_hal_key_get();
+    if (k.key != NeonKey::NONE) {
+      handleKeyNav(k);
+    }
+  }
+#endif
   handleSerialDebugCommands();
   bruceMenuTick();
   timeServiceTick();
