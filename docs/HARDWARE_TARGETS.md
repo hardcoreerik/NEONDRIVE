@@ -128,10 +128,10 @@ See `CLAUDE.md` for the full root-cause writeup.
   - add dedicated PlatformIO environment
   - add dedicated UI/input profile (keyboard + trackball/touch if applicable)
   - add dedicated flash/monitor scripts
-  - add launcher-compatible release artifact set
+  - add M5Launcher-compatible release artifact set
 
 Plan document:
-- [docs/M5CARDPUTER_ADV_LAUNCHER_PLAN.md](M5CARDPUTER_ADV_LAUNCHER_PLAN.md)
+- [docs/M5LAUNCHER_PACKAGING_PLAN.md](M5LAUNCHER_PACKAGING_PLAN.md)
 
 ## Release Guidance
 

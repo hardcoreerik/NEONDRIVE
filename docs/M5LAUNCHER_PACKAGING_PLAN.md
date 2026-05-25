@@ -1,15 +1,15 @@
-# M5Cardputer Advanced + M5 Launcher Plan
+# M5Launcher Packaging Plan
 
-This document defines how we should package NEONdrive when the M5Cardputer Advanced port is added.
+This document defines how NEONDRIVE firmware binaries should be packaged for M5Launcher.
 
 ## Goal
 
-Allow users to pick a NEONdrive `.bin` from the M5 Launcher SD-card app list and launch/install it without custom tooling.
+Allow users to pick a NEONdrive `.bin` from the M5Launcher SD-card app list and launch/install it without custom tooling.
 
 ## Current Status
 
-- M5Cardputer Advanced target is not implemented yet in this repo.
-- This is the packaging/integration plan to follow once that target exists.
+- M5Launcher is a launcher/distribution flow, not a firmware target.
+- This plan applies to any compatible M5 hardware target we ship (for example, Tab5 today and other M5 targets later).
 
 ## Planned Firmware Target
 
@@ -26,13 +26,13 @@ When the target exists, publish at minimum:
 - `neondrive_<version>_m5cardputer_adv_app.bin`
 - `neondrive_<version>_m5cardputer_adv_fullflash.bin`
 
-Optional launcher-focused bundle:
+Optional M5Launcher-focused bundle:
 
 - `neondrive_<version>_m5cardputer_adv_launcher.zip`
 
-## Launcher Compatibility Strategy
+## M5Launcher Compatibility Strategy
 
-The Launcher SD install flow expects a firmware binary users can browse/select from SD storage.
+The M5Launcher SD install flow expects a firmware binary users can browse/select from SD storage.
 
 Plan:
 
@@ -49,10 +49,10 @@ Plan:
 
 1. Flash and boot test on M5Cardputer Advanced.
 2. Input profile test (keyboard/buttons/touch/trackball as applicable).
-3. Launcher SD selection test from a clean SD card.
+3. M5Launcher SD selection test from a clean SD card.
 4. Upgrade test (`app.bin`) over previous release.
 5. Clean install test (`fullflash.bin`) from blank flash.
 
 ## Why This Matters
 
-Keeping a separate target + naming convention avoids user confusion and makes launcher-based installation discoverable for non-developer users.
+Keeping a separate target + naming convention avoids user confusion and makes M5Launcher-based installation discoverable for non-developer users.
