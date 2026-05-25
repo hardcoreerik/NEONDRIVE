@@ -3591,6 +3591,85 @@ static Button btnHomePromptYes, btnHomePromptNo;
 
 static Button btnBack, btnSave;
 
+// ── Screenshot (Cardputer Tab key) ───────────────────────────────────────────
+#if ND_HW_KEYBOARD
+static void takeScreenshot() {
+  if (!sdReady && !mountSdCard(false)) {
+    Serial.println("[snap] SD not ready");
+    return;
+  }
+
+  const int W = ND_DISPLAY_W;
+  const int H = ND_DISPLAY_H;
+
+  // Ensure /screenshots directory exists
+  if (!SD.exists("/screenshots")) SD.mkdir("/screenshots");
+
+  // Sequential filename: snap_0000.bmp … snap_9999.bmp
+  static int snap_n = 0;
+  char fname[32];
+  snprintf(fname, sizeof(fname), "/screenshots/snap_%04d.bmp", snap_n++);
+
+  File f = SD.open(fname, FILE_WRITE);
+  if (!f) {
+    Serial.printf("[snap] open failed: %s\n", fname);
+    return;
+  }
+
+  // ── BMP header (54 bytes) ──────────────────────────────────────────────────
+  // 24-bit top-down BMP (negative height = top-down, no row-flip needed).
+  const int row_bytes  = W * 3;          // no padding needed: 240*3=720 % 4 == 0
+  const int pixel_data = row_bytes * H;
+  const int file_size  = 54 + pixel_data;
+
+  uint8_t hdr[54];
+  memset(hdr, 0, sizeof(hdr));
+  // File header
+  hdr[0] = 'B';  hdr[1] = 'M';
+  hdr[2] = (file_size)       & 0xFF;
+  hdr[3] = (file_size >> 8)  & 0xFF;
+  hdr[4] = (file_size >> 16) & 0xFF;
+  hdr[5] = (file_size >> 24) & 0xFF;
+  hdr[10] = 54;   // pixel data offset
+  // DIB header (BITMAPINFOHEADER)
+  hdr[14] = 40;   // header size
+  hdr[18] = W & 0xFF;  hdr[19] = (W >> 8) & 0xFF;
+  // Negative height → top-down
+  int32_t neg_h = -(int32_t)H;
+  hdr[22] = neg_h & 0xFF;  hdr[23] = (neg_h >> 8) & 0xFF;
+  hdr[24] = (neg_h >> 16) & 0xFF;  hdr[25] = (neg_h >> 24) & 0xFF;
+  hdr[26] = 1;    // colour planes
+  hdr[28] = 24;   // bits per pixel
+
+  f.write(hdr, 54);
+
+  // ── Pixel data ────────────────────────────────────────────────────────────
+  // Read one row at a time to stay within stack limits.
+  uint16_t row_rgb565[W];
+  uint8_t  row_bgr[W * 3];
+
+  for (int y = 0; y < H; y++) {
+    tft.readRect(0, y, W, 1, row_rgb565);
+    for (int x = 0; x < W; x++) {
+      uint16_t px = row_rgb565[x];
+      row_bgr[x*3 + 0] = (px & 0x001F) << 3;          // B
+      row_bgr[x*3 + 1] = ((px >> 5) & 0x003F) << 2;   // G
+      row_bgr[x*3 + 2] = ((px >> 11) & 0x001F) << 3;  // R
+    }
+    f.write(row_bgr, W * 3);
+  }
+
+  f.close();
+  Serial.printf("[snap] saved %s\n", fname);
+
+  // Brief white-flash feedback (tiny display, user needs confirmation)
+  tft.fillScreen(TFT_WHITE);
+  delay(60);
+  // Next loop iteration will redraw the current screen naturally via
+  // the display-dirty mechanism; no explicit redraw needed here.
+}
+#endif // ND_HW_KEYBOARD
+
 // ── Keyboard navigation helpers (Cardputer) ──────────────────────────────────
 // Placed here so all referenced globals (homeBtns, synth touch vars, btnBack)
 // are already declared above.
@@ -3635,6 +3714,10 @@ static void updateHomeFocus(int newIdx) {
 // HOME: arrows move focus, Enter fires focused button, Back is no-op (already home).
 // Other screens: Back returns to HOME, Enter fires the Back button.
 static void handleKeyNav(neon_key_t k) {
+  if (k.key == NeonKey::SCREENSHOT) {
+    takeScreenshot();
+    return;
+  }
   if (k.key == NeonKey::BACK) {
     if (screen != ScreenId::HOME) {
       setScreen(ScreenId::HOME);

@@ -113,18 +113,24 @@ neon_touch_t neon_hal_touch_get(void)
 //   state.del    — bool, true when Backspace is held
 //   state.fn     — bool, true when FN is held
 //   state.shift  — bool, true when Shift is held
-//   state.ctrl   — bool, true when Ctrl is held
-//   state.word   — std::vector<char>, printable chars only (no Enter/BS/arrow codes)
+//   state.opt    — bool, true when OPT is held
+//   state.word   — std::vector<char>, printable chars (no Enter/BS codes)
 //
-// There are NO dedicated arrow keys on this keyboard.
-// Navigation uses FN + WASD (fn=true, word contains 'w'/'a'/'s'/'d').
+// Physical arrow keys (bottom-right of keyboard) map via the TCA8418 remap
+// to key_value_map positions [3][10..12], which produce these chars in state.word:
+//   ','       → LEFT  arrow  (key_value_map [3][10] value_first)
+//   '.'       → DOWN  arrow  (key_value_map [3][11] value_first)
+//   '>' (Shift+.) → UP arrow  (key_value_map [3][11] value_second)
+//   '/'       → RIGHT arrow  (key_value_map [3][12] value_first)
 //
-// Key mapping:
-//   FN + W/A/S/D  → NeonKey::UP/LEFT/DOWN/RIGHT
-//   Enter         → NeonKey::ENTER   (state.enter bool)
-//   Backspace     → NeonKey::BACK    (state.del bool)
-//   OPT key       → NeonKey::BACK    (state.opt bool — acts as ESC/back)
-//   Printable     → NeonKey::CHAR + ch
+// FN+WASD is kept as an alternate navigation scheme for users who prefer it.
+//
+// Key mapping summary:
+//   , / . / > / /    → NeonKey::LEFT/DOWN/UP/RIGHT  (dedicated arrow keys)
+//   FN + A/S/W/D     → NeonKey::LEFT/DOWN/UP/RIGHT  (alternate)
+//   Enter            → NeonKey::ENTER  (state.enter bool)
+//   Backspace/OPT    → NeonKey::BACK   (state.del / state.opt bool)
+//   Other printable  → NeonKey::CHAR + ch
 
 neon_key_t neon_hal_key_get(void)
 {
@@ -147,13 +153,19 @@ neon_key_t neon_hal_key_get(void)
         return result;
     }
 
+    // Tab → screenshot
+    if (state.tab) {
+        result.key = NeonKey::SCREENSHOT;
+        return result;
+    }
+
     // Backspace or OPT → Back
     if (state.del || state.opt) {
         result.key = NeonKey::BACK;
         return result;
     }
 
-    // FN + WASD → directional navigation
+    // FN + WASD → directional navigation (alternate)
     if (state.fn) {
         for (char c : state.word) {
             switch (c) {
@@ -164,11 +176,21 @@ neon_key_t neon_hal_key_get(void)
                 default: break;
             }
         }
-        // FN held alone or FN + unrecognised key — ignore
-        return result;
+        return result;  // FN + unrecognised — ignore
     }
 
-    // Printable character
+    // Dedicated arrow keys (bottom-right of ADV keyboard)
+    for (char c : state.word) {
+        switch (c) {
+            case ',': result.key = NeonKey::LEFT;  return result;
+            case '.': result.key = NeonKey::DOWN;  return result;
+            case '>': result.key = NeonKey::UP;    return result;  // Shift + .
+            case '/': result.key = NeonKey::RIGHT; return result;
+            default: break;
+        }
+    }
+
+    // Other printable character
     for (char c : state.word) {
         if (c >= 0x20 && c < 0x7F) {
             result.key = NeonKey::CHAR;

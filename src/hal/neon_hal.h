@@ -134,14 +134,15 @@ const neon_hal_ui_t *neon_hal_ui_metrics(void);
  * CHAR carries an ASCII character for text-entry fields.
  */
 enum class NeonKey : uint8_t {
-    NONE  = 0,
+    NONE       = 0,
     UP,
     DOWN,
     LEFT,
     RIGHT,
     ENTER,
-    BACK,   ///< Backspace / ESC / physical Back button
-    CHAR    ///< Printable character — inspect neon_key_t::ch
+    BACK,       ///< Backspace / ESC / physical Back button
+    CHAR,       ///< Printable character — inspect neon_key_t::ch
+    SCREENSHOT  ///< Capture screen to SD card (Tab key on Cardputer ADV)
 };
 
 struct neon_key_t {
