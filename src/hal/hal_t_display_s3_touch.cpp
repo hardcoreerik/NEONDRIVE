@@ -1,14 +1,14 @@
 /**
- * hal_t_display_s3.cpp — LilyGO T-Display-S3 HAL implementation
- * ==============================================================
+ * hal_t_display_s3_touch.cpp — LilyGO T-Display-S3 Touch HAL
+ * ===========================================================
  * Target:
- *   - LilyGO T-Display-S3 (ST7789 320x170, optional capacitive touch)
+ *   - LilyGO T-Display-S3 Touch variant (CST816/CST328 class touch panel)
  *
- * WiFi:    On-chip ESP32-S3 WiFi stack.
- * Display: Managed by TFT_eSPI (8-bit parallel setup via User_Setup_tdisplay_s3.h).
- * Touch:   Stub for now; main.cpp still owns the current touch path.
+ * Notes:
+ *   - Main touch controller init/read path is currently in main.cpp.
+ *   - This HAL owns target identity, UI sizing, WiFi, and button fallback input.
  */
-#if defined(NEONDRIVE_TARGET_TDISPLAY_S3) && !defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
+#if defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
 
 #include "neon_hal.h"
 #include <Arduino.h>
@@ -20,8 +20,8 @@ void neon_hal_display_size(int *width, int *height)
     if (height) *height = 170;
 }
 
-static const neon_hal_ui_t s_tdisplay_ui = {
-    // T-Display-S3 has a short 170px-tall panel; use compact spacing.
+static const neon_hal_ui_t s_tdisplay_touch_ui = {
+    // Compact layout for 320x170 panel.
     /* safe_margin  */ 4,
     /* top_gap      */ 4,
     /* header_h     */ 20,
@@ -39,7 +39,7 @@ static const neon_hal_ui_t s_tdisplay_ui = {
 
 const neon_hal_ui_t *neon_hal_ui_metrics(void)
 {
-    return &s_tdisplay_ui;
+    return &s_tdisplay_touch_ui;
 }
 
 void neon_hal_wifi_init(void)
@@ -72,12 +72,14 @@ void neon_hal_wifi_deinit(void)
 
 neon_touch_t neon_hal_touch_get(void)
 {
+    // Main touch path still feeds touch directly today.
     neon_touch_t t = { false, -1, -1 };
     return t;
 }
 
 neon_key_t neon_hal_key_get(void)
 {
+    // Keep button fallback available on touch hardware.
     static constexpr uint8_t PIN_BTN_LEFT  = BUTTON_1; // GPIO0
     static constexpr uint8_t PIN_BTN_RIGHT = BUTTON_2; // GPIO14
     static constexpr unsigned long LONG_PRESS_MS = 600;
@@ -118,14 +120,11 @@ neon_key_t neon_hal_key_get(void)
         }
         if (!isDown && st.wasDown) {
             st.wasDown = false;
-            if (!st.longFired) {
-                return shortKey; // short press = direction
-            }
+            if (!st.longFired) return shortKey; // short press = direction
         }
         return NeonKey::NONE;
     };
 
-    // Left button has priority if both events occur in the same poll cycle.
     NeonKey key = processButton(leftDown, s_left, NeonKey::LEFT);
     if (key == NeonKey::NONE) {
         key = processButton(rightDown, s_right, NeonKey::RIGHT);
@@ -136,4 +135,5 @@ neon_key_t neon_hal_key_get(void)
     return { NeonKey::NONE, 0 };
 }
 
-#endif // NEONDRIVE_TARGET_TDISPLAY_S3 && !NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH
+#endif // NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH
+

@@ -44,6 +44,11 @@
 #endif // NEONDRIVE_USES_M5GFX / TFT_eSPI
 #include <LittleFS.h>
 #include <SD.h>
+#if defined(NEONDRIVE_TARGET_TDISPLAY_S3) || defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
+#include <SD_MMC.h>
+#define ND_TDISPLAY_USE_SDMMC 1
+#define SD SD_MMC
+#endif
 using fs::File;
 #include <FS.h>
 #include <ArduinoJson.h>
@@ -63,12 +68,13 @@ using fs::File;
 #include "neon_rf.h"
 #include "hal/neon_hal.h"
 #include "deauth_hunter.h"
-#include "bruce_wifi.h"
+#include "packetlab_wifi.h"
 #include "dropbox_client.h"
 #include "gps_service.h"
 #include "hypercube_widget.h"
 #include "wpasec_client.h"
 #include "yoink_engine.h"
+#include "usb_msc_tdisplay.h"
 #include "wsl_bypasser.h"
 #include "app_config.h"
 #include "config_store.h"
@@ -189,9 +195,9 @@ static constexpr int LED_PINS[] = {-1, -1, -1};
 static constexpr uint8_t LED_PWM_CHANNELS[] = {0, 1, 2};
 
 #elif defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH) || defined(ARDUINO_LILYGO_T_DISPLAY_S3)
-static constexpr bool BOARD_HAS_TOUCH = false;
+static constexpr bool BOARD_HAS_TOUCH = true;
 static constexpr bool BOARD_HAS_IMU   = false;
-static constexpr bool BOARD_HAS_SD = false;
+static constexpr bool BOARD_HAS_SD = true;
 static constexpr bool TFT_USES_SPI_BUS = false;
 static constexpr int BOARD_TFT_ROTATION = 1;
 static constexpr bool BOARD_TFT_INVERT = true;
@@ -207,13 +213,14 @@ static constexpr int PIN_TOUCH_CS = -1;
 static constexpr int PIN_TOUCH_SDA = 18;
 static constexpr int PIN_TOUCH_SCL = 17;
 static constexpr int PIN_TOUCH_INT = 16;
-static constexpr int PIN_TOUCH_RST = 13;
+static constexpr int PIN_TOUCH_RST = 21;
 static constexpr uint8_t TOUCH_ADDR_CST_SELF = 0x15;    // CST816/CST820 family
 static constexpr uint8_t TOUCH_ADDR_CST_MUTUAL = 0x1A;  // CST328 family
-static constexpr int PIN_SD_SCLK  = -1;
-static constexpr int PIN_SD_MISO  = -1;
-static constexpr int PIN_SD_MOSI  = -1;
-static constexpr int PIN_SD_CS    = -1;
+// T-Display-S3 TF Shield (SD_MMC 1-bit): CLK=11, CMD=13, D0=12
+static constexpr int PIN_SD_SCLK  = 11; // SD_MMC CLK
+static constexpr int PIN_SD_MISO  = 12; // SD_MMC D0
+static constexpr int PIN_SD_MOSI  = 13; // SD_MMC CMD
+static constexpr int PIN_SD_CS    = -1; // not used in SD_MMC mode
 static constexpr int PIN_NAV_NEXT = BUTTON_1;
 static constexpr int PIN_NAV_SELECT = BUTTON_2;
 static constexpr int PIN_ENCODER_A = -1;
@@ -1633,19 +1640,39 @@ static bool mountSdCard(bool verbose) {
     sdReady = false;
     return false;
   }
+  if (nd_usb_msc_sd_app_locked()) {
+    if (verbose) Serial.println("[sd] app access locked by USB MSC host");
+    sdReady = false;
+    return false;
+  }
 
+#if defined(ND_TDISPLAY_USE_SDMMC)
+  SD.setPins(PIN_SD_SCLK, PIN_SD_MOSI, PIN_SD_MISO);
+  sdReady = SD.begin("/sdcard", true /* mode1bit */);
+#else
   // Use dedicated VSPI bus for SD so we do not disturb touch/TFT SPI bus.
   sdSpi.begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
   sdReady = SD.begin(PIN_SD_CS, sdSpi, 20000000U);
+#endif
 
   if (verbose) {
     if (sdReady) {
       uint8_t cardType = SD.cardType();
       uint64_t cardSizeMb = SD.cardSize() / (1024ULL * 1024ULL);
+#if defined(ND_TDISPLAY_USE_SDMMC)
+      Serial.printf("[sd] mounted (SD_MMC 1-bit): clk=%d cmd=%d d0=%d type=%u size=%lluMB\n",
+                    PIN_SD_SCLK, PIN_SD_MOSI, PIN_SD_MISO, (unsigned)cardType, cardSizeMb);
+#else
       Serial.printf("[sd] mounted: cs=%d type=%u size=%lluMB\n",
                     PIN_SD_CS, (unsigned)cardType, cardSizeMb);
+#endif
     } else {
+#if defined(ND_TDISPLAY_USE_SDMMC)
+      Serial.printf("[sd] mount failed (SD_MMC 1-bit clk=%d cmd=%d d0=%d).\n",
+                    PIN_SD_SCLK, PIN_SD_MOSI, PIN_SD_MISO);
+#else
       Serial.printf("[sd] mount failed (cs=%d). Insert card or verify SD pins.\n", PIN_SD_CS);
+#endif
     }
   }
 
@@ -2407,9 +2434,9 @@ enum class ScreenId : uint8_t {
   WIFI_CONNECT,
   WEBSERVER,
   ABOUT,
-  BRUCE_MENU,
-  BRUCE_MONITOR,
-  BRUCE_SET_TARGET,
+  PACKETLAB_MENU,
+  PACKETLAB_MONITOR,
+  PACKETLAB_SET_TARGET,
   SCOPE_GRAPH,
   LED_CONTROL,
   NEON_PANIC,
@@ -2440,9 +2467,9 @@ static const char* screenToStr(ScreenId s) {
     case ScreenId::WEBSERVER: return "WEBSERVER";
     case ScreenId::RECON: return "RECON";
     case ScreenId::ABOUT: return "ABOUT";
-    case ScreenId::BRUCE_MENU: return "BRUCE_MENU";
-    case ScreenId::BRUCE_MONITOR: return "BRUCE_MONITOR";
-    case ScreenId::BRUCE_SET_TARGET: return "BRUCE_SET_TARGET";
+    case ScreenId::PACKETLAB_MENU: return "PACKETLAB_MENU";
+    case ScreenId::PACKETLAB_MONITOR: return "PACKETLAB_MONITOR";
+    case ScreenId::PACKETLAB_SET_TARGET: return "PACKETLAB_SET_TARGET";
     case ScreenId::SCOPE_GRAPH: return "SCOPE_GRAPH";
     case ScreenId::LED_CONTROL: return "LED_CONTROL";
     case ScreenId::NEON_PANIC: return "NEON_PANIC";
@@ -2459,7 +2486,7 @@ static const char* screenToStr(ScreenId s) {
 static void printRuntimeStatus() {
   Serial.printf(
     "[hb] screen=%s wifiScan=%d aps=%d sel=%d scroll=%d target=%d ssid='%s' ch=%d "
-    "sniff=%d mode=%s lock=%d pps=%d pkts=%lu drop=%lu werr=%lu sd=%d dirty=%d\n",
+    "sniff=%d mode=%s lock=%d pps=%d pkts=%lu drop=%lu werr=%lu sd=%d msc=%d host=%d sd_lock=%d dirty=%d\n",
     screenToStr(screen),
     wifiIsScanning ? 1 : 0,
     apCount, apSelected, apScroll,
@@ -2474,6 +2501,9 @@ static void printRuntimeStatus() {
     (unsigned long)sniffDroppedPackets,
     (unsigned long)sniffWriteErrors,
     sdReady ? 1 : 0,
+    nd_usb_msc_active() ? 1 : 0,
+    nd_usb_msc_host_mounted() ? 1 : 0,
+    nd_usb_msc_sd_app_locked() ? 1 : 0,
     configDirty ? 1 : 0
   );
 }
@@ -4121,49 +4151,49 @@ static void drawLedControlDynamic() {
   tft.drawString(val, 12, 210);
 }
 
-// Bruce Monitor screen buttons and state
-static Button btnBruceMonBack;
-static Button btnBruceMonFiles;
-static Button bruceMenuBtns[8];
+// PACKETLAB Monitor screen buttons and state
+static Button btnPACKETLABMonBack;
+static Button btnPACKETLABMonFiles;
+static Button PACKETLABMenuBtns[10];
 // PUSH1T screen buttons
-static Button btnP1tBack, btnP1tEngage, btnP1tManual, btnP1tBruce, btnP1tSetTarget;
+static Button btnP1tBack, btnP1tEngage, btnP1tManual, btnP1tPACKETLAB, btnP1tSetTarget;
 static uint32_t push1tScreenLastSig = 0;
 // SP3CTER screen buttons
 static Button btnSpBack, btnSpEngage, btnSpGhost, btnSpSetTarget, btnSpPktLab;
-static Button btnBruceSetTargetBack;
-static Button btnBruceSetTargetAll;
-static Button btnBruceSetTargetRows[8];
-static Button btnBruceSetTargetUp;
-static Button btnBruceSetTargetDown;
-// Bruce attack target selection (compact storage)
-static uint8_t bruceTargetBssid[6] = {0};
-static char bruceTargetSsid[20] = {0};  // Reduced to save DRAM
-static uint8_t bruceTargetChannel = 0;
-static bool bruceHasSelectedTarget = false;
-static uint32_t bruceMonLastUpdateMs  = 0;
-static uint32_t bruceMonLastDrawMs    = 0;  // Separate timer for screen redraws
-static int bruceMonLastLineCount      = -1;  // Track content changes
-static bool bruceMonLastAttackingState = false;
-static bool     bruceCaptureWasClosed = false;
-static char     brucePcapPath[20]        = {0};
-static char     bruceSessionLogPath[20]  = {0};
-static File     brucePcapFile;
-static File     bruceSessionLogFile;
-static uint32_t brucePcapFrameCount   = 0;
+static Button btnPACKETLABSetTargetBack;
+static Button btnPACKETLABSetTargetAll;
+static Button btnPACKETLABSetTargetRows[8];
+static Button btnPACKETLABSetTargetUp;
+static Button btnPACKETLABSetTargetDown;
+// PACKETLAB attack target selection (compact storage)
+static uint8_t PACKETLABTargetBssid[6] = {0};
+static char PACKETLABTargetSsid[20] = {0};  // Reduced to save DRAM
+static uint8_t PACKETLABTargetChannel = 0;
+static bool PACKETLABHasSelectedTarget = false;
+static uint32_t PACKETLABMonLastUpdateMs  = 0;
+static uint32_t PACKETLABMonLastDrawMs    = 0;  // Separate timer for screen redraws
+static int PACKETLABMonLastLineCount      = -1;  // Track content changes
+static bool PACKETLABMonLastAttackingState = false;
+static bool     PACKETLABCaptureWasClosed = false;
+static char     PACKETLABPcapPath[20]        = {0};
+static char     PACKETLABSessionLogPath[20]  = {0};
+static File     PACKETLABPcapFile;
+static File     PACKETLABSessionLogFile;
+static uint32_t PACKETLABPcapFrameCount   = 0;
 
 // Deferred PCAP ring buffer — frames are enqueued from the TX callback
-// (ISR-like context inside bruceAttackTick) and drained safely every 50ms.
+// (ISR-like context inside PACKETLABAttackTick) and drained safely every 50ms.
 // Minimal queue + fast drain (20fps screen update) = zero drops at 50fps attack rate.
-#define BRUCE_PCAP_QUEUE_SIZE 1
-struct BrucePcapEntry {
+#define PACKETLAB_PCAP_QUEUE_SIZE 1
+struct PACKETLABPcapEntry {
   uint8_t  frame[28];    // Captures deauth(26B) + 2B headroom; longer frames truncated
   uint8_t  len;
   uint8_t  channel;
   uint32_t ts_ms;
 };
-static BrucePcapEntry brucePcapQueue[BRUCE_PCAP_QUEUE_SIZE];
-static volatile uint8_t brucePcapQueueHead = 0;  // write index
-static volatile uint8_t brucePcapQueueTail = 0;  // read  index
+static PACKETLABPcapEntry PACKETLABPcapQueue[PACKETLAB_PCAP_QUEUE_SIZE];
+static volatile uint8_t PACKETLABPcapQueueHead = 0;  // write index
+static volatile uint8_t PACKETLABPcapQueueTail = 0;  // read  index
 
 #if defined(NEONDRIVE_TARGET_M5TAB5)
 static constexpr int MONITOR_MAX_LINES = 64;   // 1280×720, ample DRAM
@@ -4691,7 +4721,7 @@ static void tdisplayNavBuild() {
       tdisplayNavPush(btnP1tEngage);
       tdisplayNavPush(btnP1tManual);
       tdisplayNavPush(btnP1tSetTarget);
-      tdisplayNavPush(btnP1tBruce);
+      tdisplayNavPush(btnP1tPACKETLAB);
       break;
     case ScreenId::SP3CTER_SCREEN:
       tdisplayNavPush(btnSpBack);
@@ -4700,19 +4730,19 @@ static void tdisplayNavBuild() {
       tdisplayNavPush(btnSpSetTarget);
       tdisplayNavPush(btnSpPktLab);
       break;
-    case ScreenId::BRUCE_MENU:
-      for (int i = 0; i < 8; i++) tdisplayNavPush(bruceMenuBtns[i]);
+    case ScreenId::PACKETLAB_MENU:
+      for (int i = 0; i < 10; i++) tdisplayNavPush(PACKETLABMenuBtns[i]);
       break;
-    case ScreenId::BRUCE_MONITOR:
-      tdisplayNavPush(btnBruceMonBack);
-      tdisplayNavPush(btnBruceMonFiles);
+    case ScreenId::PACKETLAB_MONITOR:
+      tdisplayNavPush(btnPACKETLABMonBack);
+      tdisplayNavPush(btnPACKETLABMonFiles);
       break;
-    case ScreenId::BRUCE_SET_TARGET:
-      tdisplayNavPush(btnBruceSetTargetAll);
-      for (int i = 0; i < 8; i++) tdisplayNavPush(btnBruceSetTargetRows[i]);
-      tdisplayNavPush(btnBruceSetTargetUp);
-      tdisplayNavPush(btnBruceSetTargetDown);
-      tdisplayNavPush(btnBruceSetTargetBack);
+    case ScreenId::PACKETLAB_SET_TARGET:
+      tdisplayNavPush(btnPACKETLABSetTargetAll);
+      for (int i = 0; i < 8; i++) tdisplayNavPush(btnPACKETLABSetTargetRows[i]);
+      tdisplayNavPush(btnPACKETLABSetTargetUp);
+      tdisplayNavPush(btnPACKETLABSetTargetDown);
+      tdisplayNavPush(btnPACKETLABSetTargetBack);
       break;
   }
 
@@ -4832,7 +4862,7 @@ static void layoutHome() {
   homeBtns[1] = {pad + topBtnW + gapH,       topBtnY, topBtnW, gridBtnH, "WiFi"};
   homeBtns[8] = {pad + (topBtnW + gapH) * 2, topBtnY, topBtnW, gridBtnH, "GPS"};
 
-  // Main grid (2 rows x 3 cols): Logs / Target / Recon / Config / Net Scan / BRUCE.
+  // Main grid (2 rows x 3 cols): Logs / Target / Recon / Config / Net Scan / PACKETLAB.
   const char* gridLabels[6] = {"Logs", "Target", "Recon", "Config", "Net Scan", "Packet Lab"};
   int idx = 2;
   for (int r = 0; r < 2; ++r) {
@@ -7386,8 +7416,8 @@ static void disengageAutoMode() {
     yoinkLastTickMs = 0;
     yoinkDeauthCount = 0;
   } else if (autoMode == AutoMode::PROBE_FLOOD || autoMode == AutoMode::DEAUTH_FLOOD) {
-    // Stop Bruce attack (PROBE_FLOOD, DEAUTH_FLOOD)
-    bruceStopAttack();
+    // Stop PACKETLAB attack (PROBE_FLOOD, DEAUTH_FLOOD)
+    PACKETLABStopAttack();
   } else if (autoMode == AutoMode::PUSH1T) {
     push1tBssidCached = false;
     Serial.printf("[PUSH1T] stopped probes=%lu wps=%d vuln=%d\n",
@@ -7503,8 +7533,8 @@ static void engageAutoMode(AutoMode mode) {
     rawCaptureActive = true;
     pcapCaptureActive = true;
     if (sdReady && !pcapFilesOpen) initCaptureFiles();
-    // Start probe flood via Bruce
-    bruceStartProbeFlood(target.ssid.c_str(), target.channel, justGoModeDurationMs(AutoMode::PROBE_FLOOD));
+    // Start probe flood via PACKETLAB
+    PACKETLABStartProbeFlood(target.ssid.c_str(), target.channel, justGoModeDurationMs(AutoMode::PROBE_FLOOD));
     Serial.printf("[auto] PROBE_FLOOD engaged: '%s' ch=%d\n", target.ssid.c_str(), target.channel);
   } else if (mode == AutoMode::DEAUTH_FLOOD) {
     // === DEAUTH_FLOOD: Broadcast deauth to all devices on channel ===
@@ -7514,7 +7544,7 @@ static void engageAutoMode(AutoMode mode) {
     pcapCaptureActive = true;
     if (sdReady && !pcapFilesOpen) initCaptureFiles();
     // Start broadcast deauth flood
-    bruceStartDeauthBroadcast(target.channel, justGoModeDurationMs(AutoMode::DEAUTH_FLOOD));
+    PACKETLABStartDeauthBroadcast(target.channel, justGoModeDurationMs(AutoMode::DEAUTH_FLOOD));
     Serial.printf("[auto] DEAUTH_FLOOD engaged: ch=%d (broadcast to all)\n", target.channel);
   } else if (mode == AutoMode::PUSH1T) {
     // === PUSH1T: WPS beacon detection + active probing ===
@@ -8778,6 +8808,10 @@ static void startWebServer() {
     doc["apMode"] = apMode;
     doc["webServer"] = webServerRunning;
     doc["sdReady"] = sdReady;
+    doc["usb_msc_active"] = nd_usb_msc_active();
+    doc["usb_msc_enabled"] = nd_usb_msc_enabled();
+    doc["sd_host_mounted"] = nd_usb_msc_host_mounted();
+    doc["sd_app_locked"] = nd_usb_msc_sd_app_locked();
     doc["packets"] = sniffPacketCount;
     doc["beacons"] = monBeaconHits;
     doc["handshakes"] = monHandshakeHits;
@@ -8793,6 +8827,33 @@ static void startWebServer() {
       yoink["deauths"] = YoinkEngine::getDeauthCount();
       yoink["target"] = YoinkEngine::getTargetSSID();
     }
+    String out;
+    serializeJson(doc, out);
+    webServer.send(200, "application/json", out);
+  });
+
+  webServer.on("/api/usb/msc", HTTP_ANY, [](){
+    bool changed = false;
+    bool enabled = nd_usb_msc_enabled();
+
+    if (webServer.hasArg("enabled")) {
+      const int want = webServer.arg("enabled").toInt();
+      enabled = (want != 0);
+      nd_usb_msc_set_enabled(enabled);
+      // Force app-side remount path through lock checks on next SD access.
+      sdReady = false;
+      changed = true;
+      Serial.printf("[web] /api/usb/msc enabled=%d\n", enabled ? 1 : 0);
+    }
+
+    JsonDocument doc;
+    doc["ok"] = true;
+    doc["changed"] = changed;
+    doc["usb_msc_active"] = nd_usb_msc_active();
+    doc["usb_msc_enabled"] = nd_usb_msc_enabled();
+    doc["sd_host_mounted"] = nd_usb_msc_host_mounted();
+    doc["sd_app_locked"] = nd_usb_msc_sd_app_locked();
+    doc["sdReady"] = sdReady;
     String out;
     serializeJson(doc, out);
     webServer.send(200, "application/json", out);
@@ -13282,17 +13343,17 @@ static void jammitModeTick() {
             (unsigned)jammitLastScore, (unsigned long)jammitDeauthCount);
 }
 
-// ---------- BRUCE WiFi Attack Menu ----------
-static bool bruceMenuShowStats = false;
-static int bruceTargetScroll = 0;
-static int bruceTargetListTopY = 100;
-static int bruceTargetListItemH = 28;
-static int bruceTargetListItemsPerScreen = 4;
-static int bruceTargetListX = 10;
-static int bruceTargetListW = 300;
+// ---------- PACKETLAB WiFi Attack Menu ----------
+static bool PACKETLABMenuShowStats = false;
+static int PACKETLABTargetScroll = 0;
+static int PACKETLABTargetListTopY = 100;
+static int PACKETLABTargetListItemH = 28;
+static int PACKETLABTargetListItemsPerScreen = 4;
+static int PACKETLABTargetListX = 10;
+static int PACKETLABTargetListW = 300;
 
-// Draw the Bruce Set Target selection screen
-void drawBruceSetTarget() {
+// Draw the PACKETLAB Set Target selection screen
+void drawPACKETLABSetTarget() {
   tft.fillScreen(TFT_BLACK);
   drawHeader("SELECT ATTACK TARGET");
 
@@ -13304,87 +13365,87 @@ void drawBruceSetTarget() {
 
   static const char* rowLabels[8] = {"AP1", "AP2", "AP3", "AP4", "AP5", "AP6", "AP7", "AP8"};
   for (int i = 0; i < 8; i++) {
-    btnBruceSetTargetRows[i] = {0, 0, 0, 0, rowLabels[i]};
+    btnPACKETLABSetTargetRows[i] = {0, 0, 0, 0, rowLabels[i]};
   }
-  btnBruceSetTargetAll = {0, 0, 0, 0, "ALL"};
-  btnBruceSetTargetUp = {0, 0, 0, 0, "^"};
-  btnBruceSetTargetDown = {0, 0, 0, 0, "v"};
+  btnPACKETLABSetTargetAll = {0, 0, 0, 0, "ALL"};
+  btnPACKETLABSetTargetUp = {0, 0, 0, 0, "^"};
+  btnPACKETLABSetTargetDown = {0, 0, 0, 0, "v"};
 
   const int controlGap = compact ? 3 : 6;
   int controlW = compact ? 24 : 30;
 
-  bruceTargetListX = content.x;
+  PACKETLABTargetListX = content.x;
   int listPanelRight = uiRightLimitForBand(content.y, 16);
   if (listPanelRight < (content.x + 100)) listPanelRight = content.x + content.w;
-  int listPanelW = listPanelRight - bruceTargetListX;
+  int listPanelW = listPanelRight - PACKETLABTargetListX;
   if (listPanelW < 100) listPanelW = 100;
   if (listPanelW < (controlW + 40)) controlW = 0;
 
-  bruceTargetListW = listPanelW - (controlW > 0 ? (controlW + controlGap) : 0);
-  if (bruceTargetListW < 80) bruceTargetListW = 80;
+  PACKETLABTargetListW = listPanelW - (controlW > 0 ? (controlW + controlGap) : 0);
+  if (PACKETLABTargetListW < 80) PACKETLABTargetListW = 80;
 
   const int metaY = content.y + 1;
-  bruceTargetListTopY = metaY + 12;
+  PACKETLABTargetListTopY = metaY + 12;
   const int listBottom = bottom.y - 14;
-  const int listH = max(compact ? 54 : 88, listBottom - bruceTargetListTopY);
+  const int listH = max(compact ? 54 : 88, listBottom - PACKETLABTargetListTopY);
 
   const int desiredRows = compact ? 6 : 5;
-  bruceTargetListItemH = clampi((listH - 2) / desiredRows, compact ? 14 : 20, compact ? 20 : 30);
-  bruceTargetListItemsPerScreen = clampi(listH / bruceTargetListItemH, 3, 8);
+  PACKETLABTargetListItemH = clampi((listH - 2) / desiredRows, compact ? 14 : 20, compact ? 20 : 30);
+  PACKETLABTargetListItemsPerScreen = clampi(listH / PACKETLABTargetListItemH, 3, 8);
 
-  const int visibleNetworks = max(1, bruceTargetListItemsPerScreen - 1);
+  const int visibleNetworks = max(1, PACKETLABTargetListItemsPerScreen - 1);
   int maxScroll = apCount - visibleNetworks;
   if (maxScroll < 0) maxScroll = 0;
-  bruceTargetScroll = clampi(bruceTargetScroll, 0, maxScroll);
+  PACKETLABTargetScroll = clampi(PACKETLABTargetScroll, 0, maxScroll);
 
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   applyFontSm();
   tft.setTextDatum(TL_DATUM);
   char meta[72];
   if (apCount > 0) {
-    const int first = bruceTargetScroll + 1;
-    const int last = min(apCount, bruceTargetScroll + visibleNetworks);
+    const int first = PACKETLABTargetScroll + 1;
+    const int last = min(apCount, PACKETLABTargetScroll + visibleNetworks);
     snprintf(meta, sizeof(meta), "WiFi Networks: %d  showing %d-%d", apCount, first, last);
   } else {
     snprintf(meta, sizeof(meta), "WiFi Networks: 0  (run scan first)");
   }
-  tft.drawString(meta, bruceTargetListX, metaY);
+  tft.drawString(meta, PACKETLABTargetListX, metaY);
 
   // "Attack All" row
-  const bool allSelected = (bruceHasSelectedTarget && bruceTargetSsid[0] == '\0');
-  btnBruceSetTargetAll = {bruceTargetListX, bruceTargetListTopY, bruceTargetListW, bruceTargetListItemH, "ALL"};
-  tft.fillRect(btnBruceSetTargetAll.x, btnBruceSetTargetAll.y, btnBruceSetTargetAll.w, btnBruceSetTargetAll.h,
+  const bool allSelected = (PACKETLABHasSelectedTarget && PACKETLABTargetSsid[0] == '\0');
+  btnPACKETLABSetTargetAll = {PACKETLABTargetListX, PACKETLABTargetListTopY, PACKETLABTargetListW, PACKETLABTargetListItemH, "ALL"};
+  tft.fillRect(btnPACKETLABSetTargetAll.x, btnPACKETLABSetTargetAll.y, btnPACKETLABSetTargetAll.w, btnPACKETLABSetTargetAll.h,
                allSelected ? 0x03A0 : TFT_BLACK);
-  tft.drawRect(btnBruceSetTargetAll.x, btnBruceSetTargetAll.y, btnBruceSetTargetAll.w, btnBruceSetTargetAll.h,
+  tft.drawRect(btnPACKETLABSetTargetAll.x, btnPACKETLABSetTargetAll.y, btnPACKETLABSetTargetAll.w, btnPACKETLABSetTargetAll.h,
                allSelected ? TFT_CYAN : TFT_GREEN);
   tft.setTextColor(allSelected ? TFT_WHITE : TFT_GREEN, allSelected ? 0x03A0 : TFT_BLACK);
-  tft.drawString(">> ATTACK ALL APs IN AREA", bruceTargetListX + 4, bruceTargetListTopY + (compact ? 3 : 6));
+  tft.drawString(">> ATTACK ALL APs IN AREA", PACKETLABTargetListX + 4, PACKETLABTargetListTopY + (compact ? 3 : 6));
 
   // Per-AP rows
   const int rowTextInsetY = compact ? 3 : 6;
   for (int row = 0; row < visibleNetworks; row++) {
-    const int apIdx = bruceTargetScroll + row;
-    const int rowY = bruceTargetListTopY + bruceTargetListItemH + (row * bruceTargetListItemH);
+    const int apIdx = PACKETLABTargetScroll + row;
+    const int rowY = PACKETLABTargetListTopY + PACKETLABTargetListItemH + (row * PACKETLABTargetListItemH);
     if (apIdx < 0 || apIdx >= apCount) {
-      tft.fillRect(bruceTargetListX, rowY, bruceTargetListW, bruceTargetListItemH, TFT_BLACK);
-      tft.drawRect(bruceTargetListX, rowY, bruceTargetListW, bruceTargetListItemH, TFT_DARKGREY);
+      tft.fillRect(PACKETLABTargetListX, rowY, PACKETLABTargetListW, PACKETLABTargetListItemH, TFT_BLACK);
+      tft.drawRect(PACKETLABTargetListX, rowY, PACKETLABTargetListW, PACKETLABTargetListItemH, TFT_DARKGREY);
       continue;
     }
 
-    btnBruceSetTargetRows[row] = {bruceTargetListX, rowY, bruceTargetListW, bruceTargetListItemH, rowLabels[row]};
+    btnPACKETLABSetTargetRows[row] = {PACKETLABTargetListX, rowY, PACKETLABTargetListW, PACKETLABTargetListItemH, rowLabels[row]};
 
     const bool isSelected = (apIdx == apSelected);
     const uint16_t fill = isSelected ? 0x03A0 : TFT_BLACK;
     const uint16_t border = isSelected ? TFT_CYAN : TFT_DARKGREY;
     const uint16_t fg = isSelected ? TFT_WHITE : TFT_YELLOW;
 
-    tft.fillRect(bruceTargetListX, rowY, bruceTargetListW, bruceTargetListItemH, fill);
-    tft.drawRect(bruceTargetListX, rowY, bruceTargetListW, bruceTargetListItemH, border);
+    tft.fillRect(PACKETLABTargetListX, rowY, PACKETLABTargetListW, PACKETLABTargetListItemH, fill);
+    tft.drawRect(PACKETLABTargetListX, rowY, PACKETLABTargetListW, PACKETLABTargetListItemH, border);
     tft.setTextColor(fg, fill);
 
     String ssid = aps[apIdx].ssid.isEmpty() ? String("(hidden)") : aps[apIdx].ssid;
     String rowLine = ssid + " | CH " + String(aps[apIdx].channel) + " | " + String(aps[apIdx].rssi) + "dBm";
-    const int rowTextMaxW = bruceTargetListW - 8;
+    const int rowTextMaxW = PACKETLABTargetListW - 8;
     bool trimmed = false;
     while (rowLine.length() > 4 && tft.textWidth(rowLine) > rowTextMaxW) {
       rowLine.remove(rowLine.length() - 1);
@@ -13396,24 +13457,24 @@ void drawBruceSetTarget() {
       }
       rowLine += "...";
     }
-    tft.drawString(rowLine, bruceTargetListX + 4, rowY + rowTextInsetY);
+    tft.drawString(rowLine, PACKETLABTargetListX + 4, rowY + rowTextInsetY);
   }
 
   // Scroll controls use the right-side gutter on compact displays.
   if (controlW > 0) {
-    const int controlX = bruceTargetListX + bruceTargetListW + controlGap;
-    const int controlH = max(bruceTargetListItemH, compact ? 18 : 24);
-    const bool canScrollUp = (bruceTargetScroll > 0);
-    const bool canScrollDown = (bruceTargetScroll < maxScroll);
+    const int controlX = PACKETLABTargetListX + PACKETLABTargetListW + controlGap;
+    const int controlH = max(PACKETLABTargetListItemH, compact ? 18 : 24);
+    const bool canScrollUp = (PACKETLABTargetScroll > 0);
+    const bool canScrollDown = (PACKETLABTargetScroll < maxScroll);
 
-    btnBruceSetTargetUp = {controlX, bruceTargetListTopY, controlW, controlH, "^"};
-    btnBruceSetTargetDown = {controlX, bruceTargetListTopY + listH - controlH, controlW, controlH, "v"};
+    btnPACKETLABSetTargetUp = {controlX, PACKETLABTargetListTopY, controlW, controlH, "^"};
+    btnPACKETLABSetTargetDown = {controlX, PACKETLABTargetListTopY + listH - controlH, controlW, controlH, "v"};
 
-    drawButton(btnBruceSetTargetUp,
+    drawButton(btnPACKETLABSetTargetUp,
                canScrollUp ? TFT_DARKGREY : TFT_BLACK,
                canScrollUp ? TFT_CYAN : TFT_DARKGREY,
                canScrollUp ? TFT_WHITE : TFT_DARKGREY);
-    drawButton(btnBruceSetTargetDown,
+    drawButton(btnPACKETLABSetTargetDown,
                canScrollDown ? TFT_DARKGREY : TFT_BLACK,
                canScrollDown ? TFT_CYAN : TFT_DARKGREY,
                canScrollDown ? TFT_WHITE : TFT_DARKGREY);
@@ -13421,14 +13482,14 @@ void drawBruceSetTarget() {
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(TFT_CYAN, TFT_BLACK);
     char scrollInfo[18];
-    snprintf(scrollInfo, sizeof(scrollInfo), "%d/%d", bruceTargetScroll + 1, maxScroll + 1);
-    tft.drawString(scrollInfo, controlX + (controlW / 2), bruceTargetListTopY + (listH / 2) - 2);
+    snprintf(scrollInfo, sizeof(scrollInfo), "%d/%d", PACKETLABTargetScroll + 1, maxScroll + 1);
+    tft.drawString(scrollInfo, controlX + (controlW / 2), PACKETLABTargetListTopY + (listH / 2) - 2);
     tft.setTextDatum(TL_DATUM);
   }
 
   // Bottom bar
-  btnBruceSetTargetBack = {bottom.x, bottom.y, bottom.w, UI_BUTTON_H, "Back"};
-  drawButton(btnBruceSetTargetBack, TFT_BLACK, TFT_NAVY, TFT_WHITE);
+  btnPACKETLABSetTargetBack = {bottom.x, bottom.y, bottom.w, UI_BUTTON_H, "Back"};
+  drawButton(btnPACKETLABSetTargetBack, TFT_BLACK, TFT_NAVY, TFT_WHITE);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   String hint = "Tap row to select  |  BTN1 Next  BTN2 Select";
@@ -13440,21 +13501,589 @@ void drawBruceSetTarget() {
   drawBorder();
 }
 
-// The canonical drawBruceMenu implementation lives here so it has access to
-// the Button struct, bruceMenuBtns, tft, and all draw helpers.
-void drawBruceMenu() {
+// The canonical drawPACKETLABMenu implementation lives here so it has access to
+// the Button struct, PACKETLABMenuBtns, tft, and all draw helpers.
+void drawPACKETLABMenu() {
   tft.fillScreen(TFT_BLACK);
-  drawHeader("BRUCE WiFi Attacks");
+  drawHeader("NEONDRIVE :: PACKET LAB");
   drawUniversalBackground();
 
   const int w = tft.width();
   const int h = tft.height();
+#if defined(NEONDRIVE_TARGET_M5TAB5)
+  if ((w >= 1000 && h >= 600) || (h >= 1000 && w >= 680)) {
+    const UiRect content = computeContentRect();
+    const UiRect bottom = computeBottomBarRect();
+    const int safeLeft = uiActionDockSafeLeft();
+    const int zoneLeft = content.x;
+    const int zoneRight = min(content.x + content.w, safeLeft - 1);
+    const int zoneW = max(160, zoneRight - zoneLeft);
+
+    const int rightPanelW = max(220, zoneW / 4);
+    const int mainW = zoneW - rightPanelW - 10;
+    const int mainX = zoneLeft;
+    const int sideX = mainX + mainW + 10;
+    const int topY = content.y + 2;
+
+    auto neonPanel = [&](int x, int y, int ww, int hh, uint16_t edge, uint16_t glow) {
+      tft.fillRoundRect(x, y, ww, hh, 8, TFT_BLACK);
+      tft.drawRoundRect(x, y, ww, hh, 8, edge);
+      tft.drawRoundRect(x + 2, y + 2, ww - 4, hh - 4, 6, glow);
+    };
+
+    auto drawSignalGlyph = [&](int x, int y, uint16_t c) {
+      tft.fillRect(x + 0, y + 18, 4, 10, c);
+      tft.fillRect(x + 7, y + 14, 4, 14, c);
+      tft.fillRect(x + 14, y + 10, 4, 18, c);
+      tft.fillRect(x + 21, y + 6, 4, 22, c);
+    };
+
+    auto drawCardIcon = [&](int idx, int x, int y, uint16_t c) {
+      switch (idx) {
+        case 0: // Deauth flood
+          tft.drawCircle(x + 16, y + 16, 8, c);
+          tft.drawLine(x + 16, y + 2, x + 16, y + 30, c);
+          tft.drawLine(x + 2, y + 16, x + 30, y + 16, c);
+          break;
+        case 1: // Beacon spam
+          tft.drawCircle(x + 8, y + 16, 4, c);
+          tft.drawCircle(x + 8, y + 16, 9, c);
+          tft.drawCircle(x + 8, y + 16, 14, c);
+          break;
+        case 2: // Probe
+          tft.drawCircle(x + 13, y + 13, 8, c);
+          tft.drawLine(x + 20, y + 20, x + 29, y + 29, c);
+          break;
+        case 3: // Deauth all
+          tft.fillTriangle(x + 16, y + 2, x + 30, y + 28, x + 2, y + 28, c);
+          break;
+        case 4: // Push1t
+          tft.fillTriangle(x + 10, y + 2, x + 22, y + 2, x + 14, y + 18, c);
+          tft.fillTriangle(x + 10, y + 18, x + 22, y + 18, x + 12, y + 30, c);
+          break;
+        case 5: // Sp3cter
+          tft.drawRect(x + 2, y + 6, 26, 20, c);
+          tft.drawFastHLine(x + 6, y + 11, 18, c);
+          tft.drawFastHLine(x + 6, y + 16, 14, c);
+          tft.drawFastHLine(x + 6, y + 21, 10, c);
+          break;
+        case 6: // Y0INK
+          tft.drawCircle(x + 10, y + 10, 7, c);
+          tft.drawLine(x + 15, y + 15, x + 30, y + 30, c);
+          break;
+        case 7: // JAMM!T
+          tft.fillRect(x + 2, y + 14, 28, 4, c);
+          tft.drawLine(x + 4, y + 10, x + 10, y + 6, c);
+          tft.drawLine(x + 12, y + 10, x + 18, y + 6, c);
+          tft.drawLine(x + 20, y + 10, x + 26, y + 6, c);
+          break;
+        case 8: // Set target
+          tft.drawCircle(x + 16, y + 16, 10, c);
+          tft.drawCircle(x + 16, y + 16, 4, c);
+          break;
+        case 9: // Back
+          tft.drawLine(x + 24, y + 6, x + 10, y + 16, c);
+          tft.drawLine(x + 10, y + 16, x + 24, y + 26, c);
+          break;
+      }
+    };
+
+    if (h > w) {
+      const UiRect content = computeContentRect();
+      const UiRect bottom = computeBottomBarRect();
+      const int x = content.x;
+      const int y = content.y + 2;
+      const int ww = content.w;
+      const int statusGap = 8;
+
+      // Alert strip
+      neonPanel(x, y, ww, 48, TFT_MAGENTA, 0x780F);
+      applyFontMd();
+      tft.setTextDatum(TL_DATUM);
+      tft.setTextColor(PACKETLABHasSelectedTarget ? TFT_CYAN : TFT_RED, TFT_BLACK);
+      tft.drawString(PACKETLABHasSelectedTarget ? "TARGET READY // ARMED" : "NO TARGET // SELECT AP TO ARM", x + 14, y + 14);
+
+      // Telemetry strip
+      const int teleY = y + 48 + statusGap;
+      const int teleH = 78;
+      neonPanel(x, teleY, ww, teleH, TFT_CYAN, TFT_DARKGREY);
+      const int tColW = ww / 3;
+      applyFontSm();
+      tft.setTextColor(0xFD20, TFT_BLACK);
+      tft.drawString("TARGET", x + 12, teleY + 8);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.drawString(PACKETLABHasSelectedTarget ? (PACKETLABTargetSsid[0] ? PACKETLABTargetSsid : "ALL APs") : "NO TARGET", x + 12, teleY + 28);
+
+      tft.setTextColor(0x07FF, TFT_BLACK);
+      tft.drawString("CHANNEL", x + tColW + 12, teleY + 8);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      if (PACKETLABHasSelectedTarget && PACKETLABTargetSsid[0]) {
+        char ch[8];
+        snprintf(ch, sizeof(ch), "%d", PACKETLABTargetChannel);
+        tft.drawString(ch, x + tColW + 12, teleY + 28);
+      } else {
+        tft.drawString("--", x + tColW + 12, teleY + 28);
+      }
+
+      tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      tft.drawString("MODE", x + (2 * tColW) + 12, teleY + 8);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.drawString(PACKETLABIsAttacking() ? "ACTIVE" : "IDLE", x + (2 * tColW) + 12, teleY + 28);
+
+      // Main 2-column action cards (5 rows)
+      const int gridTop = teleY + teleH + statusGap;
+      const int statusPanelH = 112;
+      const int enginePanelH = 86;
+      const int gridBottom = bottom.y - statusPanelH - enginePanelH - (statusGap * 2);
+      const int gapX = 12;
+      const int gapY = 10;
+      const int btnW = (ww - gapX) / 2;
+      const int btnH = max(58, (gridBottom - gridTop - (gapY * 4)) / 5);
+      const int row1Y = gridTop;
+      const int row2Y = row1Y + btnH + gapY;
+      const int row3Y = row2Y + btnH + gapY;
+      const int row4Y = row3Y + btnH + gapY;
+      const int row5Y = row4Y + btnH + gapY;
+
+      PACKETLABMenuBtns[0] = {x,               row1Y, btnW, btnH, "DEAUTH FLOOD"};
+      PACKETLABMenuBtns[1] = {x + btnW + gapX, row1Y, btnW, btnH, "BEACON SPAM"};
+      PACKETLABMenuBtns[2] = {x,               row2Y, btnW, btnH, "PROBE FLOOD"};
+      PACKETLABMenuBtns[3] = {x + btnW + gapX, row2Y, btnW, btnH, "DEAUTH ALL"};
+      PACKETLABMenuBtns[4] = {x,               row3Y, btnW, btnH, "PUSH!T"};
+      PACKETLABMenuBtns[5] = {x + btnW + gapX, row3Y, btnW, btnH, "SP3CTER"};
+      PACKETLABMenuBtns[6] = {x,               row4Y, btnW, btnH, "Y0INK"};
+      PACKETLABMenuBtns[7] = {x + btnW + gapX, row4Y, btnW, btnH, "JAMM!T"};
+      PACKETLABMenuBtns[8] = {x,               row5Y, btnW, btnH, "SET TARGET"};
+      PACKETLABMenuBtns[9] = {x + btnW + gapX, row5Y, btnW, btnH, PACKETLABIsAttacking() ? "STOP" : "BACK"};
+
+      const uint16_t edgeCols[10] = {
+        0xFD20, 0x07FF, TFT_GREEN, TFT_RED, TFT_MAGENTA, 0x07FF, TFT_GREEN, 0xFD20, TFT_CYAN, TFT_CYAN
+      };
+
+      for (int i = 0; i < 10; ++i) {
+        const Button& b = PACKETLABMenuBtns[i];
+        neonPanel(b.x, b.y, b.w, b.h, edgeCols[i], TFT_DARKGREY);
+        drawCardIcon(i, b.x + 10, b.y + (b.h / 2) - 16, edgeCols[i]);
+        applyFontMd();
+        tft.setTextColor(edgeCols[i], TFT_BLACK);
+        tft.setTextDatum(TL_DATUM);
+        tft.drawString(b.label, b.x + 54, b.y + (b.h / 2) - 10);
+      }
+
+      // System status strip (single row)
+      const int statY = gridBottom + statusGap;
+      neonPanel(x, statY, ww, statusPanelH, TFT_MAGENTA, 0x780F);
+      tft.setTextDatum(TC_DATUM);
+      tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
+      applyFontMd();
+      tft.drawString("SYSTEM STATUS", x + ww / 2, statY + 10);
+      applyFontSm();
+      tft.setTextDatum(TL_DATUM);
+
+      const int infoY = statY + 38;
+      const int infoW = ww / 5;
+      const int sig = hasTarget ? target.rssi : WiFi.RSSI();
+      const uint32_t secs = millis() / 1000U;
+      const uint32_t hh = secs / 3600U;
+      const uint32_t mm = (secs % 3600U) / 60U;
+      const uint32_t ss = secs % 60U;
+      char up[24];
+      snprintf(up, sizeof(up), "%02lu:%02lu:%02lu", (unsigned long)hh, (unsigned long)mm, (unsigned long)ss);
+      char rssiBuf[20];
+      snprintf(rssiBuf, sizeof(rssiBuf), "%d dBm", sig);
+      char cbuf[16];
+      snprintf(cbuf, sizeof(cbuf), "%u", (unsigned)jammitClientCount);
+
+      tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      tft.drawString("IFACE", x + 10, infoY);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.drawString("wlan0", x + 10, infoY + 16);
+
+      tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      tft.drawString("SIGNAL", x + infoW + 10, infoY);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.drawString(rssiBuf, x + infoW + 10, infoY + 16);
+
+      tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      tft.drawString("CLIENTS", x + (2 * infoW) + 10, infoY);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.drawString(cbuf, x + (2 * infoW) + 10, infoY + 16);
+
+      tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      tft.drawString("UPTIME", x + (3 * infoW) + 10, infoY);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.drawString(up, x + (3 * infoW) + 10, infoY + 16);
+
+      tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      tft.drawString("MODULE", x + (4 * infoW) + 10, infoY);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.drawString(PACKETLABIsAttacking() ? "ACTIVE" : "READY", x + (4 * infoW) + 10, infoY + 16);
+
+      // Attack engine strip
+      const int engY = statY + statusPanelH + statusGap;
+      neonPanel(x, engY, ww, enginePanelH, TFT_MAGENTA, TFT_DARKGREY);
+      tft.setTextColor(TFT_CYAN, TFT_BLACK);
+      applyFontMd();
+      tft.setTextDatum(TL_DATUM);
+      tft.drawString("ATTACK ENGINE STATUS", x + 12, engY + 10);
+      tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      tft.drawString(PACKETLABIsAttacking() ? "ACTIVE" : "READY", x + 12, engY + 34);
+      const int barX = x + 230;
+      const int barY = engY + 42;
+      const int barW = max(120, ww - 250);
+      tft.fillRect(barX, barY, barW, 14, 0x2104);
+      const int fillW = PACKETLABIsAttacking() ? barW : (barW * 9 / 10);
+      tft.fillRect(barX, barY, fillW, 14, 0x07FF);
+
+      drawBorder();
+      return;
+    }
+
+    // Alert strip
+    neonPanel(mainX, topY, mainW, 34, TFT_MAGENTA, 0x780F);
+    tft.setTextDatum(TL_DATUM);
+    applyFontSm();
+    tft.setTextColor(PACKETLABHasSelectedTarget ? TFT_CYAN : TFT_RED, TFT_BLACK);
+    if (PACKETLABHasSelectedTarget) {
+      if (PACKETLABTargetSsid[0] == '\0') {
+        tft.drawString("TARGET READY // ALL APs SELECTED", mainX + 10, topY + 10);
+      } else {
+        char b[80];
+        snprintf(b, sizeof(b), "TARGET READY // %s  CH%d", PACKETLABTargetSsid, PACKETLABTargetChannel);
+        tft.drawString(b, mainX + 10, topY + 10);
+      }
+    } else {
+      tft.drawString("NO TARGET // SELECT AP TO ARM", mainX + 10, topY + 10);
+    }
+
+    // Telemetry strip
+    const int teleY = topY + 40;
+    neonPanel(mainX, teleY, mainW, 52, TFT_CYAN, TFT_DARKGREY);
+    const int colW = mainW / 3;
+    tft.setTextColor(0xFD20, TFT_BLACK);
+    tft.drawString("TARGET", mainX + 10, teleY + 7);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(PACKETLABHasSelectedTarget ? (PACKETLABTargetSsid[0] ? PACKETLABTargetSsid : "ALL APs") : "NO TARGET", mainX + 10, teleY + 24);
+
+    tft.setTextColor(0x07FF, TFT_BLACK);
+    tft.drawString("CHANNEL", mainX + colW + 10, teleY + 7);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    if (PACKETLABHasSelectedTarget && PACKETLABTargetSsid[0]) {
+      char ch[8];
+      snprintf(ch, sizeof(ch), "%d", PACKETLABTargetChannel);
+      tft.drawString(ch, mainX + colW + 10, teleY + 24);
+    } else {
+      tft.drawString("--", mainX + colW + 10, teleY + 24);
+    }
+
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString("MODE", mainX + (colW * 2) + 10, teleY + 7);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(PACKETLABIsAttacking() ? "ACTIVE" : "IDLE", mainX + (colW * 2) + 10, teleY + 24);
+
+    // Button grid area
+    const int gridTop = teleY + 58;
+    const int gridBottom = bottom.y - 62;
+    const int gridH = max(240, gridBottom - gridTop);
+    const int gapX = 10;
+    const int gapY = 10;
+    const int btnW = (mainW - gapX) / 2;
+    const int btnH = max(44, (gridH - (gapY * 4)) / 5);
+    const int row1Y = gridTop;
+    const int row2Y = row1Y + btnH + gapY;
+    const int row3Y = row2Y + btnH + gapY;
+    const int row4Y = row3Y + btnH + gapY;
+    const int row5Y = row4Y + btnH + gapY;
+
+    PACKETLABMenuBtns[0] = {mainX,               row1Y, btnW, btnH, "DEAUTH FLOOD"};
+    PACKETLABMenuBtns[1] = {mainX + btnW + gapX, row1Y, btnW, btnH, "BEACON SPAM"};
+    PACKETLABMenuBtns[2] = {mainX,               row2Y, btnW, btnH, "PROBE FLOOD"};
+    PACKETLABMenuBtns[3] = {mainX + btnW + gapX, row2Y, btnW, btnH, "DEAUTH ALL"};
+    PACKETLABMenuBtns[4] = {mainX,               row3Y, btnW, btnH, "PUSH!T"};
+    PACKETLABMenuBtns[5] = {mainX + btnW + gapX, row3Y, btnW, btnH, "SP3CTER"};
+    PACKETLABMenuBtns[6] = {mainX,               row4Y, btnW, btnH, "Y0INK"};
+    PACKETLABMenuBtns[7] = {mainX + btnW + gapX, row4Y, btnW, btnH, "JAMM!T"};
+    PACKETLABMenuBtns[8] = {mainX,               row5Y, btnW, btnH, "SET TARGET"};
+    PACKETLABMenuBtns[9] = {mainX + btnW + gapX, row5Y, btnW, btnH, PACKETLABIsAttacking() ? "STOP" : "BACK"};
+
+    const uint16_t edgeCols[10] = {
+      0xFD20, 0x07FF, TFT_GREEN, TFT_RED, TFT_MAGENTA, 0x07FF, TFT_GREEN, 0xFD20, TFT_CYAN, TFT_CYAN
+    };
+
+    for (int i = 0; i < 10; ++i) {
+      const Button& b = PACKETLABMenuBtns[i];
+      neonPanel(b.x, b.y, b.w, b.h, edgeCols[i], TFT_DARKGREY);
+      drawCardIcon(i, b.x + 10, b.y + (b.h / 2) - 16, edgeCols[i]);
+      applyFontSm();
+      tft.setTextColor(edgeCols[i], TFT_BLACK);
+      tft.setTextDatum(TL_DATUM);
+      tft.drawString(b.label, b.x + 52, b.y + (b.h / 2) - 8);
+    }
+
+    // Right status panel
+    neonPanel(sideX, topY + 40, rightPanelW, gridBottom - (topY + 40), TFT_MAGENTA, 0x780F);
+    tft.setTextDatum(TC_DATUM);
+    tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
+    applyFontMd();
+    tft.drawString("SYSTEM STATUS", sideX + rightPanelW / 2, topY + 52);
+
+    applyFontSm();
+    int sy = topY + 80;
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString("INTERFACE", sideX + 12, sy);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("wlan0", sideX + 12, sy + 16);
+    sy += 48;
+
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString("SIGNAL", sideX + 12, sy);
+    drawSignalGlyph(sideX + 12, sy + 10, TFT_GREEN);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    char rssiBuf[24];
+    int sig = hasTarget ? target.rssi : WiFi.RSSI();
+    snprintf(rssiBuf, sizeof(rssiBuf), "%d dBm", sig);
+    tft.drawString(rssiBuf, sideX + 48, sy + 16);
+    sy += 54;
+
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString("CLIENTS", sideX + 12, sy);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    char cbuf[16];
+    snprintf(cbuf, sizeof(cbuf), "%u", (unsigned)jammitClientCount);
+    tft.drawString(cbuf, sideX + 12, sy + 16);
+    sy += 46;
+
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString("UPTIME", sideX + 12, sy);
+    const uint32_t secs = millis() / 1000U;
+    const uint32_t hh = secs / 3600U;
+    const uint32_t mm = (secs % 3600U) / 60U;
+    const uint32_t ss = secs % 60U;
+    char up[24];
+    snprintf(up, sizeof(up), "%02lu:%02lu:%02lu", (unsigned long)hh, (unsigned long)mm, (unsigned long)ss);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(up, sideX + 12, sy + 16);
+
+    // Bottom engine status
+    const int statY = bottom.y - 54;
+    neonPanel(mainX, statY, mainW + rightPanelW + 10, 50, TFT_MAGENTA, TFT_DARKGREY);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.drawString("ATTACK ENGINE STATUS", mainX + 10, statY + 6);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString(PACKETLABIsAttacking() ? "ACTIVE" : "READY", mainX + 10, statY + 24);
+    tft.fillRect(mainX + 220, statY + 26, mainW + rightPanelW - 260, 12, 0x2104);
+    const int barW = (mainW + rightPanelW - 260);
+    const int fillW = PACKETLABIsAttacking() ? barW : (barW * 9 / 10);
+    tft.fillRect(mainX + 220, statY + 26, fillW, 12, 0x07FF);
+
+    drawBorder();
+    return;
+  }
+#endif
+
+#if defined(NEONDRIVE_TARGET_CYD)
+  {
+    const UiRect content = computeContentRect();
+    const UiRect bottom = computeBottomBarRect();
+    const int safeLeft = uiActionDockSafeLeft();
+    const int zoneLeft = content.x;
+    const int zoneRight = min(content.x + content.w, safeLeft - 1);
+    const int zoneW = max(120, zoneRight - zoneLeft);
+    const bool cydWide = (w >= 420);
+
+    auto neonPanelCyd = [&](int x, int y, int ww, int hh, int r, uint16_t edge, uint16_t glow) {
+      tft.fillRoundRect(x, y, ww, hh, r, TFT_BLACK);
+      tft.drawRoundRect(x, y, ww, hh, r, edge);
+      if (ww > 6 && hh > 6) tft.drawRoundRect(x + 2, y + 2, ww - 4, hh - 4, max(2, r - 2), glow);
+    };
+
+    auto drawSignalGlyphCyd = [&](int x, int y, int bw, int bh, uint16_t c) {
+      tft.fillRect(x + (bw * 0 / 4), y + (bh * 3 / 5), max(2, bw / 6), (bh * 2 / 5), c);
+      tft.fillRect(x + (bw * 1 / 4), y + (bh * 2 / 5), max(2, bw / 6), (bh * 3 / 5), c);
+      tft.fillRect(x + (bw * 2 / 4), y + (bh * 1 / 5), max(2, bw / 6), (bh * 4 / 5), c);
+      tft.fillRect(x + (bw * 3 / 4), y + (bh * 0 / 5), max(2, bw / 6), bh, c);
+    };
+
+    auto drawCardIconCyd = [&](int idx, int x, int y, int s, uint16_t c) {
+      const int cxy = s / 2;
+      switch (idx) {
+        case 0:
+          tft.drawCircle(x + cxy, y + cxy, max(4, s / 4), c);
+          tft.drawLine(x + cxy, y + 2, x + cxy, y + s - 2, c);
+          tft.drawLine(x + 2, y + cxy, x + s - 2, y + cxy, c);
+          break;
+        case 1:
+          tft.drawCircle(x + max(5, s / 4), y + cxy, max(3, s / 8), c);
+          tft.drawCircle(x + max(5, s / 4), y + cxy, max(6, s / 4), c);
+          tft.drawCircle(x + max(5, s / 4), y + cxy, max(9, (3 * s) / 8), c);
+          break;
+        case 2:
+          tft.drawCircle(x + cxy - 2, y + cxy - 2, max(4, s / 4), c);
+          tft.drawLine(x + cxy + 2, y + cxy + 2, x + s - 3, y + s - 3, c);
+          break;
+        case 3:
+          tft.fillTriangle(x + cxy, y + 2, x + s - 2, y + s - 2, x + 2, y + s - 2, c);
+          break;
+        case 4:
+          tft.fillTriangle(x + s / 3, y + 2, x + (2 * s) / 3, y + 2, x + s / 2, y + cxy, c);
+          tft.fillTriangle(x + s / 3, y + cxy, x + (2 * s) / 3, y + cxy, x + s / 2 - 2, y + s - 2, c);
+          break;
+        case 5:
+          tft.drawRect(x + 2, y + max(3, s / 6), s - 4, s - max(5, s / 3), c);
+          tft.drawFastHLine(x + 5, y + max(5, s / 3), s / 2, c);
+          tft.drawFastHLine(x + 5, y + max(8, s / 2), max(8, s / 3), c);
+          break;
+        case 6:
+          tft.drawCircle(x + cxy - 3, y + cxy - 3, max(4, s / 5), c);
+          tft.drawLine(x + cxy + 1, y + cxy + 1, x + s - 2, y + s - 2, c);
+          break;
+        case 7:
+          tft.fillRect(x + 2, y + cxy, s - 4, max(3, s / 8), c);
+          tft.drawLine(x + 4, y + cxy - 3, x + s / 3, y + 3, c);
+          tft.drawLine(x + s / 2, y + cxy - 3, x + (2 * s) / 3, y + 3, c);
+          break;
+        case 8:
+          tft.drawCircle(x + cxy, y + cxy, max(4, s / 4), c);
+          tft.drawCircle(x + cxy, y + cxy, max(2, s / 9), c);
+          break;
+        case 9:
+          tft.drawLine(x + s - 4, y + 3, x + 4, y + cxy, c);
+          tft.drawLine(x + 4, y + cxy, x + s - 4, y + s - 3, c);
+          break;
+      }
+    };
+
+    const int statusY = content.y + 2;
+    const int statusH = cydWide ? 52 : 34;
+    neonPanelCyd(zoneLeft, statusY, zoneW, statusH, cydWide ? 8 : 6, TFT_MAGENTA, 0x780F);
+    tft.setTextDatum(TL_DATUM);
+    applyFontSm();
+    tft.setTextColor(PACKETLABHasSelectedTarget ? TFT_CYAN : TFT_RED, TFT_BLACK);
+    if (PACKETLABHasSelectedTarget) {
+      if (PACKETLABTargetSsid[0] == '\0') {
+        tft.drawString("TARGET READY // ALL APs", zoneLeft + 6, statusY + 4);
+      } else {
+        char b[56];
+        snprintf(b, sizeof(b), "TARGET READY // CH%d", PACKETLABTargetChannel);
+        tft.drawString(b, zoneLeft + 6, statusY + 4);
+      }
+    } else {
+      tft.drawString("NO TARGET // SELECT AP TO ARM", zoneLeft + 6, statusY + 4);
+    }
+    if (cydWide) {
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.drawString(PACKETLABIsAttacking() ? PACKETLABGetAttackName() : "MODE: IDLE", zoneLeft + 6, statusY + 24);
+    } else {
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.drawString(PACKETLABIsAttacking() ? "MODE: ACTIVE" : "MODE: IDLE", zoneLeft + 6, statusY + 18);
+    }
+
+    const int cols = 2;
+    const int rows = 5;
+    const int gapX = cydWide ? 10 : 8;
+    const int gapY = cydWide ? 7 : 6;
+    int gridTop = statusY + statusH + (cydWide ? 8 : 7);
+    if (gridTop <= UI_TOP_BUTTON_SHIFT_THRESHOLD_Y) gridTop = UI_TOP_BUTTON_SHIFT_THRESHOLD_Y + 1;
+
+    const int metricsH = cydWide ? 52 : 0;
+    const int engineH = cydWide ? 36 : 0;
+    const int gridBottom = bottom.y - 2 - metricsH - engineH - (cydWide ? 8 : 0);
+    const int gridH = max(80, gridBottom - gridTop);
+    const int btnW = max(52, (zoneW - gapX) / cols);
+    const int btnH = max(cydWide ? 24 : 16, (gridH - (gapY * (rows - 1))) / rows);
+
+    const int row1Y = gridTop;
+    const int row2Y = row1Y + btnH + gapY;
+    const int row3Y = row2Y + btnH + gapY;
+    const int row4Y = row3Y + btnH + gapY;
+    const int row5Y = row4Y + btnH + gapY;
+
+    PACKETLABMenuBtns[0] = {zoneLeft,               row1Y, btnW, btnH, "DEAUTH FLOOD"};
+    PACKETLABMenuBtns[1] = {zoneLeft + btnW + gapX, row1Y, btnW, btnH, "BEACON SPAM"};
+    PACKETLABMenuBtns[2] = {zoneLeft,               row2Y, btnW, btnH, "PROBE FLOOD"};
+    PACKETLABMenuBtns[3] = {zoneLeft + btnW + gapX, row2Y, btnW, btnH, "DEAUTH ALL"};
+    PACKETLABMenuBtns[4] = {zoneLeft,               row3Y, btnW, btnH, "PUSH!T"};
+    PACKETLABMenuBtns[5] = {zoneLeft + btnW + gapX, row3Y, btnW, btnH, "SP3CTER"};
+    PACKETLABMenuBtns[6] = {zoneLeft,               row4Y, btnW, btnH, "Y0INK"};
+    PACKETLABMenuBtns[7] = {zoneLeft + btnW + gapX, row4Y, btnW, btnH, "JAMM!T"};
+    PACKETLABMenuBtns[8] = {zoneLeft,               row5Y, btnW, btnH, "SET TARGET"};
+    PACKETLABMenuBtns[9] = {zoneLeft + btnW + gapX, row5Y, btnW, btnH, PACKETLABIsAttacking() ? "STOP" : "BACK"};
+
+    const uint16_t edgeCols[10] = {
+      0xFD20, 0x07FF, TFT_GREEN, TFT_RED, TFT_MAGENTA, 0x07FF, TFT_GREEN, 0xFD20, TFT_CYAN, TFT_CYAN
+    };
+
+    for (int i = 0; i < 10; ++i) {
+      const Button& b = PACKETLABMenuBtns[i];
+      neonPanelCyd(b.x, b.y, b.w, b.h, cydWide ? 7 : 5, edgeCols[i], edgeCols[i]);
+      const int iconSize = min(cydWide ? 28 : 16, b.h - 6);
+      const int iconX = b.x + 5;
+      const int iconY = b.y + (b.h - iconSize) / 2;
+      drawCardIconCyd(i, iconX, iconY, iconSize, edgeCols[i]);
+      tft.setTextDatum(TL_DATUM);
+      if (cydWide) applyFontMd(); else applyFontSm();
+      tft.setTextColor((i == 5) ? TFT_WHITE : edgeCols[i], TFT_BLACK);
+      tft.drawString(b.label, b.x + iconSize + 10, b.y + (b.h / 2) - (cydWide ? 9 : 6));
+    }
+
+    if (!cydWide) {
+      drawBorder();
+      return;
+    }
+
+    const int metricsY = gridBottom + 6;
+    neonPanelCyd(zoneLeft, metricsY, zoneW, metricsH, 7, TFT_MAGENTA, 0x780F);
+    applyFontSm();
+    tft.setTextDatum(TL_DATUM);
+    const int infoW = zoneW / 5;
+    const int sig = hasTarget ? target.rssi : WiFi.RSSI();
+    const uint32_t secs = millis() / 1000U;
+    const uint32_t hh = secs / 3600U;
+    const uint32_t mm = (secs % 3600U) / 60U;
+    const uint32_t ss = secs % 60U;
+    char up[20];
+    snprintf(up, sizeof(up), "%02lu:%02lu:%02lu", (unsigned long)hh, (unsigned long)mm, (unsigned long)ss);
+    char rssiBuf[20];
+    snprintf(rssiBuf, sizeof(rssiBuf), "%d", sig);
+    char cbuf[12];
+    snprintf(cbuf, sizeof(cbuf), "%u", (unsigned)jammitClientCount);
+
+    tft.setTextColor(TFT_GREEN, TFT_BLACK); tft.drawString("IF", zoneLeft + 5, metricsY + 4);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK); tft.drawString("wlan0", zoneLeft + 5, metricsY + 20);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK); tft.drawString("SIG", zoneLeft + infoW + 5, metricsY + 4);
+    drawSignalGlyphCyd(zoneLeft + infoW + 4, metricsY + 20, 16, 18, TFT_GREEN);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK); tft.drawString(rssiBuf, zoneLeft + infoW + 23, metricsY + 20);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK); tft.drawString("CLI", zoneLeft + (2 * infoW) + 5, metricsY + 4);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK); tft.drawString(cbuf, zoneLeft + (2 * infoW) + 5, metricsY + 20);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK); tft.drawString("UP", zoneLeft + (3 * infoW) + 5, metricsY + 4);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK); tft.drawString(up, zoneLeft + (3 * infoW) + 5, metricsY + 20);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK); tft.drawString("MOD", zoneLeft + (4 * infoW) + 5, metricsY + 4);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK); tft.drawString(PACKETLABIsAttacking() ? "ACTIVE" : "READY", zoneLeft + (4 * infoW) + 5, metricsY + 20);
+
+    const int engY = metricsY + metricsH + 6;
+    neonPanelCyd(zoneLeft, engY, zoneW, engineH, 7, TFT_MAGENTA, TFT_DARKGREY);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.drawString("ENGINE", zoneLeft + 6, engY + 3);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString(PACKETLABIsAttacking() ? "ACTIVE" : "READY", zoneLeft + 6, engY + 18);
+    const int barX = zoneLeft + 110;
+    const int barW = max(60, zoneW - 120);
+    tft.fillRect(barX, engY + 17, barW, 10, 0x2104);
+    const int fillW = PACKETLABIsAttacking() ? barW : (barW * 9 / 10);
+    tft.fillRect(barX, engY + 17, fillW, 10, 0x07FF);
+
+    drawBorder();
+    return;
+  }
+#endif
+
   const bool compact = (h <= 180);
   const UiRect content = computeContentRect();
   const UiRect bottom = computeBottomBarRect();
   const int safeLeft = uiActionDockSafeLeft();
 
-  // Keep all Bruce UI at least 5px away from the ActionDock safety band.
+  // Keep all PACKETLAB UI at least 5px away from the ActionDock safety band.
   const int zoneLeft = content.x;
   const int zoneRight = min(content.x + content.w, safeLeft - 1);
   const int zoneW = max(120, zoneRight - zoneLeft);
@@ -13463,7 +14092,7 @@ void drawBruceMenu() {
   tft.setTextDatum(TL_DATUM);
   applyFontSm();
   const int statusY = content.y + 2;
-  const int statusH = bruceIsAttacking() ? 24 : 12;
+  const int statusH = PACKETLABIsAttacking() ? 24 : 12;
   const int statusTextW = max(60, zoneW - 6);
   auto drawStatusLine = [&](const char* raw, int x, int y, uint16_t color) {
     String s = raw ? raw : "";
@@ -13482,25 +14111,25 @@ void drawBruceMenu() {
   tft.drawRect(zoneLeft, statusY, zoneW, statusH + 2, TFT_DARKGREY);
 
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  if (bruceHasSelectedTarget) {
-    if (bruceTargetSsid[0] == '\0') {
+  if (PACKETLABHasSelectedTarget) {
+    if (PACKETLABTargetSsid[0] == '\0') {
       drawStatusLine("Target: ALL APs", zoneLeft + 3, statusY + 1, TFT_CYAN);
     } else {
       char buf[56];
-      snprintf(buf, sizeof(buf), "Target: %.20s [CH%d]", bruceTargetSsid, bruceTargetChannel);
+      snprintf(buf, sizeof(buf), "Target: %.20s [CH%d]", PACKETLABTargetSsid, PACKETLABTargetChannel);
       drawStatusLine(buf, zoneLeft + 3, statusY + 1, TFT_CYAN);
     }
   } else {
-    drawStatusLine("NO TARGET - Press Set Target", zoneLeft + 3, statusY + 1, TFT_RED);
+    drawStatusLine("NO TARGET // SELECT AP TO ARM", zoneLeft + 3, statusY + 1, TFT_RED);
   }
 
-  if (bruceIsAttacking()) {
-    drawStatusLine(bruceGetAttackName(), zoneLeft + 3, statusY + 13, TFT_YELLOW);
+  if (PACKETLABIsAttacking()) {
+    drawStatusLine(PACKETLABGetAttackName(), zoneLeft + 3, statusY + 13, TFT_YELLOW);
   }
 
-  // 4x2 grid: attacks (rows 1-2) + PUSH!T/Set Target (row 3) + Back/Stop (row 4).
+  // 5x2 grid: attacks (rows 1-2) + tools (rows 3-4) + target/nav (row 5).
   const int cols = 2;
-  const int rows = 4;
+  const int rows = 5;
   const int gapX = compact ? 4 : 8;
   const int gapY = compact ? 3 : 6;
   int gridTop = statusY + statusH + (compact ? 5 : 7);
@@ -13516,29 +14145,35 @@ void drawBruceMenu() {
   const int row2Y = row1Y + btnH + gapY;
   const int row3Y = row2Y + btnH + gapY;
   const int row4Y = row3Y + btnH + gapY;
+  const int row5Y = row4Y + btnH + gapY;
 
   // Attack buttons (rows 1-2)
-  bruceMenuBtns[0] = {zoneLeft,               row1Y, btnW, btnH, "Deauth Flood"};
-  bruceMenuBtns[1] = {zoneLeft + btnW + gapX, row1Y, btnW, btnH, "Beacon Spam"};
-  bruceMenuBtns[2] = {zoneLeft,               row2Y, btnW, btnH, "Probe Flood"};
-  bruceMenuBtns[3] = {zoneLeft + btnW + gapX, row2Y, btnW, btnH, "Deauth All"};
+  PACKETLABMenuBtns[0] = {zoneLeft,               row1Y, btnW, btnH, "Deauth Flood"};
+  PACKETLABMenuBtns[1] = {zoneLeft + btnW + gapX, row1Y, btnW, btnH, "Beacon Spam"};
+  PACKETLABMenuBtns[2] = {zoneLeft,               row2Y, btnW, btnH, "Probe Flood"};
+  PACKETLABMenuBtns[3] = {zoneLeft + btnW + gapX, row2Y, btnW, btnH, "Deauth All"};
   // Row 3: PUSH!T | SP3CTER
-  bruceMenuBtns[4] = {zoneLeft,               row3Y, btnW, btnH, "PUSH!T"};
-  bruceMenuBtns[5] = {zoneLeft + btnW + gapX, row3Y, btnW, btnH, "SP3CTER"};
-  // Row 4: Set Target | Back/Stop
-  bruceMenuBtns[6] = {zoneLeft,               row4Y, btnW, btnH, "Set Target"};
-  bruceMenuBtns[7] = {zoneLeft + btnW + gapX, row4Y, btnW, btnH,
-                      bruceIsAttacking() ? "STOP" : "Back"};
+  PACKETLABMenuBtns[4] = {zoneLeft,               row3Y, btnW, btnH, "PUSH!T"};
+  PACKETLABMenuBtns[5] = {zoneLeft + btnW + gapX, row3Y, btnW, btnH, "SP3CTER"};
+  // Row 4: Y0INK | JAMM!T
+  PACKETLABMenuBtns[6] = {zoneLeft,               row4Y, btnW, btnH, "Y0INK"};
+  PACKETLABMenuBtns[7] = {zoneLeft + btnW + gapX, row4Y, btnW, btnH, "JAMM!T"};
+  // Row 5: Set Target | Back/Stop
+  PACKETLABMenuBtns[8] = {zoneLeft,               row5Y, btnW, btnH, "Set Target"};
+  PACKETLABMenuBtns[9] = {zoneLeft + btnW + gapX, row5Y, btnW, btnH,
+                      PACKETLABIsAttacking() ? "STOP" : "Back"};
 
-  drawButton(bruceMenuBtns[0], TFT_BLACK, 0xFF07,      TFT_WHITE);
-  drawButton(bruceMenuBtns[1], TFT_BLACK, 0xFF07,      TFT_WHITE);
-  drawButton(bruceMenuBtns[2], TFT_BLACK, 0xFF07,      TFT_WHITE);
-  drawButton(bruceMenuBtns[3], TFT_BLACK, 0xF800,      TFT_WHITE);
-  drawButton(bruceMenuBtns[4], TFT_BLACK, TFT_MAGENTA, TFT_WHITE);
-  drawButton(bruceMenuBtns[5], TFT_BLACK, 0x07FF,      TFT_BLACK);  // cyan — SP3CTER
-  drawButton(bruceMenuBtns[6], TFT_BLACK, TFT_NAVY,    TFT_WHITE);
-  drawButton(bruceMenuBtns[7], TFT_BLACK,
-             bruceIsAttacking() ? 0xFC00 : 0x07E0, TFT_WHITE);
+  drawButton(PACKETLABMenuBtns[0], TFT_BLACK, 0xFF07,      TFT_WHITE);
+  drawButton(PACKETLABMenuBtns[1], TFT_BLACK, 0xFF07,      TFT_WHITE);
+  drawButton(PACKETLABMenuBtns[2], TFT_BLACK, 0xFF07,      TFT_WHITE);
+  drawButton(PACKETLABMenuBtns[3], TFT_BLACK, 0xF800,      TFT_WHITE);
+  drawButton(PACKETLABMenuBtns[4], TFT_BLACK, TFT_MAGENTA, TFT_WHITE);
+  drawButton(PACKETLABMenuBtns[5], TFT_BLACK, 0x07FF,      TFT_WHITE);  // cyan - SP3CTER
+  drawButton(PACKETLABMenuBtns[6], TFT_BLACK, TFT_DARKGREEN, TFT_WHITE);
+  drawButton(PACKETLABMenuBtns[7], TFT_BLACK, TFT_RED, TFT_WHITE);
+  drawButton(PACKETLABMenuBtns[8], TFT_BLACK, TFT_NAVY, TFT_WHITE);
+  drawButton(PACKETLABMenuBtns[9], TFT_BLACK,
+             PACKETLABIsAttacking() ? 0xFC00 : 0x07E0, TFT_WHITE);
 
   drawBorder();
 }
@@ -13681,12 +14316,12 @@ static void drawPush1t() {
   btnP1tEngage    = {rightX, ctrlTop + 0*(ctrlH+ctrlGap), rightW, ctrlH, engaged ? "STOP" : "ENGAGE"};
   btnP1tManual    = {rightX, ctrlTop + 1*(ctrlH+ctrlGap), rightW, ctrlH, "PROBE NOW"};
   btnP1tSetTarget = {rightX, ctrlTop + 2*(ctrlH+ctrlGap), rightW, ctrlH, "SET TGT"};
-  btnP1tBruce     = {rightX, ctrlTop + 3*(ctrlH+ctrlGap), rightW, ctrlH, "Pkt Lab"};
+  btnP1tPACKETLAB     = {rightX, ctrlTop + 3*(ctrlH+ctrlGap), rightW, ctrlH, "Pkt Lab"};
 
   drawButton(btnP1tEngage,    engaged ? TFT_MAROON    : TFT_DARKGREEN, TFT_RED,     TFT_WHITE);
   drawButton(btnP1tManual,    TFT_BLACK,               TFT_MAGENTA,    TFT_WHITE);
   drawButton(btnP1tSetTarget, TFT_NAVY,                TFT_CYAN,       TFT_WHITE);
-  drawButton(btnP1tBruce,     TFT_BLACK,               0xFF07,         TFT_WHITE);
+  drawButton(btnP1tPACKETLAB,     TFT_BLACK,               0xFF07,         TFT_WHITE);
 
   // ── Bottom bar ────────────────────────────────────────────────────────────
   btnP1tBack = {bottom.x, bottom.y, bottom.w, bottom.h, "Back"};
@@ -13741,8 +14376,8 @@ static void push1tScreenTick_UI(int tx, int ty) {
     waitTouchRelease();
     return;
   }
-  if (hit(btnP1tBruce, tx, ty)) {
-    setScreen(ScreenId::BRUCE_MENU);
+  if (hit(btnP1tPACKETLAB, tx, ty)) {
+    setScreen(ScreenId::PACKETLAB_MENU);
     waitTouchRelease();
     return;
   }
@@ -14111,90 +14746,90 @@ static void specterScreenTick_UI(int tx, int ty) {
     waitTouchRelease(); return;
   }
   if (hit(btnSpPktLab, tx, ty)) {
-    setScreen(ScreenId::BRUCE_MENU);
+    setScreen(ScreenId::PACKETLAB_MENU);
     waitTouchRelease(); return;
   }
   waitTouchRelease();
 }
 
 // ============================================================
-//  Bruce Monitor: capture helpers
+//  PACKETLAB Monitor: capture helpers
 // ============================================================
 
-// Called from bruceAttackTick via the TX callback — only enqueues the
+// Called from PACKETLABAttackTick via the TX callback — only enqueues the
 // frame into a RAM ring buffer; no SD I/O here.
-static void brucePcapFrameCb(const uint8_t* frame, size_t len, uint8_t channel) {
-  uint8_t nextHead = (brucePcapQueueHead + 1) % BRUCE_PCAP_QUEUE_SIZE;
-  if (nextHead == brucePcapQueueTail) return;  // full, drop frame
-  BrucePcapEntry& e = brucePcapQueue[brucePcapQueueHead];
+static void PACKETLABPcapFrameCb(const uint8_t* frame, size_t len, uint8_t channel) {
+  uint8_t nextHead = (PACKETLABPcapQueueHead + 1) % PACKETLAB_PCAP_QUEUE_SIZE;
+  if (nextHead == PACKETLABPcapQueueTail) return;  // full, drop frame
+  PACKETLABPcapEntry& e = PACKETLABPcapQueue[PACKETLABPcapQueueHead];
   size_t copyLen = len < sizeof(e.frame) ? len : sizeof(e.frame);
   memcpy(e.frame, frame, copyLen);
   e.len     = (uint8_t)copyLen;
   e.channel = channel;
   e.ts_ms   = millis();
-  brucePcapQueueHead = nextHead;
+  PACKETLABPcapQueueHead = nextHead;
 }
 
-static void bruceOpenCaptures() {
+static void PACKETLABOpenCaptures() {
   if (!sdReady) {
-    brucePcapPath[0] = '\0';
-    bruceSessionLogPath[0] = '\0';
-    brucePcapFrameCount = 0;
-    brucePcapQueueHead = brucePcapQueueTail = 0;
-    bruceCaptureWasClosed = false;
-    bruceSetFrameCallback(nullptr);
+    PACKETLABPcapPath[0] = '\0';
+    PACKETLABSessionLogPath[0] = '\0';
+    PACKETLABPcapFrameCount = 0;
+    PACKETLABPcapQueueHead = PACKETLABPcapQueueTail = 0;
+    PACKETLABCaptureWasClosed = false;
+    PACKETLABSetFrameCallback(nullptr);
     monitorPushLine(TFT_YELLOW, "SD not ready – no PCAP/log");
-    Serial.println("[BRUCE] SD not ready, capture disabled");
+    Serial.println("[PACKETLAB] SD not ready, capture disabled");
     return;
   }
 
-  // Build timestamped session dir under /bruce/
+  // Build timestamped session dir under /PACKETLAB/
   uint32_t ts = millis();
   char dir[96];
-  snprintf(dir, sizeof(dir), "/bruce/%lu", (unsigned long)ts);
-  SD.mkdir("/bruce");
+  snprintf(dir, sizeof(dir), "/PACKETLAB/%lu", (unsigned long)ts);
+  SD.mkdir("/PACKETLAB");
   SD.mkdir(dir);
 
-  snprintf(brucePcapPath,       sizeof(brucePcapPath),       "%s/frames.pcap",   dir);
-  snprintf(bruceSessionLogPath, sizeof(bruceSessionLogPath), "%s/session.log",   dir);
+  snprintf(PACKETLABPcapPath,       sizeof(PACKETLABPcapPath),       "%s/frames.pcap",   dir);
+  snprintf(PACKETLABSessionLogPath, sizeof(PACKETLABSessionLogPath), "%s/session.log",   dir);
 
   // Open PCAP and write global header
-  brucePcapFile = SD.open(brucePcapPath, FILE_WRITE);
-  if (brucePcapFile) {
+  PACKETLABPcapFile = SD.open(PACKETLABPcapPath, FILE_WRITE);
+  if (PACKETLABPcapFile) {
     PcapGlobalHeader gh;
-    brucePcapFile.write((const uint8_t*)&gh, sizeof(gh));
-    brucePcapFile.flush();
+    PACKETLABPcapFile.write((const uint8_t*)&gh, sizeof(gh));
+    PACKETLABPcapFile.flush();
   } else {
-    brucePcapPath[0] = '\0';
-    Serial.printf("[BRUCE] Failed to create %s\n", brucePcapPath);
+    PACKETLABPcapPath[0] = '\0';
+    Serial.printf("[PACKETLAB] Failed to create %s\n", PACKETLABPcapPath);
   }
 
   // Open session log
-  bruceSessionLogFile = SD.open(bruceSessionLogPath, FILE_WRITE);
-  if (bruceSessionLogFile) {
-    bruceSessionLogFile.printf("=== BRUCE SESSION LOG ===\n");
-    bruceSessionLogFile.printf("Attack   : %s\n", bruceGetAttackName());
-    bruceSessionLogFile.printf("StartMs  : %lu\n", (unsigned long)ts);
-    bruceSessionLogFile.flush();
+  PACKETLABSessionLogFile = SD.open(PACKETLABSessionLogPath, FILE_WRITE);
+  if (PACKETLABSessionLogFile) {
+    PACKETLABSessionLogFile.printf("=== PACKETLAB SESSION LOG ===\n");
+    PACKETLABSessionLogFile.printf("Attack   : %s\n", PACKETLABGetAttackName());
+    PACKETLABSessionLogFile.printf("StartMs  : %lu\n", (unsigned long)ts);
+    PACKETLABSessionLogFile.flush();
   } else {
-    bruceSessionLogPath[0] = '\0';
-    Serial.printf("[BRUCE] Failed to create %s\n", bruceSessionLogPath);
+    PACKETLABSessionLogPath[0] = '\0';
+    Serial.printf("[PACKETLAB] Failed to create %s\n", PACKETLABSessionLogPath);
   }
 
-  brucePcapFrameCount  = 0;
-  bruceCaptureWasClosed = false;
-  brucePcapQueueHead = brucePcapQueueTail = 0;
-  bruceSetFrameCallback(brucePcapFrameCb);
+  PACKETLABPcapFrameCount  = 0;
+  PACKETLABCaptureWasClosed = false;
+  PACKETLABPcapQueueHead = PACKETLABPcapQueueTail = 0;
+  PACKETLABSetFrameCallback(PACKETLABPcapFrameCb);
 
-  Serial.printf("[BRUCE] Capture open: %s\n", dir);
+  Serial.printf("[PACKETLAB] Capture open: %s\n", dir);
   uiMemLog("after_start_capture");
 }
 
 // Drain the RAM ring buffer to the PCAP file (call from the monitor tick).
-static void bruceDrainPcapQueue() {
-  while (brucePcapQueueTail != brucePcapQueueHead) {
-    BrucePcapEntry& e = brucePcapQueue[brucePcapQueueTail];
-    if (brucePcapFile) {
+static void PACKETLABDrainPcapQueue() {
+  while (PACKETLABPcapQueueTail != PACKETLABPcapQueueHead) {
+    PACKETLABPcapEntry& e = PACKETLABPcapQueue[PACKETLABPcapQueueTail];
+    if (PACKETLABPcapFile) {
       uint32_t ts_sec  = e.ts_ms / 1000;
       uint32_t ts_usec = (e.ts_ms % 1000) * 1000;
       PcapPacketHeader ph;
@@ -14202,49 +14837,49 @@ static void bruceDrainPcapQueue() {
       ph.ts_usec  = ts_usec;
       ph.incl_len = e.len;
       ph.orig_len = e.len;
-      brucePcapFile.write((const uint8_t*)&ph, sizeof(ph));
-      brucePcapFile.write(e.frame, e.len);
-      brucePcapFrameCount++;
+      PACKETLABPcapFile.write((const uint8_t*)&ph, sizeof(ph));
+      PACKETLABPcapFile.write(e.frame, e.len);
+      PACKETLABPcapFrameCount++;
     }
-    brucePcapQueueTail = (brucePcapQueueTail + 1) % BRUCE_PCAP_QUEUE_SIZE;
+    PACKETLABPcapQueueTail = (PACKETLABPcapQueueTail + 1) % PACKETLAB_PCAP_QUEUE_SIZE;
   }
-  if (brucePcapFile) brucePcapFile.flush();
+  if (PACKETLABPcapFile) PACKETLABPcapFile.flush();
 }
 
-static void bruceCloseCaptures() {
-  if (bruceCaptureWasClosed) return;
-  bruceCaptureWasClosed = true;
-  bruceSetFrameCallback(nullptr);
-  bruceDrainPcapQueue();
+static void PACKETLABCloseCaptures() {
+  if (PACKETLABCaptureWasClosed) return;
+  PACKETLABCaptureWasClosed = true;
+  PACKETLABSetFrameCallback(nullptr);
+  PACKETLABDrainPcapQueue();
 
-  BruceStats stats = bruceGetStats();
-  if (bruceSessionLogFile) {
-    bruceSessionLogFile.printf("---\nFramesSent : %lu\n", (unsigned long)stats.framesSent);
-    bruceSessionLogFile.printf("ElapsedMs  : %lu\n",   (unsigned long)stats.elapsedMs);
-    bruceSessionLogFile.printf("FPS        : %.1f\n",  stats.framesPerSecond);
-    bruceSessionLogFile.printf("PcapFrames : %lu\n",   (unsigned long)brucePcapFrameCount);
-    bruceSessionLogFile.printf("LastError  : %s\n",    bruceGetLastError());
-    bruceSessionLogFile.printf("=== END ===\n");
-    bruceSessionLogFile.close();
+  PACKETLABStats stats = PACKETLABGetStats();
+  if (PACKETLABSessionLogFile) {
+    PACKETLABSessionLogFile.printf("---\nFramesSent : %lu\n", (unsigned long)stats.framesSent);
+    PACKETLABSessionLogFile.printf("ElapsedMs  : %lu\n",   (unsigned long)stats.elapsedMs);
+    PACKETLABSessionLogFile.printf("FPS        : %.1f\n",  stats.framesPerSecond);
+    PACKETLABSessionLogFile.printf("PcapFrames : %lu\n",   (unsigned long)PACKETLABPcapFrameCount);
+    PACKETLABSessionLogFile.printf("LastError  : %s\n",    PACKETLABGetLastError());
+    PACKETLABSessionLogFile.printf("=== END ===\n");
+    PACKETLABSessionLogFile.close();
   }
-  if (brucePcapFile) brucePcapFile.close();
+  if (PACKETLABPcapFile) PACKETLABPcapFile.close();
 
-  Serial.printf("[BRUCE] Capture closed – %lu frames, %lu pcap frames\n",
-                (unsigned long)stats.framesSent, (unsigned long)brucePcapFrameCount);
+  Serial.printf("[PACKETLAB] Capture closed – %lu frames, %lu pcap frames\n",
+                (unsigned long)stats.framesSent, (unsigned long)PACKETLABPcapFrameCount);
   uiMemLog("after_stop_capture");
 }
 
 // ============================================================
-//  Bruce Monitor screen draw — split into initial and incremental
+//  PACKETLAB Monitor screen draw — split into initial and incremental
 // ============================================================
 
 // Forward declaration
-static void drawBruceMonitorTerminal();
+static void drawPACKETLABMonitorTerminal();
 
 // Full screen initialization (called once on setScreen)
-static void drawBruceMonitorFull() {
+static void drawPACKETLABMonitorFull() {
   tft.fillScreen(TFT_BLACK);
-  drawHeader("BRUCE MONITOR");
+  drawHeader("PACKETLAB MONITOR");
   drawUniversalBackground();
 
   const int w = tft.width();
@@ -14256,25 +14891,25 @@ static void drawBruceMonitorFull() {
   int stopW = (w - 24) * 2 / 3;
   int fileW = (w - 24) - stopW;
 
-  btnBruceMonBack  = {8,          btnY, stopW, btnH2, bruceIsAttacking() ? "STOP" : "BACK"};
-  btnBruceMonFiles = {8 + stopW + 8, btnY, fileW, btnH2, "FILES"};
+  btnPACKETLABMonBack  = {8,          btnY, stopW, btnH2, PACKETLABIsAttacking() ? "STOP" : "BACK"};
+  btnPACKETLABMonFiles = {8 + stopW + 8, btnY, fileW, btnH2, "FILES"};
 
-  drawButton(btnBruceMonBack,  TFT_BLACK, bruceIsAttacking() ? TFT_RED   : 0x0380, TFT_WHITE);
-  drawButton(btnBruceMonFiles, TFT_BLACK, TFT_NAVY, TFT_WHITE);
+  drawButton(btnPACKETLABMonBack,  TFT_BLACK, PACKETLABIsAttacking() ? TFT_RED   : 0x0380, TFT_WHITE);
+  drawButton(btnPACKETLABMonFiles, TFT_BLACK, TFT_NAVY, TFT_WHITE);
 
   drawBorder();
   
   // Initial status + log draw
-  drawBruceMonitorTerminal();
+  drawPACKETLABMonitorTerminal();
 }
 
 // Incremental terminal window update (just the log area + status strip)
-static void drawBruceMonitorTerminal() {
+static void drawPACKETLABMonitorTerminal() {
   const int w = tft.width();
   const int h = tft.height();
 
-  bool attacking = bruceIsAttacking();
-  BruceStats stats = bruceGetStats();
+  bool attacking = PACKETLABIsAttacking();
+  PACKETLABStats stats = PACKETLABGetStats();
 
   // --- Attack status strip (below header, 40-64) ---
   tft.setTextDatum(TL_DATUM);
@@ -14285,7 +14920,7 @@ static void drawBruceMonitorTerminal() {
     tft.setTextColor(TFT_RED, TFT_BLACK);
     tft.drawString("ACTIVE >", 6, 40);
     tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    tft.drawString(bruceGetAttackName(), 68, 40);
+    tft.drawString(PACKETLABGetAttackName(), 68, 40);
   } else {
     tft.setTextColor(0x7BCF, TFT_BLACK);
     tft.drawString("STOPPED", 6, 40);
@@ -14341,16 +14976,16 @@ static void drawBruceMonitorTerminal() {
   }
 }
 
-static void drawBruceMonitor() {
+static void drawPACKETLABMonitor() {
   tft.fillScreen(TFT_BLACK);
-  drawHeader("BRUCE MONITOR");
+  drawHeader("PACKETLAB MONITOR");
   drawUniversalBackground();
 
   const int w = tft.width();
   const int h = tft.height();
 
-  bool attacking = bruceIsAttacking();
-  BruceStats stats = bruceGetStats();
+  bool attacking = PACKETLABIsAttacking();
+  PACKETLABStats stats = PACKETLABGetStats();
 
   // --- Attack status strip (below header) ---
   tft.setTextDatum(TL_DATUM);
@@ -14361,7 +14996,7 @@ static void drawBruceMonitor() {
     tft.setTextColor(TFT_RED, TFT_BLACK);
     tft.drawString("ACTIVE >", 6, 40);
     tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    tft.drawString(bruceGetAttackName(), 68, 40);
+    tft.drawString(PACKETLABGetAttackName(), 68, 40);
   } else {
     tft.setTextColor(0x7BCF, TFT_BLACK);
     tft.drawString("STOPPED", 6, 40);
@@ -14413,42 +15048,42 @@ static void drawBruceMonitor() {
   int stopW = (w - 24) * 2 / 3;
   int fileW = (w - 24) - stopW;
 
-  btnBruceMonBack  = {8,          btnY, stopW, btnH2, attacking ? "STOP" : "BACK"};
-  btnBruceMonFiles = {8 + stopW + 8, btnY, fileW, btnH2, "FILES"};
+  btnPACKETLABMonBack  = {8,          btnY, stopW, btnH2, attacking ? "STOP" : "BACK"};
+  btnPACKETLABMonFiles = {8 + stopW + 8, btnY, fileW, btnH2, "FILES"};
 
-  drawButton(btnBruceMonBack,  TFT_BLACK, attacking ? TFT_RED   : 0x0380, TFT_WHITE);
-  drawButton(btnBruceMonFiles, TFT_BLACK, TFT_NAVY, TFT_WHITE);
+  drawButton(btnPACKETLABMonBack,  TFT_BLACK, attacking ? TFT_RED   : 0x0380, TFT_WHITE);
+  drawButton(btnPACKETLABMonFiles, TFT_BLACK, TFT_NAVY, TFT_WHITE);
 
   drawBorder();
 }
 
 // ============================================================
-//  Bruce Monitor tick (runs every 500 ms from loop())
+//  PACKETLAB Monitor tick (runs every 500 ms from loop())
 // ============================================================
-static void bruceMonitorTick() {
-  if (screen != ScreenId::BRUCE_MONITOR) return;
+static void PACKETLABMonitorTick() {
+  if (screen != ScreenId::PACKETLAB_MONITOR) return;
   uint32_t now = millis();
   
   // Drain PCAP queue every 50ms to prevent overflow
-  if (now - bruceMonLastUpdateMs >= 50) {
-    bruceMonLastUpdateMs = now;
-    bruceDrainPcapQueue();
+  if (now - PACKETLABMonLastUpdateMs >= 50) {
+    PACKETLABMonLastUpdateMs = now;
+    PACKETLABDrainPcapQueue();
   }
 
-  bool attacking = bruceIsAttacking();
+  bool attacking = PACKETLABIsAttacking();
   
   // Update content only when needed (attacking, or state changed, or new lines added)
   bool shouldUpdate = false;
   
   // Check if attack state changed (attacking -> stopped or vice versa)
-  if (attacking != bruceMonLastAttackingState) {
-    bruceMonLastAttackingState = attacking;
+  if (attacking != PACKETLABMonLastAttackingState) {
+    PACKETLABMonLastAttackingState = attacking;
     shouldUpdate = true;
   }
   
   // Check if new content added to terminal
-  if (monitorLineCount != bruceMonLastLineCount) {
-    bruceMonLastLineCount = monitorLineCount;
+  if (monitorLineCount != PACKETLABMonLastLineCount) {
+    PACKETLABMonLastLineCount = monitorLineCount;
     shouldUpdate = true;
   }
   
@@ -14456,193 +15091,193 @@ static void bruceMonitorTick() {
   static uint32_t lastStatsMs = 0;
   if (attacking && now - lastStatsMs >= 500) {
     lastStatsMs = now;
-    BruceStats stats = bruceGetStats();
-    BruceAttackType attackType = bruceGetCurrentAttackType();
+    PACKETLABStats stats = PACKETLABGetStats();
+    PACKETLABAttackType attackType = PACKETLABGetCurrentAttackType();
     
     // Build contextual description based on attack type
     const char* description = "";
     switch (attackType) {
-      case BruceAttackType::DEAUTH_FLOOD:
+      case PACKETLABAttackType::DEAUTH_FLOOD:
         description = "Deauth Flood";
         monitorPushLine(TFT_CYAN,
                         "%s: %lu frames, %.0f fps, PCAP:%lu",
                         description,
                         (unsigned long)stats.framesSent,
                         stats.framesPerSecond,
-                        (unsigned long)brucePcapFrameCount);
+                        (unsigned long)PACKETLABPcapFrameCount);
         break;
-      case BruceAttackType::BEACON_SPAM:
+      case PACKETLABAttackType::BEACON_SPAM:
         description = "Beacon Spam";
         monitorPushLine(TFT_CYAN,
                         "%s: %lu frames, %.0f fps, PCAP:%lu",
                         description,
                         (unsigned long)stats.framesSent,
                         stats.framesPerSecond,
-                        (unsigned long)brucePcapFrameCount);
+                        (unsigned long)PACKETLABPcapFrameCount);
         break;
-      case BruceAttackType::PROBE_FLOOD:
+      case PACKETLABAttackType::PROBE_FLOOD:
         description = "Probe Flood";
         monitorPushLine(TFT_CYAN,
                         "%s: %lu frames, %.0f fps, PCAP:%lu",
                         description,
                         (unsigned long)stats.framesSent,
                         stats.framesPerSecond,
-                        (unsigned long)brucePcapFrameCount);
+                        (unsigned long)PACKETLABPcapFrameCount);
         break;
-      case BruceAttackType::DEAUTH_BROADCAST:
+      case PACKETLABAttackType::DEAUTH_BROADCAST:
         description = "Broadcast Deauth";
         monitorPushLine(TFT_CYAN,
                         "%s: %lu frames, %.0f fps, PCAP:%lu",
                         description,
                         (unsigned long)stats.framesSent,
                         stats.framesPerSecond,
-                        (unsigned long)brucePcapFrameCount);
+                        (unsigned long)PACKETLABPcapFrameCount);
         break;
       default:
-        description = bruceGetAttackName();
+        description = PACKETLABGetAttackName();
         monitorPushLine(TFT_CYAN,
                         "%s: F:%lu fps:%.0f PCAP:%lu",
                         description,
                         (unsigned long)stats.framesSent,
                         stats.framesPerSecond,
-                        (unsigned long)brucePcapFrameCount);
+                        (unsigned long)PACKETLABPcapFrameCount);
     }
     
-    Serial.printf("[BRUCE] %s | F:%lu FPS:%.1f PCAP:%lu T:%lus\n",
+    Serial.printf("[PACKETLAB] %s | F:%lu FPS:%.1f PCAP:%lu T:%lus\n",
                   description,
                   (unsigned long)stats.framesSent,
                   stats.framesPerSecond,
-                  (unsigned long)brucePcapFrameCount,
+                  (unsigned long)PACKETLABPcapFrameCount,
                   (unsigned long)(stats.elapsedMs / 1000));
     
     shouldUpdate = true;
   }
 
   // Handle attack completion
-  if (!attacking && !bruceCaptureWasClosed) {
-    BruceStats stats = bruceGetStats();
-    BruceAttackType attackType = bruceGetCurrentAttackType();
-    bruceCloseCaptures();
+  if (!attacking && !PACKETLABCaptureWasClosed) {
+    PACKETLABStats stats = PACKETLABGetStats();
+    PACKETLABAttackType attackType = PACKETLABGetCurrentAttackType();
+    PACKETLABCloseCaptures();
     
     monitorPushLine(TFT_GREEN, "== ATTACK COMPLETE ==");
-    monitorPushLine(TFT_WHITE, "Type: %s", bruceGetAttackName());
+    monitorPushLine(TFT_WHITE, "Type: %s", PACKETLABGetAttackName());
     monitorPushLine(TFT_WHITE, "Frames: %lu | Time: %lu s", 
                     (unsigned long)stats.framesSent,
                     (unsigned long)(stats.elapsedMs / 1000));
     
     // Show captures
-    if (brucePcapFrameCount > 0)
-      monitorPushLine(TFT_CYAN, "PCAP: %lu frames captured", (unsigned long)brucePcapFrameCount);
-    if (brucePcapPath[0])
-      monitorPushLine(TFT_CYAN, "File: %s", brucePcapPath);
-    if (bruceSessionLogPath[0])
-      monitorPushLine(TFT_CYAN, "Log : %s", bruceSessionLogPath);
+    if (PACKETLABPcapFrameCount > 0)
+      monitorPushLine(TFT_CYAN, "PCAP: %lu frames captured", (unsigned long)PACKETLABPcapFrameCount);
+    if (PACKETLABPcapPath[0])
+      monitorPushLine(TFT_CYAN, "File: %s", PACKETLABPcapPath);
+    if (PACKETLABSessionLogPath[0])
+      monitorPushLine(TFT_CYAN, "Log : %s", PACKETLABSessionLogPath);
     
-    Serial.printf("[BRUCE] %s complete. F=%lu T=%lus PCAP=%lu\n",
-                  bruceGetAttackName(),
+    Serial.printf("[PACKETLAB] %s complete. F=%lu T=%lus PCAP=%lu\n",
+                  PACKETLABGetAttackName(),
                   (unsigned long)stats.framesSent,
                   (unsigned long)(stats.elapsedMs / 1000),
-                  (unsigned long)brucePcapFrameCount);
+                  (unsigned long)PACKETLABPcapFrameCount);
     shouldUpdate = true;
   }
 
   // Redraw only if something actually changed
   if (shouldUpdate) {
-    drawBruceMonitorTerminal();
+    drawPACKETLABMonitorTerminal();
   }
 }
 
 // Forward declare setScreen because it is defined further down in this file.
 static void setScreen(ScreenId next);
 
-// Tick handler for Bruce Set Target screen
-static void bruceSetTargetTick_UI(int tx, int ty) {
-  if (screen != ScreenId::BRUCE_SET_TARGET) return;
+// Tick handler for PACKETLAB Set Target screen
+static void PACKETLABSetTargetTick_UI(int tx, int ty) {
+  if (screen != ScreenId::PACKETLAB_SET_TARGET) return;
 
-  const int visibleNetworks = max(1, bruceTargetListItemsPerScreen - 1);
+  const int visibleNetworks = max(1, PACKETLABTargetListItemsPerScreen - 1);
   int maxScroll = apCount - visibleNetworks;
   if (maxScroll < 0) maxScroll = 0;
-  bruceTargetScroll = clampi(bruceTargetScroll, 0, maxScroll);
+  PACKETLABTargetScroll = clampi(PACKETLABTargetScroll, 0, maxScroll);
 
-  if (hit(btnBruceSetTargetUp, tx, ty)) {
-    if (bruceTargetScroll > 0) {
-      bruceTargetScroll--;
-      drawBruceSetTarget();
+  if (hit(btnPACKETLABSetTargetUp, tx, ty)) {
+    if (PACKETLABTargetScroll > 0) {
+      PACKETLABTargetScroll--;
+      drawPACKETLABSetTarget();
     }
     waitTouchRelease();
     return;
   }
 
-  if (hit(btnBruceSetTargetDown, tx, ty)) {
-    if (bruceTargetScroll < maxScroll) {
-      bruceTargetScroll++;
-      drawBruceSetTarget();
+  if (hit(btnPACKETLABSetTargetDown, tx, ty)) {
+    if (PACKETLABTargetScroll < maxScroll) {
+      PACKETLABTargetScroll++;
+      drawPACKETLABSetTarget();
     }
     waitTouchRelease();
     return;
   }
 
   // Check "Attack All" option
-  if (hit(btnBruceSetTargetAll, tx, ty)) {
-    Serial.println("[BRUCE] Attack All APs selected");
-    bruceTargetSsid[0] = '\0';  // Mark as all APs
+  if (hit(btnPACKETLABSetTargetAll, tx, ty)) {
+    Serial.println("[PACKETLAB] Attack All APs selected");
+    PACKETLABTargetSsid[0] = '\0';  // Mark as all APs
     apSelected = -1;
-    bruceHasSelectedTarget = true;
-    setScreen(ScreenId::BRUCE_MENU);
+    PACKETLABHasSelectedTarget = true;
+    setScreen(ScreenId::PACKETLAB_MENU);
     waitTouchRelease();
     return;
   }
 
   // Check network rows
   for (int row = 0; row < visibleNetworks; row++) {
-    const int i = bruceTargetScroll + row;
+    const int i = PACKETLABTargetScroll + row;
     if (i < 0 || i >= apCount) continue;
-    if (!hit(btnBruceSetTargetRows[row], tx, ty)) continue;
+    if (!hit(btnPACKETLABSetTargetRows[row], tx, ty)) continue;
 
     // Selected this network
     apSelected = i;
-    bruceTargetChannel = aps[i].channel;
-    strncpy(bruceTargetSsid, aps[i].ssid.c_str(), 19);
-    bruceTargetSsid[19] = '\0';
+    PACKETLABTargetChannel = aps[i].channel;
+    strncpy(PACKETLABTargetSsid, aps[i].ssid.c_str(), 19);
+    PACKETLABTargetSsid[19] = '\0';
     // Convert BSSID string to bytes
     String bssidStr = aps[i].bssid;
-    if (macFromString(bssidStr.c_str(), bruceTargetBssid)) {
-      bruceHasSelectedTarget = true;
-      Serial.printf("[BRUCE] Selected target: %s [CH%d]\n",
-                    bruceTargetSsid, bruceTargetChannel);
+    if (macFromString(bssidStr.c_str(), PACKETLABTargetBssid)) {
+      PACKETLABHasSelectedTarget = true;
+      Serial.printf("[PACKETLAB] Selected target: %s [CH%d]\n",
+                    PACKETLABTargetSsid, PACKETLABTargetChannel);
     }
-    setScreen(ScreenId::BRUCE_MENU);
+    setScreen(ScreenId::PACKETLAB_MENU);
     waitTouchRelease();
     return;
   }
 
   // Legacy rectangular hit fallback for full row area.
-  if (tx >= bruceTargetListX && tx < (bruceTargetListX + bruceTargetListW) &&
-      ty >= bruceTargetListTopY + bruceTargetListItemH) {
-    int row = (ty - (bruceTargetListTopY + bruceTargetListItemH)) / bruceTargetListItemH;
-    const int i = bruceTargetScroll + row;
+  if (tx >= PACKETLABTargetListX && tx < (PACKETLABTargetListX + PACKETLABTargetListW) &&
+      ty >= PACKETLABTargetListTopY + PACKETLABTargetListItemH) {
+    int row = (ty - (PACKETLABTargetListTopY + PACKETLABTargetListItemH)) / PACKETLABTargetListItemH;
+    const int i = PACKETLABTargetScroll + row;
     if (row >= 0 && row < visibleNetworks && i >= 0 && i < apCount) {
       apSelected = i;
-      bruceTargetChannel = aps[i].channel;
-      strncpy(bruceTargetSsid, aps[i].ssid.c_str(), 19);
-      bruceTargetSsid[19] = '\0';
+      PACKETLABTargetChannel = aps[i].channel;
+      strncpy(PACKETLABTargetSsid, aps[i].ssid.c_str(), 19);
+      PACKETLABTargetSsid[19] = '\0';
       // Convert BSSID string to bytes
       String bssidStr = aps[i].bssid;
-      if (macFromString(bssidStr.c_str(), bruceTargetBssid)) {
-        bruceHasSelectedTarget = true;
-        Serial.printf("[BRUCE] Selected target: %s [CH%d]\n",
-                      bruceTargetSsid, bruceTargetChannel);
+      if (macFromString(bssidStr.c_str(), PACKETLABTargetBssid)) {
+        PACKETLABHasSelectedTarget = true;
+        Serial.printf("[PACKETLAB] Selected target: %s [CH%d]\n",
+                      PACKETLABTargetSsid, PACKETLABTargetChannel);
       }
-      setScreen(ScreenId::BRUCE_MENU);
+      setScreen(ScreenId::PACKETLAB_MENU);
       waitTouchRelease();
       return;
     }
   }
 
   // Check Back button
-  if (hit(btnBruceSetTargetBack, tx, ty)) {
-    Serial.println("[BRUCE] Back from Set Target");
-    setScreen(ScreenId::BRUCE_MENU);
+  if (hit(btnPACKETLABSetTargetBack, tx, ty)) {
+    Serial.println("[PACKETLAB] Back from Set Target");
+    setScreen(ScreenId::PACKETLAB_MENU);
     waitTouchRelease();
     return;
   }
@@ -14650,15 +15285,15 @@ static void bruceSetTargetTick_UI(int tx, int ty) {
   waitTouchRelease();
 }
 
-static void bruceMenuTick_UI(int tx, int ty) {
-  if (screen != ScreenId::BRUCE_MENU) return;
+static void PACKETLABMenuTick_UI(int tx, int ty) {
+  if (screen != ScreenId::PACKETLAB_MENU) return;
 
-  if (bruceIsAttacking()) {
+  if (PACKETLABIsAttacking()) {
     // Only allow STOP button when attacking
-    if (hit(bruceMenuBtns[7], tx, ty)) {
-      Serial.println("[BRUCE] STOP ATTACK pressed");
-      bruceStopAttack();
-      drawBruceMenu();
+    if (hit(PACKETLABMenuBtns[9], tx, ty)) {
+      Serial.println("[PACKETLAB] STOP ATTACK pressed");
+      PACKETLABStopAttack();
+      drawPACKETLABMenu();
       waitTouchRelease();
       return;
     }
@@ -14666,16 +15301,16 @@ static void bruceMenuTick_UI(int tx, int ty) {
     return;
   }
 
-  // Check PUSH!T button — no Bruce target needed
-  if (hit(bruceMenuBtns[4], tx, ty)) {
+  // Check PUSH!T button — no PACKETLAB target needed
+  if (hit(PACKETLABMenuBtns[4], tx, ty)) {
     Serial.println("[ui] Packet Lab -> PUSH1T");
     setScreen(ScreenId::PUSH1T_SCREEN);
     waitTouchRelease();
     return;
   }
 
-  // Check SP3CTER button — no Bruce target needed
-  if (hit(bruceMenuBtns[5], tx, ty)) {
+  // Check SP3CTER button — no PACKETLAB target needed
+  if (hit(PACKETLABMenuBtns[5], tx, ty)) {
     Serial.println("[ui] Packet Lab -> SP3CTER");
     setScreen(ScreenId::SP3CTER_SCREEN);
     waitTouchRelease();
@@ -14683,23 +15318,23 @@ static void bruceMenuTick_UI(int tx, int ty) {
   }
 
   // Check Set Target button
-  if (hit(bruceMenuBtns[6], tx, ty)) {
-    Serial.println("[BRUCE] Set Target pressed");
-    setScreen(ScreenId::BRUCE_SET_TARGET);
+  if (hit(PACKETLABMenuBtns[8], tx, ty)) {
+    Serial.println("[PACKETLAB] Set Target pressed");
+    setScreen(ScreenId::PACKETLAB_SET_TARGET);
     waitTouchRelease();
     return;
   }
 
   // Check Back button
-  if (hit(bruceMenuBtns[7], tx, ty)) {
-    Serial.println("[BRUCE] Back to Home");
+  if (hit(PACKETLABMenuBtns[9], tx, ty)) {
+    Serial.println("[PACKETLAB] Back to Home");
     setScreen(ScreenId::HOME);
     waitTouchRelease();
     return;
   }
 
   // Check if we have a target before allowing attacks
-  if (!bruceHasSelectedTarget) {
+  if (!PACKETLABHasSelectedTarget) {
     tft.fillScreen(TFT_BLACK);
     drawHeader("Error");
     const bool compact = (tft.height() <= 180);
@@ -14709,65 +15344,83 @@ static void bruceMenuTick_UI(int tx, int ty) {
     tft.drawString("No target selected!", 10, compact ? 72 : 100);
     tft.drawString("Press 'Set Target' first", 10, compact ? 88 : 120);
     delay(2000);
-    drawBruceMenu();
+    drawPACKETLABMenu();
     waitTouchRelease();
     return;
   }
 
   // Attack button handlers
   // DEAUTH FLOOD
-  if (hit(bruceMenuBtns[0], tx, ty)) {
-    Serial.println("[BRUCE] Deauth Flood pressed");
-    if (bruceTargetSsid[0] == '\0') {
+  if (hit(PACKETLABMenuBtns[0], tx, ty)) {
+    Serial.println("[PACKETLAB] Deauth Flood pressed");
+    if (PACKETLABTargetSsid[0] == '\0') {
       // Attack all - use a default channel
       uint8_t ch = 6;
-      bruceStartDeauthBroadcast(ch, 30000);
+      PACKETLABStartDeauthBroadcast(ch, 30000);
     } else {
-      BruceTarget bt;
-      memcpy(bt.bssid, bruceTargetBssid, 6);
-      strncpy(bt.ssid, bruceTargetSsid, 23);
-      bt.channel = bruceTargetChannel;
-      bruceStartDeauthFlood(bt, 30000);
+      PACKETLABTarget bt;
+      memcpy(bt.bssid, PACKETLABTargetBssid, 6);
+      strncpy(bt.ssid, PACKETLABTargetSsid, 23);
+      bt.channel = PACKETLABTargetChannel;
+      PACKETLABStartDeauthFlood(bt, 30000);
     }
-    setScreen(ScreenId::BRUCE_MONITOR);
+    setScreen(ScreenId::PACKETLAB_MONITOR);
     waitTouchRelease();
     return;
   }
 
   // BEACON SPAM
-  if (hit(bruceMenuBtns[1], tx, ty)) {
-    Serial.println("[BRUCE] Beacon Spam pressed");
-    if (bruceTargetSsid[0] == '\0') {
-      bruceStartBeaconSpam("freeWifi", 6, 20000, nullptr);
+  if (hit(PACKETLABMenuBtns[1], tx, ty)) {
+    Serial.println("[PACKETLAB] Beacon Spam pressed");
+    if (PACKETLABTargetSsid[0] == '\0') {
+      PACKETLABStartBeaconSpam("freeWifi", 6, 20000, nullptr);
     } else {
-      BruceTarget bt;
-      memcpy(bt.bssid, bruceTargetBssid, 6);
-      strncpy(bt.ssid, bruceTargetSsid, 23);
-      bt.channel = bruceTargetChannel;
-      bruceStartBeaconSpam(bt.ssid, bt.channel, 20000, &bt);
+      PACKETLABTarget bt;
+      memcpy(bt.bssid, PACKETLABTargetBssid, 6);
+      strncpy(bt.ssid, PACKETLABTargetSsid, 23);
+      bt.channel = PACKETLABTargetChannel;
+      PACKETLABStartBeaconSpam(bt.ssid, bt.channel, 20000, &bt);
     }
-    setScreen(ScreenId::BRUCE_MONITOR);
+    setScreen(ScreenId::PACKETLAB_MONITOR);
     waitTouchRelease();
     return;
   }
 
   // PROBE FLOOD
-  if (hit(bruceMenuBtns[2], tx, ty)) {
-    Serial.println("[BRUCE] Probe Flood pressed");
-    const char* ssid = (bruceTargetSsid[0] != '\0') ? bruceTargetSsid : "unknown";
-    uint8_t ch = (bruceTargetSsid[0] != '\0') ? bruceTargetChannel : 6;
-    bruceStartProbeFlood(ssid, ch, 20000);
-    setScreen(ScreenId::BRUCE_MONITOR);
+  if (hit(PACKETLABMenuBtns[2], tx, ty)) {
+    Serial.println("[PACKETLAB] Probe Flood pressed");
+    const char* ssid = (PACKETLABTargetSsid[0] != '\0') ? PACKETLABTargetSsid : "unknown";
+    uint8_t ch = (PACKETLABTargetSsid[0] != '\0') ? PACKETLABTargetChannel : 6;
+    PACKETLABStartProbeFlood(ssid, ch, 20000);
+    setScreen(ScreenId::PACKETLAB_MONITOR);
     waitTouchRelease();
     return;
   }
 
   // DEAUTH ALL (broadcast to all devices)
-  if (hit(bruceMenuBtns[3], tx, ty)) {
-    Serial.println("[BRUCE] Deauth All pressed");
-    uint8_t ch = (bruceTargetSsid[0] != '\0') ? bruceTargetChannel : 6;
-    bruceStartDeauthBroadcast(ch, 25000);
-    setScreen(ScreenId::BRUCE_MONITOR);
+  if (hit(PACKETLABMenuBtns[3], tx, ty)) {
+    Serial.println("[PACKETLAB] Deauth All pressed");
+    uint8_t ch = (PACKETLABTargetSsid[0] != '\0') ? PACKETLABTargetChannel : 6;
+    PACKETLABStartDeauthBroadcast(ch, 25000);
+    setScreen(ScreenId::PACKETLAB_MONITOR);
+    waitTouchRelease();
+    return;
+  }
+
+  // Y0INK
+  if (hit(PACKETLABMenuBtns[6], tx, ty)) {
+    Serial.println("[ui] Packet Lab -> Y0INK");
+    engageAutoMode(AutoMode::Y0INK);
+    setScreen(ScreenId::TARGET_DETAILS);
+    waitTouchRelease();
+    return;
+  }
+
+  // JAMM!T
+  if (hit(PACKETLABMenuBtns[7], tx, ty)) {
+    Serial.println("[ui] Packet Lab -> JAMMIT");
+    engageAutoMode(AutoMode::JAMMIT);
+    setScreen(ScreenId::TARGET_DETAILS);
     waitTouchRelease();
     return;
   }
@@ -15140,8 +15793,8 @@ static void setScreen(ScreenId next) {
       break;
     case ScreenId::PUSH1T_SCREEN:     push1tProbeCount = 0; push1tLastProbeMs = 0; drawPush1t(); break;
     case ScreenId::SP3CTER_SCREEN:    drawSpecter(); break;
-    case ScreenId::BRUCE_MENU:        drawBruceMenu(); break;
-    case ScreenId::BRUCE_SET_TARGET:  bruceTargetScroll = 0; drawBruceSetTarget(); break;
+    case ScreenId::PACKETLAB_MENU:        drawPACKETLABMenu(); break;
+    case ScreenId::PACKETLAB_SET_TARGET:  PACKETLABTargetScroll = 0; drawPACKETLABSetTarget(); break;
     case ScreenId::SCOPE_GRAPH:
       scopeLayoutDrawn = false;
       scopeResetWaterfall();
@@ -15151,24 +15804,24 @@ static void setScreen(ScreenId next) {
       break;
     case ScreenId::LED_CONTROL:       drawLedControl(); break;
     case ScreenId::NEON_PANIC:        drawNeonPanic(); break;
-    case ScreenId::BRUCE_MONITOR: {
+    case ScreenId::PACKETLAB_MONITOR: {
       monitorLineCount = 0;
-      monitorPushLine(TFT_CYAN,   "BRUCE MONITOR ONLINE");
-      monitorPushLine(TFT_YELLOW, "Attack: %s", bruceGetAttackName());
+      monitorPushLine(TFT_CYAN,   "PACKETLAB MONITOR ONLINE");
+      monitorPushLine(TFT_YELLOW, "Attack: %s", PACKETLABGetAttackName());
       // Show target information
-      if (bruceTargetSsid[0] == '\0') {
+      if (PACKETLABTargetSsid[0] == '\0') {
         monitorPushLine(TFT_CYAN, "Target: ALL APs in Area");
       } else {
         monitorPushLine(TFT_CYAN, "Target: %s [CH%d]",
-                       bruceTargetSsid,
-                        bruceTargetChannel);
+                       PACKETLABTargetSsid,
+                        PACKETLABTargetChannel);
       }
-      bruceMonLastUpdateMs = 0;
-      bruceMonLastDrawMs = 0;
-      bruceMonLastLineCount = monitorLineCount;
-      bruceMonLastAttackingState = bruceIsAttacking();
-      bruceOpenCaptures();
-      drawBruceMonitorFull();
+      PACKETLABMonLastUpdateMs = 0;
+      PACKETLABMonLastDrawMs = 0;
+      PACKETLABMonLastLineCount = monitorLineCount;
+      PACKETLABMonLastAttackingState = PACKETLABIsAttacking();
+      PACKETLABOpenCaptures();
+      drawPACKETLABMonitorFull();
       break;
     }
     case ScreenId::TARGETS_PLACEHOLDER: drawPlaceholder("Targets", "Coming soon"); break;
@@ -15207,9 +15860,9 @@ static void redrawActiveScreen() {
     case ScreenId::ABOUT:               drawAbout(); break;
     case ScreenId::PUSH1T_SCREEN:       drawPush1t(); break;
     case ScreenId::SP3CTER_SCREEN:      drawSpecter(); break;
-    case ScreenId::BRUCE_MENU:          drawBruceMenu(); break;
-    case ScreenId::BRUCE_MONITOR:       drawBruceMonitor(); break;
-    case ScreenId::BRUCE_SET_TARGET:    drawBruceSetTarget(); break;
+    case ScreenId::PACKETLAB_MENU:          drawPACKETLABMenu(); break;
+    case ScreenId::PACKETLAB_MONITOR:       drawPACKETLABMonitor(); break;
+    case ScreenId::PACKETLAB_SET_TARGET:    drawPACKETLABSetTarget(); break;
     case ScreenId::SCOPE_GRAPH:         drawScopeGraph(); break;
     case ScreenId::LED_CONTROL:         drawLedControl(); break;
     case ScreenId::NEON_PANIC:          drawNeonPanic(); break;
@@ -15975,6 +16628,7 @@ void setup() {
 
   // SD (optional but required for PCAP capture files)
   mountSdCard(true);
+  nd_usb_msc_tdisplay_init();
 
 #if defined(NEONDRIVE_TARGET_CYD35) && !defined(NEONDRIVE_TARGET_BUTTON_NAV) && defined(ND_TOUCH_CAL_WIZARD) && (ND_TOUCH_CAL_WIZARD == 1)
   initCyd35TouchCalibrationFromSdOrWizard();
@@ -16005,7 +16659,7 @@ void setup() {
   verboseSerial = cfg.telemetry_verboseSerial;
   printConfigSerial(cfg);
   Serial.println("[dbg] monitor commands: 'v' toggle verbose, 's' status snapshot");
-  bruceInit();
+  PACKETLABInit();
 
   // Initialize Deauth Hunter
   DeauthHunter::init();
@@ -16053,7 +16707,7 @@ void loop() {
   }
 #endif
   handleSerialDebugCommands();
-  bruceMenuTick();
+  PACKETLABMenuTick();
   timeServiceTick();
   GpsService::tick();
   sw1Tick();
@@ -16141,7 +16795,7 @@ void loop() {
   scopeTick();
   reconTick();
   portScannerTick();
-  bruceMonitorTick();
+  PACKETLABMonitorTick();
   updateHypercubeActivity();
   HypercubeWidget::tick();
 #if defined(NEONDRIVE_TARGET_M5TAB5)
@@ -16292,7 +16946,7 @@ void loop() {
           break;
         case 7:
           Serial.println("[ui] Home -> Packet Lab");
-          setScreen(ScreenId::BRUCE_MENU);
+          setScreen(ScreenId::PACKETLAB_MENU);
           break;
         case 8:
           Serial.println("[ui] Home -> WARDRIVE");
@@ -16610,46 +17264,46 @@ void loop() {
     return;
   }
 
-  // BRUCE_MENU
-  if (screen == ScreenId::BRUCE_MENU) {
-    bruceMenuTick_UI(tx, ty);
+  // PACKETLAB_MENU
+  if (screen == ScreenId::PACKETLAB_MENU) {
+    PACKETLABMenuTick_UI(tx, ty);
     return;
   }
 
-  // BRUCE_SET_TARGET
-  if (screen == ScreenId::BRUCE_SET_TARGET) {
-    bruceSetTargetTick_UI(tx, ty);
+  // PACKETLAB_SET_TARGET
+  if (screen == ScreenId::PACKETLAB_SET_TARGET) {
+    PACKETLABSetTargetTick_UI(tx, ty);
     return;
   }
 
-  // BRUCE_MONITOR
-  if (screen == ScreenId::BRUCE_MONITOR) {
-    if (hit(btnBruceMonBack, tx, ty)) {
-      if (bruceIsAttacking()) {
-        Serial.println("[BRUCE_MON] STOP pressed - stopping attack");
-        bruceStopAttack();
-        bruceCloseCaptures();
+  // PACKETLAB_MONITOR
+  if (screen == ScreenId::PACKETLAB_MONITOR) {
+    if (hit(btnPACKETLABMonBack, tx, ty)) {
+      if (PACKETLABIsAttacking()) {
+        Serial.println("[PACKETLAB_MON] STOP pressed - stopping attack");
+        PACKETLABStopAttack();
+        PACKETLABCloseCaptures();
         // Stay on monitor screen so user can see the final summary
-        bruceMonLastUpdateMs = 0;  // force immediate redraw
+        PACKETLABMonLastUpdateMs = 0;  // force immediate redraw
       } else {
-        Serial.println("[BRUCE_MON] BACK pressed - returning to menu");
-        setScreen(ScreenId::BRUCE_MENU);
+        Serial.println("[PACKETLAB_MON] BACK pressed - returning to menu");
+        setScreen(ScreenId::PACKETLAB_MENU);
       }
       waitTouchRelease();
       return;
     }
-    if (hit(btnBruceMonFiles, tx, ty)) {
-      Serial.println("[BRUCE_MON] FILES button pressed");
+    if (hit(btnPACKETLABMonFiles, tx, ty)) {
+      Serial.println("[PACKETLAB_MON] FILES button pressed");
       monitorPushLine(TFT_CYAN,  "-- FILES --");
-      if (brucePcapPath[0])
-        monitorPushLine(TFT_WHITE, "%.60s", brucePcapPath);
+      if (PACKETLABPcapPath[0])
+        monitorPushLine(TFT_WHITE, "%.60s", PACKETLABPcapPath);
       else
         monitorPushLine(0x7BCF, "(no pcap – SD unavail)");
-      if (bruceSessionLogPath[0])
-        monitorPushLine(TFT_WHITE, "%.60s", bruceSessionLogPath);
+      if (PACKETLABSessionLogPath[0])
+        monitorPushLine(TFT_WHITE, "%.60s", PACKETLABSessionLogPath);
       else
         monitorPushLine(0x7BCF, "(no log  – SD unavail)");
-      drawBruceMonitorTerminal();
+      drawPACKETLABMonitorTerminal();
       waitTouchRelease();
       return;
     }

@@ -67,6 +67,31 @@ For the NEONDRIVE T-Display-S3 HAL profile:
 - Keep nav buttons on `GPIO0` (next) and `GPIO14` (select).
 - If touch is enabled, use I2C on `SCL=17`, `SDA=18`, with `INT=16`, `RST=21`.
 
+## TF Shield SD + USB MSC (T-Display Only)
+
+- TF shield SD wiring (SD_MMC 1-bit path):
+  - `CLK` = `GPIO11`
+  - `CMD` = `GPIO13`
+  - `D0` = `GPIO12`
+- USB composite mode is enabled for both T-Display firmware targets:
+  - `firmware_t_display_s3`
+  - `firmware_t_display_s3_touch`
+- Composite interfaces:
+  - USB CDC for serial logs/monitor
+  - USB MSC for SD card mass storage
+- SD arbitration behavior:
+  - when host has mounted MSC storage, app-side SD writes are blocked (`sd_app_locked=1`)
+  - status flags are available in runtime logs and `/api/status`
+
+### Flash + Serial Coexistence Notes (Windows)
+
+- Flashing still uses ESP32-S3 ROM download mode (`esptool`) and works with composite firmware.
+- After boot, Windows may assign a different COM number for CDC. Re-check before opening monitor.
+- Recommended flow:
+  1. Flash with selected upload port.
+  2. Let board reboot to composite firmware.
+  3. Run `python -m platformio device list` and attach monitor to the current CDC port.
+
 ## Source References
 
 - LilyGO T-Display-S3 repository: [https://github.com/Xinyuan-LilyGO/T-Display-S3](https://github.com/Xinyuan-LilyGO/T-Display-S3)

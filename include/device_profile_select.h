@@ -7,6 +7,8 @@
   #include "device_profiles/profile_m5cardputer.h"
 #elif defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
   #include "device_profiles/profile_t_embed_cc1101.h"
+#elif defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
+  #include "device_profiles/profile_t_display_s3_touch.h"
 #elif defined(NEONDRIVE_TARGET_TDISPLAY_S3)
   #include "device_profiles/profile_t_display_s3.h"
 #elif defined(NEONDRIVE_TARGET_CYD35)

@@ -9,6 +9,7 @@ NEONDRIVE is a multi-target ESP32 firmware + companion workflow project for auth
 | CYD 2.4 (ESP32-2432S024 family) | `firmware_cyd_2_4` | Touch (XPT2046) |
 | CYD 3.5 (ESP32-3248S035) | `firmware_cyd_3_5` | Touch (XPT2046) |
 | LilyGO T-Display-S3 | `firmware_t_display_s3` | Hardware buttons (short press = left/right, long press = select); no-touch profile by default |
+| LilyGO T-Display-S3 Touch | `firmware_t_display_s3_touch` | Touch + hardware buttons (short press = left/right, long press = select) |
 | M5Stack Tab5 (ESP32-P4 + C6) | `firmware_m5tab5` | Touch (GT911 via M5GFX) |
 
 - One repo supports multiple real hardware families through explicit PlatformIO environments.
@@ -43,9 +44,24 @@ Or use the helper scripts:
 ```bat
 scripts\flash_m5tab5.cmd COM17
 scripts\monitor_m5tab5.cmd COM17
+scripts\flash_tdisplay_s3_touch.cmd COM7
+scripts\monitor_tdisplay_s3_touch.cmd COM7
 ```
 
 Use `python -m platformio device list` to discover serial ports.
+
+## T-Display-S3 USB Composite Mode (CDC + MSC)
+
+For `firmware_t_display_s3` and `firmware_t_display_s3_touch`, firmware enables USB composite mode on boot:
+
+- `CDC` serial remains available for logs/monitor and command input.
+- `MSC` exposes the TF shield SD card as a removable drive in Windows.
+- Runtime status surfaces:
+  - `usb_msc_active`
+  - `sd_host_mounted`
+  - `sd_app_locked`
+
+When Windows has the SD mounted, firmware SD writes are locked to prevent corruption.
 
 ## Supported Targets
 

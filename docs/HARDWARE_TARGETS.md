@@ -38,12 +38,19 @@ Primary install guide:
 > Use at your own risk and please report issues.
 
 - PlatformIO env: `firmware_t_display_s3`
+- Touch variant env: `firmware_t_display_s3_touch`
 - Flash script: `scripts\flash_tdisplay_s3.cmd [COM_PORT]`
 - Monitor script: `scripts\monitor_tdisplay_s3.cmd [COM_PORT]`
+- Touch flash script: `scripts\flash_tdisplay_s3_touch.cmd [COM_PORT]`
+- Touch monitor script: `scripts\monitor_tdisplay_s3_touch.cmd [COM_PORT]`
 - Typical default port in this workspace: `COM3`
 - Input support in firmware:
   - capacitive touch auto-detect (if touch controller is populated)
   - hardware button fallback: `BUTTON_1` = Next, `BUTTON_2` = Select
+- USB (T-Display targets only):
+  - CDC + MSC composite enabled on boot
+  - SD card exposed to host as removable drive via TF shield
+  - app-side SD writes are locked while host MSC mount is active
 
 ### M5Stack Tab5
 
