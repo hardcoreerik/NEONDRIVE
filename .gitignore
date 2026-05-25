@@ -29,6 +29,7 @@ Thumbs.db
 include/*.ico
 docs/just_go_mock.png
 docs/mockups/*.png
+compile_commands.json
 
 # Android companion build outputs
 # (inner CYDCompanion/.gitignore handles build/, .gradle/, local.properties)

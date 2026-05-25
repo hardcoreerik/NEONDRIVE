@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 
 function Resolve-PioExe {
     $candidates = @(
-        "C:\Users\<user>\AppData\Local\Python\pythoncore-3.14-64\Scripts\pio.exe",
+        "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe",
         "pio.exe"
     )
     foreach ($c in $candidates) {

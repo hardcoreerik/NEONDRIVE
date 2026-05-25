@@ -74,4 +74,3 @@ First actions:
 2. Summarize what is currently uncommitted.
 3. Continue from existing Tab5 SD/HAL work without discarding local edits.
 ---
-
