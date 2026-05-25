@@ -15714,9 +15714,15 @@ void setup() {
 
 void loop() {
 #if defined(NEONDRIVE_USES_M5GFX)
-  // M5.update() pumps the touch state machine (Tab5) and keyboard (Cardputer).
+  // Pump the M5 state machine (touch on Tab5, keyboard on Cardputer).
   // Must be called once per loop before any touch or key read.
+  // Cardputer uses M5Cardputer.update() — it overrides M5.update() to also
+  // call Keyboard.updateKeyList() via TCA8418. M5.update() alone skips that.
+#if defined(NEONDRIVE_TARGET_M5CARDPUTER)
+  M5Cardputer.update();
+#else
   M5.update();
+#endif
 #if defined(NEONDRIVE_TARGET_M5TAB5)
   tab5RotationTick();
 #endif

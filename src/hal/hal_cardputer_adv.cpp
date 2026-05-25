@@ -106,13 +106,25 @@ neon_touch_t neon_hal_touch_get(void)
 // ── Keyboard ──────────────────────────────────────────────────────────────────
 //
 // M5Cardputer.update() must be called each frame before neon_hal_key_get().
-// The TCA8418 controller reports key-down events; we return one event per call.
+// That calls updateKeyList() + updateKeysState() which populate the state struct.
+//
+// KeysState API (from Keyboard.h):
+//   state.enter  — bool, true when Enter is held
+//   state.del    — bool, true when Backspace is held
+//   state.fn     — bool, true when FN is held
+//   state.shift  — bool, true when Shift is held
+//   state.ctrl   — bool, true when Ctrl is held
+//   state.word   — std::vector<char>, printable chars only (no Enter/BS/arrow codes)
+//
+// There are NO dedicated arrow keys on this keyboard.
+// Navigation uses FN + WASD (fn=true, word contains 'w'/'a'/'s'/'d').
 //
 // Key mapping:
-//   Arrow cluster (fn+wasd or dedicated keys) → NeonKey::UP/DOWN/LEFT/RIGHT
-//   Enter / Return                            → NeonKey::ENTER
-//   Backspace / ESC                           → NeonKey::BACK
-//   Printable ASCII                           → NeonKey::CHAR + ch
+//   FN + W/A/S/D  → NeonKey::UP/LEFT/DOWN/RIGHT
+//   Enter         → NeonKey::ENTER   (state.enter bool)
+//   Backspace     → NeonKey::BACK    (state.del bool)
+//   OPT key       → NeonKey::BACK    (state.opt bool — acts as ESC/back)
+//   Printable     → NeonKey::CHAR + ch
 
 neon_key_t neon_hal_key_get(void)
 {
@@ -122,36 +134,46 @@ neon_key_t neon_hal_key_get(void)
         return result;
     }
 
-    // getKey() returns a Keyboard_Class::KeysState struct with pressed/released arrays
     auto &kb = M5Cardputer.Keyboard;
+    if (!kb.isPressed()) {
+        return result;  // key-up event — no action
+    }
 
-    // Check the most recent key press
-    if (kb.isPressed()) {
-        auto state = kb.keysState();
-        // Iterate through currently-held keys; take the first non-modifier
+    const auto &state = kb.keysState();
+
+    // Enter
+    if (state.enter) {
+        result.key = NeonKey::ENTER;
+        return result;
+    }
+
+    // Backspace or OPT → Back
+    if (state.del || state.opt) {
+        result.key = NeonKey::BACK;
+        return result;
+    }
+
+    // FN + WASD → directional navigation
+    if (state.fn) {
         for (char c : state.word) {
-            if (c == 0) continue;
-
-            // Navigation mappings — M5Cardputer uses special values for arrow keys
-            // The M5Cardputer keyboard maps arrow keys via fn+wasd by default
-            switch ((uint8_t)c) {
-                case 0xB5: result.key = NeonKey::UP;    return result; // Arrow Up
-                case 0xB6: result.key = NeonKey::DOWN;  return result; // Arrow Down
-                case 0xB4: result.key = NeonKey::LEFT;  return result; // Arrow Left
-                case 0xB7: result.key = NeonKey::RIGHT; return result; // Arrow Right
-                case '\n':
-                case '\r': result.key = NeonKey::ENTER; return result;
-                case 0x08:
-                case 0x7F: result.key = NeonKey::BACK;  return result; // Backspace / Del
-                case 0x1B: result.key = NeonKey::BACK;  return result; // ESC
-                default:
-                    if (c >= 0x20 && c < 0x7F) {
-                        result.key = NeonKey::CHAR;
-                        result.ch  = c;
-                        return result;
-                    }
-                    break;
+            switch (c) {
+                case 'w': case 'W': result.key = NeonKey::UP;    return result;
+                case 's': case 'S': result.key = NeonKey::DOWN;  return result;
+                case 'a': case 'A': result.key = NeonKey::LEFT;  return result;
+                case 'd': case 'D': result.key = NeonKey::RIGHT; return result;
+                default: break;
             }
+        }
+        // FN held alone or FN + unrecognised key — ignore
+        return result;
+    }
+
+    // Printable character
+    for (char c : state.word) {
+        if (c >= 0x20 && c < 0x7F) {
+            result.key = NeonKey::CHAR;
+            result.ch  = c;
+            return result;
         }
     }
 
