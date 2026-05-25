@@ -12,7 +12,7 @@
  *          TODO: route neon_hal_touch_get() through XPT2046 once the
  *          existing touch path in main.cpp is migrated to the HAL.
  */
-#if !defined(NEONDRIVE_TARGET_M5TAB5)
+#if !defined(NEONDRIVE_TARGET_M5TAB5) && !defined(NEONDRIVE_TARGET_M5CARDPUTER)
 
 #include "neon_hal.h"
 #include <WiFi.h>
@@ -62,6 +62,7 @@ static const neon_hal_ui_t s_cyd_ui = {
     /* font_sm      */ nullptr, /* font_md */ nullptr,
     /* font_lg      */ nullptr, /* font_mono */ nullptr,
     /* text_size_sm */ 1, /* text_size_md */ 2, /* text_size_lg */ 3,
+    /* reserve_x    */ 0, /* reserve_y    */ 0, /* reserve_w    */ 0, /* reserve_h */ 0,
 #else
     // CYD 2.4" / 2.8" / T-Display-S3 / T-Embed — match existing constants
     /* safe_margin  */ 8,
@@ -76,6 +77,7 @@ static const neon_hal_ui_t s_cyd_ui = {
     /* font_sm      */ nullptr, /* font_md */ nullptr,
     /* font_lg      */ nullptr, /* font_mono */ nullptr,
     /* text_size_sm */ 1, /* text_size_md */ 2, /* text_size_lg */ 3,
+    /* reserve_x    */ 0, /* reserve_y    */ 0, /* reserve_w    */ 0, /* reserve_h */ 0,
 #endif
 };
 
@@ -125,4 +127,12 @@ neon_touch_t neon_hal_touch_get(void)
     return t;
 }
 
-#endif // !NEONDRIVE_TARGET_M5TAB5
+// ── Keyboard ──────────────────────────────────────────────────────────────────
+// CYD / T-Display-S3 / T-Embed have no physical keyboard — stub returns NONE.
+
+neon_key_t neon_hal_key_get(void)
+{
+    return { NeonKey::NONE, 0 };
+}
+
+#endif // !NEONDRIVE_TARGET_M5TAB5 && !NEONDRIVE_TARGET_M5CARDPUTER

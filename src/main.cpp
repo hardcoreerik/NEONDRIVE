@@ -7,6 +7,10 @@
 // M5.Lcd (M5GFX) is aliased to 'tft' so all draw call sites are unchanged.
 #include <M5Unified.h>
 #include "device_profile_select.h"
+#elif defined(NEONDRIVE_TARGET_M5CARDPUTER)
+// Cardputer Adv: M5GFX via M5Cardputer library; 240×135 ST7789, keyboard input.
+#include <M5Cardputer.h>
+#include "device_profile_select.h"
 #else
 #include <TFT_eSPI.h>
 
@@ -34,7 +38,7 @@
 #if defined(NEONDRIVE_TARGET_CYD28)
 #include <XPT2046_Bitbang.h>
 #endif
-#endif // NEONDRIVE_TARGET_M5TAB5
+#endif // NEONDRIVE_USES_M5GFX / TFT_eSPI
 #include <LittleFS.h>
 #include <SD.h>
 using fs::File;
@@ -140,6 +144,42 @@ static constexpr int PIN_SD_MOSI   = 44;
 static constexpr int PIN_SD_CS     = 42;
 static constexpr int PIN_SW1       = -1;
 // Backlight and RGB LED managed by M5GFX; no discrete PWM pins exposed here.
+static constexpr int BL_PINS[] = {-1};
+static constexpr uint8_t BL_PWM_CHANNELS[] = {4};
+static constexpr int LED_PINS[] = {-1, -1, -1};
+static constexpr uint8_t LED_PWM_CHANNELS[] = {0, 1, 2};
+
+#elif defined(NEONDRIVE_TARGET_M5CARDPUTER)
+// M5Stack Cardputer Advanced — ESP32-S3FN8 (8 MB flash, no PSRAM)
+// Display: 1.14" ST7789V2 240×135, managed by M5GFX via M5Cardputer.
+// Input: 56-key TCA8418 I²C keyboard (SDA=GPIO8, SCL=GPIO9, INT=GPIO11).
+// SD: SPI — SCK=40, MISO=39, MOSI=14, CS=12.  No touch, no IMU.
+static constexpr bool BOARD_HAS_TOUCH = false;
+static constexpr bool BOARD_HAS_IMU   = false;
+static constexpr bool BOARD_HAS_SD    = true;
+static constexpr bool TFT_USES_SPI_BUS = false;  // M5GFX owns display
+static constexpr int BOARD_TFT_ROTATION = 1;
+static constexpr bool BOARD_TFT_INVERT = false;
+static constexpr int PIN_LCD_POWER_ON = -1;
+static constexpr int PIN_TFT_SCLK = -1;
+static constexpr int PIN_TFT_MISO = -1;
+static constexpr int PIN_TFT_MOSI = -1;
+static constexpr int PIN_TFT_CS   = -1;
+static constexpr int PIN_TOUCH_CS  = -1;
+static constexpr int PIN_TOUCH_SDA = -1;
+static constexpr int PIN_TOUCH_SCL = -1;
+static constexpr int PIN_TOUCH_INT = -1;
+static constexpr int PIN_TOUCH_RST = -1;
+static constexpr int PIN_SD_SCLK  = 40;
+static constexpr int PIN_SD_MISO  = 39;
+static constexpr int PIN_SD_MOSI  = 14;
+static constexpr int PIN_SD_CS    = 12;
+static constexpr int PIN_NAV_NEXT   = -1;
+static constexpr int PIN_NAV_SELECT = -1;
+static constexpr int PIN_ENCODER_A  = -1;
+static constexpr int PIN_ENCODER_B  = -1;
+static constexpr int PIN_SW1 = -1;
+// Backlight managed by M5GFX; no discrete PWM pins.
 static constexpr int BL_PINS[] = {-1};
 static constexpr uint8_t BL_PWM_CHANNELS[] = {4};
 static constexpr int LED_PINS[] = {-1, -1, -1};
@@ -298,14 +338,11 @@ static bool g_touchInvertY = false;
 static int g_touchZMin = 80;
 #endif
 
-#if defined(NEONDRIVE_TARGET_M5TAB5)
-// M5.Display is a plain value member of M5Unified; binding a reference to it
-// generates a compile-time-constant address (&M + offsetof(Display)) and is
-// safe regardless of static-initialization order.  Avoid M5.Lcd here: Lcd is
-// a *reference member* (M5GFX &Lcd = Display) whose internal pointer is only
-// valid after M5Unified's constructor runs.  If main.cpp's statics initialise
-// before M5Unified::M is constructed, M5.Lcd resolves to null and every
-// subsequent tft.xxx() call crashes with a load-access-fault.
+#if defined(NEONDRIVE_USES_M5GFX)
+// M5.Display is a plain value member of M5Unified/M5Cardputer; binding a reference
+// to it generates a compile-time-constant address and is safe regardless of
+// static-initialization order.  Avoid M5.Lcd: it's a reference member whose
+// internal pointer is only valid after M5Unified's constructor runs.
 static M5GFX& tft = M5.Display;
 #else
 TFT_eSPI tft;
@@ -316,15 +353,14 @@ XPT2046_Touchscreen ts(PIN_TOUCH_CS);
 XPT2046_Bitbang cyd28Touch(PIN_TOUCH_SPI_MOSI, PIN_TOUCH_SPI_MISO, PIN_TOUCH_SPI_SCLK, PIN_TOUCH_CS,
                            (uint16_t)ND_DISPLAY_W, (uint16_t)ND_DISPLAY_H);
 #endif
-#endif // NEONDRIVE_TARGET_M5TAB5
+#endif // NEONDRIVE_USES_M5GFX
 
 static uint32_t g_touchDebounceUntilMs = 0;
 
 #if defined(NEONDRIVE_TARGET_M5TAB5)
-// Arduino-ESP32 v3.x (pioarduino/ESP-IDF 5.x) deprecated the channel-based LEDC
-// API (ledcSetup + ledcAttachPin) in favour of ledcAttach(pin, freq, res).
-// On Tab5 all BL_PINS and LED_PINS are -1 so these functions are never actually
-// called; the stubs exist only to satisfy the compiler.
+// pioarduino 55.03.38-1 (Arduino-ESP32 3.x / ESP-IDF 5.5) removed the old
+// channel-based LEDC API. Stub it out so BL/LED init code compiles — these
+// functions are never actually called on Tab5 (all BL/LED pins are -1).
 static inline void ledcSetup(uint8_t, uint32_t, uint8_t) {}
 static inline void ledcAttachPin(int, uint8_t) {}
 #endif // NEONDRIVE_TARGET_M5TAB5
@@ -767,6 +803,9 @@ static bool touch_read_point(TouchState& s) {
 #elif defined(NEONDRIVE_TARGET_TEMBED)
   // T-Embed uses encoder/buttons only; no touch controller.
   return false;
+#elif defined(NEONDRIVE_TARGET_M5CARDPUTER)
+  // Cardputer has no touch screen — navigation is keyboard-only.
+  return false;
 #else
   // NOTE: On some CYD/XPT2046 boards, ts.touched() can get "stuck true" after redraws.
   // We avoid that by always sampling getPoint() and using pressure (z) as truth.
@@ -960,7 +999,9 @@ static void drawWifiConfig();
 static void drawStartupConfig();
 static void drawTelemetryConfig();
 static void drawWifiConnect();
+static void drawWifiRadarSweep();
 static void drawWifiPasswordModal();
+static void applyFont(const void *font, int fallback_size);
 static void drawWebserver();
 static void drawMonitor();
 static void drawJustGo();
@@ -1435,7 +1476,7 @@ static void startJammitWifi();
 static void stopJammitWifi();
 
 static esp_err_t tryAlternateTx(const uint8_t* pkt, int len) {
-#if defined(NEONDRIVE_TARGET_M5TAB5)
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER)
   (void)pkt; (void)len;
   return neon_rf_log_unsupported("tryAlternateTx");
 #endif
@@ -1849,7 +1890,7 @@ static int sniffPps = 0;
 static void applyChannelLockIfNeeded() {
   if (!hasTarget) return;
   if (!lockChannel) return;
-#if defined(NEONDRIVE_TARGET_M5TAB5)
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER)
   return;
 #endif
   // Lock radio to the target channel (STA mode). This is passive monitoring.
@@ -1857,7 +1898,7 @@ static void applyChannelLockIfNeeded() {
 }
 
 static void startSniff() {
-#if defined(NEONDRIVE_TARGET_M5TAB5)
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER)
   neon_rf_set_last_action("startSniff");
   neon_rf_log_unsupported("startSniff");
   return;
@@ -2094,9 +2135,9 @@ static void stopSniff() {
   captureMode = CaptureMode::NONE;   // also reset capture mode
   autoMode = AutoMode::NONE;
 
-#if defined(NEONDRIVE_TARGET_M5TAB5)
-  // startSniff() is a no-op on Tab5; no local radio state to teardown.
-  Serial.println("[sniff] stopSniff: no-op on Tab5 (RF not active)");
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER)
+  // startSniff() is a no-op on these targets; no local radio state to teardown.
+  Serial.println("[sniff] stopSniff: no-op (RF not supported on this target)");
   return;
 #endif
 
@@ -2197,6 +2238,11 @@ int apCount = 0;
 int apScroll = 0;
 int apSelected = -1;
 bool wifiIsScanning = false;
+static bool wifiPrimedByIndex[MAX_APS] = {};
+static String wifiPrimedBssids[MAX_APS];
+static int wifiPrimedCount = 0;
+static float wifiRadarSweepDeg = 0.0f;
+static uint32_t wifiRadarLastMs = 0;
 
 // Confirm-before-target (Milestone D v3)
 static bool wifiConfirmActive = false;
@@ -2217,6 +2263,54 @@ static const char* authToStr(wifi_auth_mode_t a) {
 #endif
     default: return "SEC?";
   }
+}
+
+static void wifiRefreshPrimedCount() {
+  wifiPrimedCount = 0;
+  for (int i = 0; i < apCount; i++) if (wifiPrimedByIndex[i]) wifiPrimedCount++;
+}
+
+static void wifiSnapshotPrimedByBssid() {
+  for (int i = 0; i < MAX_APS; i++) wifiPrimedBssids[i] = "";
+  int w = 0;
+  for (int i = 0; i < apCount && w < MAX_APS; i++) {
+    if (!wifiPrimedByIndex[i]) continue;
+    wifiPrimedBssids[w++] = aps[i].bssid;
+  }
+}
+
+static void wifiRestorePrimedByBssid() {
+  for (int i = 0; i < MAX_APS; i++) wifiPrimedByIndex[i] = false;
+  for (int i = 0; i < apCount; i++) {
+    for (int j = 0; j < MAX_APS; j++) {
+      if (wifiPrimedBssids[j].isEmpty()) continue;
+      if (aps[i].bssid.equalsIgnoreCase(wifiPrimedBssids[j])) {
+        wifiPrimedByIndex[i] = true;
+        break;
+      }
+    }
+  }
+  wifiRefreshPrimedCount();
+}
+
+static void wifiTogglePrimedIndex(int idx) {
+  if (idx < 0 || idx >= apCount) return;
+  wifiPrimedByIndex[idx] = !wifiPrimedByIndex[idx];
+  if (wifiPrimedByIndex[idx]) {
+    hasTarget = true;
+    target = aps[idx];  // Last checked wins for current TARGET screen compatibility.
+  } else if (wifiPrimedCount <= 1) {
+    bool any = false;
+    for (int i = 0; i < apCount; i++) {
+      if (!wifiPrimedByIndex[i]) continue;
+      target = aps[i];
+      hasTarget = true;
+      any = true;
+      break;
+    }
+    if (!any) hasTarget = false;
+  }
+  wifiRefreshPrimedCount();
 }
 
 // Scanning helpers are implemented in src/wifiscan.cpp
@@ -2817,10 +2911,10 @@ static void handleSerialRpcLine(const String& lineRaw) {
 
   if (cmd == "ai_inject_raw") {
     JsonDocument doc;
-#if defined(NEONDRIVE_TARGET_M5TAB5)
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER)
     neon_rf_set_last_action("usb_ai_inject_raw");
     doc["ok"] = false;
-    doc["error"] = "rf_unsupported:tab5";
+    doc["error"] = "rf_unsupported";
     doc["backend"] = neon_rf_get_caps()->backend_name;
     usbRpcSendJson(id, doc);
     return;
@@ -2845,10 +2939,10 @@ static void handleSerialRpcLine(const String& lineRaw) {
 
   if (cmd == "ai_inject_deauth") {
     JsonDocument doc;
-#if defined(NEONDRIVE_TARGET_M5TAB5)
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER)
     neon_rf_set_last_action("usb_ai_inject_deauth");
     doc["ok"] = false;
-    doc["error"] = "rf_unsupported:tab5";
+    doc["error"] = "rf_unsupported";
     doc["backend"] = neon_rf_get_caps()->backend_name;
     usbRpcSendJson(id, doc);
     return;
@@ -2966,8 +3060,7 @@ static void drawButton(const Button& b, uint16_t fill, uint16_t border, uint16_t
     if (tft.textWidth(b.label) > (drawW - labelInsetPx)) {
       applyFontSm();
       if (tft.textWidth(b.label) > (drawW - labelInsetPx)) {
-        tft.setFont(nullptr);
-        applyFontMd();
+        applyFont(nullptr, g_ui ? g_ui->text_size_md : 2);
       }
     }
   } else {
@@ -3104,8 +3197,7 @@ static void drawHomeButton(const Button& b, uint16_t border, uint16_t text) {
   if (g_ui && g_ui->font_sm) {
     applyFontSm();
     if (tft.textWidth(b.label) > (drawW - 10)) {
-      tft.setFont(nullptr);
-      applyFontSm();
+      applyFont(nullptr, g_ui ? g_ui->text_size_sm : 1);
     }
   } else {
     int labelSize = g_ui ? g_ui->text_size_sm : 1;
@@ -3212,6 +3304,10 @@ static int UI_TOP_GAP      = 6;
 static int UI_BOTTOM_BAR_H = 36;
 static int UI_BUTTON_H     = 30;
 static int UI_BUTTON_GAP   = 6;
+static int UI_HYPERCUB_RESERVE_X = 0;
+static int UI_HYPERCUB_RESERVE_Y = 0;
+static int UI_HYPERCUB_RESERVE_W = 0;
+static int UI_HYPERCUB_RESERVE_H = 0;
 
 static void initUiMetrics() {
   g_ui = neon_hal_ui_metrics();
@@ -3220,12 +3316,16 @@ static void initUiMetrics() {
   UI_BOTTOM_BAR_H = g_ui->bottom_bar_h;
   UI_BUTTON_H     = g_ui->btn_h;
   UI_BUTTON_GAP   = g_ui->btn_gap;
+  UI_HYPERCUB_RESERVE_X = g_ui->reserve_x;
+  UI_HYPERCUB_RESERVE_Y = g_ui->reserve_y;
+  UI_HYPERCUB_RESERVE_W = g_ui->reserve_w;
+  UI_HYPERCUB_RESERVE_H = g_ui->reserve_h;
 }
 
 // Apply a named font (Tab5) or fall back to integer text-size (CYD).
 // Always call this instead of tft.setTextSize() directly.
 static void applyFont(const void *font, int fallback_size) {
-#if defined(NEONDRIVE_TARGET_M5TAB5)
+#if defined(NEONDRIVE_USES_M5GFX)
   if (font) {
     tft.setFont(static_cast<const lgfx::IFont *>(font));
     tft.setTextSize(1);
@@ -3314,7 +3414,7 @@ static UiPanel uiMakePanel(const UiRect& frame, int left, int top, int right, in
 }
 
 static void beginPanelContent(const UiPanel& panel) {
-#if defined(NEONDRIVE_TARGET_M5TAB5)
+#if defined(NEONDRIVE_USES_M5GFX)
   tft.setClipRect(panel.contentRect.x, panel.contentRect.y, panel.contentRect.w, panel.contentRect.h);
 #else
   tft.setViewport(panel.contentRect.x, panel.contentRect.y, panel.contentRect.w, panel.contentRect.h);
@@ -3322,7 +3422,7 @@ static void beginPanelContent(const UiPanel& panel) {
 }
 
 static void endPanelContent() {
-#if defined(NEONDRIVE_TARGET_M5TAB5)
+#if defined(NEONDRIVE_USES_M5GFX)
   tft.clearClipRect();
 #else
   tft.resetViewport();
@@ -3469,7 +3569,7 @@ static Button btnHomePromptYes, btnHomePromptNo;
 
 static Button btnBack, btnSave;
 
-static Button btnWifiBack, btnWifiScan, btnWifiStop;
+static Button btnWifiBack, btnWifiScan, btnWifiRescan, btnWifiTargetGo, btnWifiConnect;
 static Button btnWifiUp, btnWifiDown;
 static Button btnWifiYes, btnWifiNo;
 static Button btnTargetBack, btnTargetAutomate, btnTargetMonitor, btnTargetSniff, btnTargetLock;
@@ -3515,6 +3615,8 @@ static int wifiRowH = 34;
 static int wifiListDrawX = 8;
 static int wifiListDrawW = 120;
 static Button btnWifiRows[4];
+static Button btnWifiChecks[4];
+static int wifiRadarX = 0, wifiRadarY = 0, wifiRadarW = 0, wifiRadarH = 0;
 
 static Button btnHopMinus, btnHopPlus;
 static Button btnScanMinus, btnScanPlus;
@@ -3806,9 +3908,11 @@ static volatile uint8_t brucePcapQueueHead = 0;  // write index
 static volatile uint8_t brucePcapQueueTail = 0;  // read  index
 
 #if defined(NEONDRIVE_TARGET_M5TAB5)
-static constexpr int MONITOR_MAX_LINES = 64;
+static constexpr int MONITOR_MAX_LINES = 64;   // 1280×720, ample DRAM
+#elif defined(NEONDRIVE_TARGET_M5CARDPUTER)
+static constexpr int MONITOR_MAX_LINES = 4;    // 240×135, no PSRAM — keep tight
 #else
-static constexpr int MONITOR_MAX_LINES = 6;  // Reduced to save DRAM
+static constexpr int MONITOR_MAX_LINES = 6;    // CYD / T-Display
 #endif
 struct MonitorLine {
   char text[48];  // Reduced to save DRAM
@@ -4174,13 +4278,27 @@ static void tdisplayNavBuild() {
       tdisplayNavPush(btnJustGoProfileNext);
       break;
     case ScreenId::WIFI_SCAN:
-      tdisplayNavPush(btnWifiBack);
-      tdisplayNavPush(btnWifiScan);
-      tdisplayNavPush(btnWifiStop);
-      tdisplayNavPush(btnWifiUp);
-      tdisplayNavPush(btnWifiDown);
-      for (int i = 0; i < 4; i++) {
-        if ((apScroll + i) < apCount) tdisplayNavPush(btnWifiRows[i]);
+      if (wifiConnectShowPasswordModal) {
+        for (int i = 0; i < wifiPwKeyCount; i++) tdisplayNavPush(btnWifiPwKeys[i]);
+        tdisplayNavPush(btnWifiPwShift);
+        tdisplayNavPush(btnWifiPwMode);
+        tdisplayNavPush(btnWifiPwBack);
+        tdisplayNavPush(btnWifiPwSpace);
+        tdisplayNavPush(btnWifiPwClear);
+        tdisplayNavPush(btnWifiPwCancel);
+        tdisplayNavPush(btnWifiPwConnect);
+      } else {
+        tdisplayNavPush(btnWifiBack);
+        tdisplayNavPush(btnWifiScan);
+        tdisplayNavPush(btnWifiRescan);
+        tdisplayNavPush(btnWifiTargetGo);
+        tdisplayNavPush(btnWifiConnect);
+        tdisplayNavPush(btnWifiUp);
+        tdisplayNavPush(btnWifiDown);
+        for (int i = 0; i < 4; i++) {
+          if ((apScroll + i) < apCount) tdisplayNavPush(btnWifiRows[i]);
+          if ((apScroll + i) < apCount) tdisplayNavPush(btnWifiChecks[i]);
+        }
       }
       break;
     case ScreenId::CONFIRM_TARGET:
@@ -4767,122 +4885,156 @@ static void drawConfirmTarget() {
 
 static void drawWifiScan() {
   tft.fillScreen(TFT_BLACK);
-  drawHeader("WiFi Scan");
+  drawHeader("WiFi Scanner");
   drawUniversalBackground();
 
   const int w = tft.width();
   const int h = tft.height();
   const bool compact = (h <= 180);
-  // Bottom controls on the left: Back / Scan / Stop.
-  const int btnGap = compact ? 4 : 8;
-  const int btnH = compact ? 24 : 30;
-  const int btnY = h - (compact ? 30 : 36);
-  const int btnX0 = 8;
-  const int leftControlW = max(compact ? 164 : 180, uiRightLimitForBand(btnY, btnH) - 8);
-  const int btnW = max(56, (leftControlW - (btnGap * 2)) / 3);
-  btnWifiBack = {btnX0 + (btnW + btnGap) * 0, btnY, btnW, btnH, "Back"};
-  btnWifiScan = {btnX0 + (btnW + btnGap) * 1, btnY, btnW, btnH, "Scan"};
-  btnWifiStop = {btnX0 + (btnW + btnGap) * 2, btnY, btnW, btnH, "Stop"};
+  const UiRect content = computeContentRect();
+  const UiRect bottom = computeBottomBarRect();
+  const int reserveLeft = (UI_HYPERCUB_RESERVE_W > 0) ? UI_HYPERCUB_RESERVE_X : w;
+  const int rightLimit = max(content.x + 120, min(content.x + content.w, reserveLeft - 6));
+  // Scale radar column from Tab5 baseline (260px @ 1280w ~= 20.3% width).
+  const int leftColW = clampi((w * 260) / 1280, compact ? 56 : 48, 260);
+  const int panelGap = compact ? 6 : 10;
+  const int leftX = content.x;
+  const int leftW = min(leftColW, rightLimit - leftX - 40);
+  const int rightX = leftX + leftW + panelGap;
+  const int rightW = max(100, rightLimit - rightX);
 
-  // Square scroll buttons under the ActionDock.
-  const int scrollBtn = clampi(ActionDockBoxW, compact ? 18 : 22, compact ? 24 : 30);
-  int scrollTopY = uiActionDockSafeBottom() + 3;
-  const int scrollGap = 6;
-  if (scrollTopY + (scrollBtn * 2) + scrollGap > btnY - 4) {
-    scrollTopY = btnY - 4 - ((scrollBtn * 2) + scrollGap);
-  }
-  const int scrollX = ActionDockBoxX + ((ActionDockBoxW - scrollBtn) / 2);
-  btnWifiUp   = {scrollX, scrollTopY, scrollBtn, scrollBtn, "^"};
-  btnWifiDown = {scrollX, scrollTopY + scrollBtn + scrollGap, scrollBtn, scrollBtn, "v"};
-
+  const int bottomBtnGap = compact ? 4 : 8;
+  const int bottomBtnW = max(50, (rightLimit - content.x - (bottomBtnGap * 3)) / 4);
+  btnWifiBack = {content.x, bottom.y, bottomBtnW, UI_BUTTON_H, "Back"};
+  btnWifiScan = {content.x + (bottomBtnW + bottomBtnGap), bottom.y, bottomBtnW, UI_BUTTON_H, "Scan"};
+  btnWifiRescan = {content.x + (bottomBtnW + bottomBtnGap) * 2, bottom.y, bottomBtnW, UI_BUTTON_H, "Rescan"};
+  btnWifiTargetGo = {content.x + (bottomBtnW + bottomBtnGap) * 3, bottom.y, bottomBtnW, UI_BUTTON_H, "Target"};
   drawButton(btnWifiBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
-  drawButton(btnWifiScan, TFT_DARKCYAN, TFT_MAGENTA, TFT_WHITE);
-  drawButton(btnWifiStop, TFT_MAROON, TFT_CYAN, TFT_WHITE);
-  drawButton(btnWifiUp, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
-  drawButton(btnWifiDown, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
-  uiLogButtonRect("WifiScan.Back", btnWifiBack);
-  uiLogButtonRect("WifiScan.Scan", btnWifiScan);
-  uiLogButtonRect("WifiScan.Stop", btnWifiStop);
-  uiLogButtonRect("WifiScan.Up", btnWifiUp);
-  uiLogButtonRect("WifiScan.Down", btnWifiDown);
-
-  // AP list on the left; right border aligned to ActionDock left edge.
-  const int wifiListXLocal = 8;
-  const int selectedY = compact ? (uiHeaderBandH() + 2) : 24;
-  const int wifiListRight = uiRightLimitForBand(selectedY, 14);
-  const int wifiListWLocal = max(120, wifiListRight - wifiListXLocal);
-  wifiListDrawX = wifiListXLocal;
-  wifiListDrawW = wifiListWLocal;
-
-  // Top layout bands (avoid overlaps): title -> selected -> status -> hint -> list.
-  const int statusY = selectedY + 12;
-  const int hintY = statusY + 12;
-  wifiListTopY = hintY + 14;
-  wifiListBottomY = btnY - 6;
-  const int availRowsH = wifiListBottomY - wifiListTopY;
-  wifiRowH = clampi(availRowsH / 4, compact ? 16 : 20, compact ? 24 : 30);  // Keep 4 visible rows.
-
-  // Status line
+  drawButton(btnWifiScan, TFT_DARKCYAN, TFT_WHITE, TFT_WHITE);
+  drawButton(btnWifiRescan, TFT_DARKGREEN, TFT_WHITE, TFT_WHITE);
+  drawButton(btnWifiTargetGo, 0x7800, TFT_MAGENTA, TFT_WHITE);
   tft.setTextDatum(TL_DATUM);
-  applyFontSm();
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  if (wifiIsScanning) {
-    tft.drawString("Scanning...", wifiListXLocal, statusY);
-    tft.drawString("Please wait...", wifiListXLocal, hintY);
-  } else {
-    char st[48];
-    snprintf(st, sizeof(st), "APs: %d", apCount);
-    tft.drawString(st, wifiListXLocal, statusY);
-    tft.drawString("Tap row to select target", wifiListXLocal, hintY);
-  }
 
-  // Draw visible rows (fixed count)
-  const int maxRows = min(4, (wifiListBottomY - wifiListTopY) / wifiRowH);
-  for (int r = 0; r < maxRows; r++) {
-    int idx = apScroll + r;
-    int y = wifiListTopY + r * wifiRowH;
-    bool sel = (idx == apSelected);
-    btnWifiRows[r] = {wifiListXLocal, y, wifiListWLocal, wifiRowH - 2, "AP"};
-    if (idx < apCount) drawWifiRow(idx, y, sel);
-    else {
-      // blank row
-      tft.fillRect(wifiListXLocal, y, wifiListWLocal, wifiRowH - 2, TFT_BLACK);
-      tft.drawRect(wifiListXLocal, y, wifiListWLocal, wifiRowH - 2, TFT_DARKGREY);
-    }
-  }
-  for (int r = maxRows; r < 4; r++) {
-    btnWifiRows[r] = {0, 0, 0, 0, ""};
-  }
-
-  // Selected line directly under title text.
-  tft.fillRect(0, selectedY - 2, w, 14, TFT_BLACK);
+  const int topY = content.y;
+  // Scale radar panel from Tab5 baseline (250px @ 720h ~= 34.7% height).
+  const int radarH = clampi((h * 250) / 720, compact ? 56 : 72, 250);
+  wifiRadarX = leftX;
+  wifiRadarY = topY;
+  wifiRadarW = leftW;
+  wifiRadarH = radarH;
+  tft.drawRoundRect(wifiRadarX, wifiRadarY, wifiRadarW, wifiRadarH, 8, TFT_GREEN);
   tft.setTextDatum(TL_DATUM);
   applyFontSm();
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  const int selectedMaxW = uiRightLimitForBand(selectedY, 14) - 8;
-  String selectedLine = "Selected: (none)";
+  tft.drawString("RADAR", wifiRadarX + 6, wifiRadarY + 4);
+
+  const int statsY = wifiRadarY + wifiRadarH + panelGap;
+  const int statsH = max(40, bottom.y - statsY - panelGap);
+  tft.drawRoundRect(leftX, statsY, leftW, statsH, 8, TFT_GREEN);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("NETWORKS: " + String(apCount), leftX + 6, statsY + 8);
+  tft.drawString("TARGETS: " + String(wifiPrimedCount), leftX + 6, statsY + 24);
+  tft.drawString(wifiIsScanning ? "SCAN: RUNNING" : "SCAN: IDLE", leftX + 6, statsY + 40);
+
+  // Keep selected-network card tall enough that details and Connect never overlap.
+  const int selectedH = compact ? 72 : 148;
+  tft.drawRoundRect(rightX, topY, rightW, selectedH, 8, TFT_GREEN);
+  applyFontSm();
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.drawString("SELECTED NETWORK", rightX + 6, topY + 6);
+  String ssid = "(none)";
+  if (apSelected >= 0 && apSelected < apCount) ssid = aps[apSelected].ssid.isEmpty() ? String("(hidden)") : aps[apSelected].ssid;
+  applyFontMd();
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  drawTextClipped(ssid, rightX + 6, topY + (compact ? 22 : 30), rightW - 12, TFT_CYAN, TFT_BLACK, true);
+  applyFontSm();
+  const int detailLine1Y = topY + (compact ? 40 : 66);
+  const int detailLine2Y = topY + (compact ? 52 : 84);
   if (apSelected >= 0 && apSelected < apCount) {
     const ApRecord& a = aps[apSelected];
-    selectedLine = "Selected: " + (a.ssid.isEmpty() ? String("(hidden)") : a.ssid) +
-                   " | CH " + String(a.channel) + " | " + String(a.rssi) + "dBm";
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    drawTextClipped("BSSID: " + a.bssid, rightX + 6, detailLine1Y, rightW - 12, TFT_WHITE, TFT_BLACK, false);
+    drawTextClipped("CH " + String(a.channel) + "  " + String(a.rssi) + "dBm  " + authToStr(a.auth),
+                    rightX + 6, detailLine2Y, rightW - 12, TFT_WHITE, TFT_BLACK, true);
   }
-  if (selectedMaxW > 20) {
-    bool trimmed = false;
-    while (selectedLine.length() > 4 && tft.textWidth(selectedLine) > selectedMaxW) {
-      selectedLine.remove(selectedLine.length() - 1);
-      trimmed = true;
-    }
-    if (trimmed && selectedLine.length() > 3) selectedLine += "...";
-    while (selectedLine.length() > 4 && tft.textWidth(selectedLine) > selectedMaxW) {
-      selectedLine.remove(selectedLine.length() - 1);
-    }
-  }
-  tft.drawString(selectedLine, 8, selectedY);
+  const int connectW = clampi(rightW / 3, compact ? 84 : 120, compact ? 120 : 180);
+  btnWifiConnect = {rightX + 6, topY + selectedH - (UI_BUTTON_H + 4), connectW, UI_BUTTON_H, "Connect"};
+  drawButton(btnWifiConnect, TFT_DARKCYAN, TFT_WHITE, TFT_WHITE);
 
-  UiRect bottom = computeBottomBarRect();
-  UiRect content = computeContentRect();
+  const int tableY = topY + selectedH + panelGap;
+  const int scrollBtn = compact ? 18 : 24;
+  wifiListTopY = tableY + 20;
+  wifiListBottomY = bottom.y - panelGap;
+  wifiListDrawX = rightX;
+  wifiListDrawW = rightW;
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.drawString("TARGET  SSID / BSSID", rightX + 2, tableY + 4);
+  tft.setTextDatum(TL_DATUM);
+
+  const int maxRows = min(4, max(1, (wifiListBottomY - wifiListTopY) / (compact ? 18 : 36)));
+  wifiRowH = max(18, (wifiListBottomY - wifiListTopY) / maxRows);
+  for (int r = 0; r < 4; r++) {
+    btnWifiRows[r] = {0,0,0,0,""};
+    btnWifiChecks[r] = {0,0,0,0,""};
+  }
+  for (int r = 0; r < maxRows; r++) {
+    const int idx = apScroll + r;
+    const int y = wifiListTopY + (r * wifiRowH);
+    const int rowH = wifiRowH - 2;
+    btnWifiRows[r] = {rightX, y, rightW, rowH, "AP"};
+    btnWifiChecks[r] = {rightX + 3, y + 3, compact ? 12 : 20, compact ? 12 : 20, ""};
+    const bool sel = (idx == apSelected);
+    tft.fillRect(rightX, y, rightW, rowH, sel ? TFT_DARKGREEN : TFT_BLACK);
+    tft.drawRect(rightX, y, rightW, rowH, sel ? TFT_MAGENTA : TFT_DARKGREY);
+    if (idx < apCount) {
+      tft.drawRect(btnWifiChecks[r].x, btnWifiChecks[r].y, btnWifiChecks[r].w, btnWifiChecks[r].h, TFT_MAGENTA);
+      if (wifiPrimedByIndex[idx]) tft.fillRect(btnWifiChecks[r].x + 2, btnWifiChecks[r].y + 2, btnWifiChecks[r].w - 4, btnWifiChecks[r].h - 4, TFT_MAGENTA);
+      const ApRecord& a = aps[idx];
+      tft.setTextColor(sel ? TFT_WHITE : TFT_CYAN, sel ? TFT_DARKGREEN : TFT_BLACK);
+      const String rowText = (a.ssid.isEmpty() ? String("(hidden)") : a.ssid) + "  " + a.bssid + "  CH" + String(a.channel) + "  " + String(a.rssi) + "dBm";
+      const int rowTextX = btnWifiChecks[r].x + btnWifiChecks[r].w + 6;
+      const int rowTextW = (rightX + rightW - rowTextX) - (scrollBtn + 8);
+      drawTextClipped(rowText, rowTextX, y + (compact ? 2 : 8), rowTextW, sel ? TFT_WHITE : TFT_CYAN, sel ? TFT_DARKGREEN : TFT_BLACK, true);
+    }
+  }
+
+  btnWifiUp = {rightX + rightW - scrollBtn, wifiListTopY - scrollBtn - 2, scrollBtn, scrollBtn, "^"};
+  btnWifiDown = {rightX + rightW - scrollBtn, wifiListBottomY - scrollBtn, scrollBtn, scrollBtn, "v"};
+  drawButton(btnWifiUp, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+  drawButton(btnWifiDown, TFT_DARKGREY, TFT_WHITE, TFT_WHITE);
+
+  if (wifiConnectShowPasswordModal) drawWifiPasswordModal();
+
   uiLogLayout("drawWifiScan", content, bottom);
   drawBorder();
+}
+
+static void drawWifiRadarSweep() {
+  if (screen != ScreenId::WIFI_SCAN) return;
+  if (wifiRadarW < 40 || wifiRadarH < 40) return;
+  const int cx = wifiRadarX + (wifiRadarW / 2);
+  const int cy = wifiRadarY + (wifiRadarH / 2) + 8;
+  const int r = min(wifiRadarW, wifiRadarH) / 2 - 16;
+  if (r <= 8) return;
+
+  tft.fillRect(wifiRadarX + 1, wifiRadarY + 16, wifiRadarW - 2, wifiRadarH - 18, TFT_BLACK);
+  tft.drawCircle(cx, cy, r, TFT_GREEN);
+  tft.drawCircle(cx, cy, (r * 2) / 3, 0x03E0);
+  tft.drawCircle(cx, cy, r / 3, 0x03E0);
+  tft.drawLine(cx - r, cy, cx + r, cy, 0x03E0);
+  tft.drawLine(cx, cy - r, cx, cy + r, 0x03E0);
+  for (int i = 0; i < min(apCount, 10); i++) {
+    const ApRecord& a = aps[i];
+    const float ar = (wifiRadarSweepDeg + (i * 37)) * 0.0174533f;
+    const int rr = map(constrain(-a.rssi, 35, 95), 35, 95, r / 5, r);
+    const int px = cx + (int)(cosf(ar) * rr);
+    const int py = cy + (int)(sinf(ar) * rr);
+    tft.fillCircle(px, py, 3, (i == apSelected) ? TFT_MAGENTA : TFT_CYAN);
+  }
+  const float sr = wifiRadarSweepDeg * 0.0174533f;
+  const int sx = cx + (int)(cosf(sr) * r);
+  const int sy = cy + (int)(sinf(sr) * r);
+  tft.drawLine(cx, cy, sx, sy, TFT_GREENYELLOW);
 }
 
 static void drawTargetDetails() {
@@ -6374,7 +6526,7 @@ static void push1tHandleBeacon(const uint8_t* frame, uint32_t len) {
 
 // Send a minimal 802.11 Probe Request with WPS IE to elicit a Probe Response.
 static void push1tSendProbeRequest() {
-#if defined(NEONDRIVE_TARGET_M5TAB5)
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER)
   neon_rf_set_last_action("push1tSendProbeRequest");
   neon_rf_log_unsupported("push1tSendProbeRequest");
   return;
@@ -9323,10 +9475,10 @@ function saveKeys() {
   // The WSL bypasser override is already installed so all mgmt frame
   // subtypes (deauth, disassoc, auth, probe, beacon, custom) pass through.
   webServer.on("/api/ai/inject_raw", HTTP_POST, [](){
-#if defined(NEONDRIVE_TARGET_M5TAB5)
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER)
     neon_rf_set_last_action("web_ai_inject_raw");
     webServer.send(501, "application/json",
-        "{\"ok\":false,\"error\":\"rf_unsupported:tab5\",\"backend\":\"tab5-none\"}");
+        "{\"ok\":false,\"error\":\"rf_unsupported\",\"backend\":\"none\"}");
     return;
 #endif
     if (!webServer.hasArg("plain")) {
@@ -9391,10 +9543,10 @@ function saveKeys() {
   // AI chooses reason code and burst count based on vendor/chipset profile.
   // Omitting "client" defaults to broadcast (kicks all associated stations).
   webServer.on("/api/ai/inject_deauth", HTTP_POST, [](){
-#if defined(NEONDRIVE_TARGET_M5TAB5)
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER)
     neon_rf_set_last_action("web_ai_inject_deauth");
     webServer.send(501, "application/json",
-        "{\"ok\":false,\"error\":\"rf_unsupported:tab5\",\"backend\":\"tab5-none\"}");
+        "{\"ok\":false,\"error\":\"rf_unsupported\",\"backend\":\"none\"}");
     return;
 #endif
     if (!webServer.hasArg("plain")) {
@@ -10136,7 +10288,8 @@ static void drawWebserver() {
 // Dynamic status line Y on WIFI_CONNECT (derived from current layout).
 
 static void refreshWifiStatusLine() {
-  if (screen != ScreenId::WIFI_CONNECT) return;
+  if (screen != ScreenId::WIFI_CONNECT && screen != ScreenId::WIFI_SCAN) return;
+  if (screen == ScreenId::WIFI_SCAN) return;
   const int w = tft.width();
   const int statusY = wifiConnectStatusLineY();
   // Clear status line area
@@ -10161,14 +10314,14 @@ static void refreshWifiStatusLine() {
 
 static void updateWifiConnectStatus() {
   wifiConnectTick(
-    screen == ScreenId::WIFI_CONNECT,
+    (screen == ScreenId::WIFI_CONNECT || screen == ScreenId::WIFI_SCAN),
     wifiConnectInProgress,
     wifiConnectStatus,
     wifiConnectAttemptMs,
     wifiConnectSsid,
     wifiConnectPassword,
     cfg,
-    drawWifiConnect,
+    (screen == ScreenId::WIFI_SCAN) ? drawWifiScan : drawWifiConnect,
     refreshWifiStatusLine,
     pushConsoleEventf
   );
@@ -10186,6 +10339,7 @@ static void wifiConnectScanTick() {
       wifiConnectStatus = "Scan timeout";
       Serial.println("[wifi] async scan timeout");
       if (screen == ScreenId::WIFI_CONNECT) drawWifiConnect();
+      if (screen == ScreenId::WIFI_SCAN) drawWifiScan();
     }
     return;
   }
@@ -10199,6 +10353,7 @@ static void wifiConnectScanTick() {
     Serial.println("[wifi] async scan failed");
   }
   if (screen == ScreenId::WIFI_CONNECT) drawWifiConnect();
+  if (screen == ScreenId::WIFI_SCAN) drawWifiScan();
 }
 
 static void monitorPushLine(uint16_t color, const char* fmt, ...) {
@@ -11232,10 +11387,10 @@ static void layoutReconBackButtonUnderActionDock(int modeRowY, int modeRowH) {
 }
 
 static bool startReconDeauthHunter(bool forceDisconnect) {
-#if defined(NEONDRIVE_TARGET_M5TAB5)
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER)
   neon_rf_set_last_action("startReconDeauthHunter");
   neon_rf_log_unsupported("startReconDeauthHunter");
-  reconStatusLine = "Deauth Hunter: not supported (Tab5 / no C6 backend)";
+  reconStatusLine = "Deauth Hunter: not supported (no local radio)";
   return false;
 #endif
   if (wifiStaHasValidIp() && !forceDisconnect) {
@@ -11767,7 +11922,7 @@ static void psDrawTinySparkline(const UiRect& r) {
   const int plotH = r.h - 20;
   if (plotW < 8 || plotH < 8) return;
   tft.fillRect(plotX, plotY, plotW, plotH, TFT_BLACK);
-  #if defined(NEONDRIVE_TARGET_M5TAB5)
+  #if defined(NEONDRIVE_USES_M5GFX)
   tft.setClipRect(plotX, plotY, plotW, plotH);
   #else
   tft.setViewport(plotX, plotY, plotW, plotH);
@@ -11780,7 +11935,7 @@ static void psDrawTinySparkline(const UiRect& r) {
     if (i > 0) tft.drawLine(px, py, x, y, TFT_CYAN);
     px = x; py = y;
   }
-  #if defined(NEONDRIVE_TARGET_M5TAB5)
+  #if defined(NEONDRIVE_USES_M5GFX)
   tft.clearClipRect();
   #else
   tft.resetViewport();
@@ -12583,10 +12738,10 @@ static void jammitInitSaveFiles() {
 
 // Set up WiFi in STA + WSL bypass + promiscuous (mirrors YoinkEngine startWifi)
 static void startJammitWifi() {
-#if defined(NEONDRIVE_TARGET_M5TAB5)
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER)
   neon_rf_set_last_action("startJammitWifi");
   neon_rf_log_unsupported("startJammitWifi");
-  jammitLog("JAMMIT blocked on Tab5 (no local radio; C6 backend not implemented)");
+  jammitLog("JAMMIT blocked (no local radio on this target)");
   return;
 #endif
   esp_wifi_set_promiscuous(false);
@@ -12622,8 +12777,8 @@ static void startJammitWifi() {
 
 // Tear down JAMMIT WiFi and restore STA mode
 static void stopJammitWifi() {
-#if defined(NEONDRIVE_TARGET_M5TAB5)
-  // startJammitWifi() is a no-op on Tab5; nothing to teardown.
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER)
+  // startJammitWifi() is a no-op on these targets; nothing to teardown.
   sniffActive = false;
   return;
 #endif
@@ -14978,6 +15133,8 @@ static void touch_init() {
                 (int)M5.Touch.isEnabled());
 #elif defined(NEONDRIVE_TARGET_TEMBED)
   Serial.println("[input] encoder + button navigation enabled (no touch)");
+#elif defined(NEONDRIVE_TARGET_M5CARDPUTER)
+  Serial.println("[input] keyboard navigation enabled (56-key TCA8418, no touch)");
 #elif defined(NEONDRIVE_TARGET_CYD28)
   if (TOUCH_USES_SEPARATE_SPI) {
     cyd28Touch.begin();
@@ -15353,12 +15510,26 @@ void setup() {
   // PI4IOE2 (0x44) is now initialised by M5GFX: C6 WiFi power/enable bits
   // are set HIGH.  Safe to init the RF layer and attempt SDIO contact.
   neon_rf_init();
+#elif defined(NEONDRIVE_TARGET_M5CARDPUTER)
+  {
+    auto cfg = M5.config();
+    M5Cardputer.begin(cfg, true);  // true = initialise keyboard (TCA8418)
+  }
+  // Landscape, USB connector on the right (matches physical keyboard orientation).
+  // Call setRotation exactly once — subsequent calls de-sync keyboard input.
+  tft.setRotation(1);
+  tft.fillScreen(TFT_BLACK);
+  drawBorder();
+  Serial.printf("[cardputer] display %dx%d  keyboard ready\n",
+                tft.width(), tft.height());
+  // On Cardputer, WiFi is on-chip ESP32-S3. No SDIO sequencing needed.
+  neon_rf_init();
 #else
   backlightBringup();
   display_init();
   HypercubeWidget::begin(tft);
   touch_init();
-#endif // NEONDRIVE_TARGET_M5TAB5
+#endif // NEONDRIVE_USES_M5GFX
 
   // LittleFS
   if (!LittleFS.begin(true)) {
@@ -15424,12 +15595,14 @@ void setup() {
 }
 
 void loop() {
-#if defined(NEONDRIVE_TARGET_M5TAB5)
-  // M5.update() pumps the GT911/ST7123 touch state machine. Must be called
-  // once per loop before any touch_read_point() call.
+#if defined(NEONDRIVE_USES_M5GFX)
+  // M5.update() pumps the touch state machine (Tab5) and keyboard (Cardputer).
+  // Must be called once per loop before any touch or key read.
   M5.update();
+#if defined(NEONDRIVE_TARGET_M5TAB5)
   tab5RotationTick();
 #endif
+#endif // NEONDRIVE_USES_M5GFX
   handleSerialDebugCommands();
   bruceMenuTick();
   timeServiceTick();
@@ -15532,6 +15705,15 @@ void loop() {
     updateWifiConnectStatus();
   }
   wifiConnectScanTick();
+  if (screen == ScreenId::WIFI_SCAN) {
+    uint32_t now = millis();
+    if (now - wifiRadarLastMs >= 80) {
+      wifiRadarLastMs = now;
+      wifiRadarSweepDeg += 7.0f;
+      if (wifiRadarSweepDeg >= 360.0f) wifiRadarSweepDeg -= 360.0f;
+      drawWifiRadarSweep();
+    }
+  }
   
   // Handle WebServer requests
   if (webServerRunning) {
@@ -15595,9 +15777,9 @@ void loop() {
         wifiConnectStatus = "Reconnecting to: " + cfg.wifi_ssid;
         wifiConnectSelectedIdx = -1;
         wifiConnectShowPasswordModal = false;
-        setScreen(ScreenId::WIFI_CONNECT);
+        setScreen(ScreenId::WIFI_SCAN);
         connectToWifi(cfg.wifi_ssid, cfg.wifi_password);
-        drawWifiConnect();
+        drawWifiScan();
         waitTouchRelease();
         return;
       }
@@ -15742,41 +15924,101 @@ void loop() {
   
   // WIFI SCAN (Milestone C)
   if (screen == ScreenId::WIFI_SCAN) {
-    const int w = tft.width();
-    const int wifiListXLocal = 8;
-    const int selectedY = (tft.height() <= 180) ? (uiHeaderBandH() + 2) : 24;
-    const int wifiListWLocal = max(120, uiRightLimitForBand(selectedY, 14) - wifiListXLocal);
+    if (wifiConnectShowPasswordModal) {
+      for (int i = 0; i < wifiPwKeyCount; i++) {
+        if (hit(btnWifiPwKeys[i], tx, ty)) {
+          if (wifiConnectPassword.length() < 63) wifiConnectPassword += wifiPwKeyValues[i];
+          if (wifiPwShift && !wifiPwSymbols) wifiPwShift = false;
+          drawWifiScan();
+          waitTouchRelease();
+          return;
+        }
+      }
+      if (hit(btnWifiPwShift, tx, ty)) {
+        if (wifiPwSymbols) { wifiPwSymbols = false; wifiPwShift = false; }
+        else wifiPwShift = !wifiPwShift;
+        drawWifiScan(); waitTouchRelease(); return;
+      }
+      if (hit(btnWifiPwMode, tx, ty)) {
+        wifiPwSymbols = !wifiPwSymbols; wifiPwShift = false;
+        drawWifiScan(); waitTouchRelease(); return;
+      }
+      if (hit(btnWifiPwBack, tx, ty)) {
+        if (!wifiConnectPassword.isEmpty()) wifiConnectPassword.remove(wifiConnectPassword.length() - 1);
+        drawWifiScan(); waitTouchRelease(); return;
+      }
+      if (hit(btnWifiPwClear, tx, ty)) {
+        wifiConnectPassword = "";
+        drawWifiScan(); waitTouchRelease(); return;
+      }
+      if (hit(btnWifiPwSpace, tx, ty)) {
+        if (wifiConnectPassword.length() < 63) wifiConnectPassword += " ";
+        drawWifiScan(); waitTouchRelease(); return;
+      }
+      if (hit(btnWifiPwCancel, tx, ty)) {
+        wifiConnectShowPasswordModal = false;
+        drawWifiScan(); waitTouchRelease(); return;
+      }
+      if (hit(btnWifiPwConnect, tx, ty)) {
+        if (apSelected >= 0 && apSelected < apCount && !wifiConnectPassword.isEmpty()) {
+          wifiConnectShowPasswordModal = false;
+          connectToWifi(aps[apSelected].ssid, wifiConnectPassword);
+        }
+        drawWifiScan(); waitTouchRelease(); return;
+      }
+      waitTouchRelease();
+      return;
+    }
 
-    // Buttons
     if (hit(btnWifiBack, tx, ty)) { setScreen(ScreenId::HOME); waitTouchRelease(); return; }
 
-    if (hit(btnWifiScan, tx, ty)) {
-      // show scanning status immediately
+    auto runWifiScanAndRestore = [&]() {
+      wifiSnapshotPrimedByBssid();
       wifiIsScanning = true;
       drawWifiScan();
       waitTouchRelease();
-
-      // blocking scan (simple + reliable)
       doWifiScanBlocking();
-
-      // Keep selected index valid after new list
+      wifiIsScanning = false;
+      wifiRestorePrimedByBssid();
       if (apSelected >= apCount) apSelected = -1;
       drawWifiScan();
+    };
+
+    if (hit(btnWifiScan, tx, ty) || hit(btnWifiRescan, tx, ty)) {
+      runWifiScanAndRestore();
       return;
     }
 
-    if (hit(btnWifiStop, tx, ty)) {
-      // For blocking scan, stop just clears state.
-      WiFi.scanDelete();
-      wifiIsScanning = false;
-      Serial.println("[wifi] stop (cleared scan state)");
+    if (hit(btnWifiTargetGo, tx, ty)) {
+      lockChannel = cfg.wifi_defaultLockChannel;
+      setScreen(ScreenId::TARGET_DETAILS);
+      waitTouchRelease();
+      return;
+    }
+
+    if (hit(btnWifiConnect, tx, ty)) {
+      if (apSelected < 0 || apSelected >= apCount) {
+        wifiConnectStatus = "Select a network first";
+        drawWifiScan();
+        waitTouchRelease();
+        return;
+      }
+      const ApRecord& selectedAp = aps[apSelected];
+      wifiConnectSelectedIdx = apSelected;
+      if (selectedAp.auth == WIFI_AUTH_OPEN) {
+        connectToWifi(selectedAp.ssid, "");
+      } else {
+        wifiConnectPassword = (cfg.wifi_ssid == selectedAp.ssid) ? cfg.wifi_password : "";
+        wifiPwShift = false;
+        wifiPwSymbols = false;
+        wifiConnectShowPasswordModal = true;
+      }
       drawWifiScan();
-      resetTouchLatch();
+      waitTouchRelease();
       return;
     }
 
-    // Scroll buttons
-    const int maxRows = min(4, (wifiListBottomY - wifiListTopY) / wifiRowH);
+    const int maxRows = min(4, max(1, (wifiListBottomY - wifiListTopY) / max(1, wifiRowH)));
     const int maxScroll = (apCount > maxRows) ? (apCount - maxRows) : 0;
 
     if (hit(btnWifiUp, tx, ty)) {
@@ -15792,22 +16034,22 @@ void loop() {
       return;
     }
 
-    // Tap-to-select row
-    if (tx >= wifiListXLocal && tx < (wifiListXLocal + wifiListWLocal) && ty >= wifiListTopY && ty < wifiListBottomY) {
-      int row = (ty - wifiListTopY) / wifiRowH;
-      int idx = apScroll + row;
-      if (idx >= 0 && idx < apCount) {
-        apSelected = idx;
-        hasTarget = true;
-        target = aps[apSelected];
-        const ApRecord& a = target;
-        Serial.printf("[wifi] pending target: ssid='%s' bssid=%s ch=%d rssi=%d auth=%s\n",
-                      a.ssid.c_str(), a.bssid.c_str(), a.channel, a.rssi, authToStr(a.auth));
-        // Show confirmation popup instead of jumping directly
-        setScreen(ScreenId::CONFIRM_TARGET);
+    for (int r = 0; r < 4; r++) {
+      const int idx = apScroll + r;
+      if (idx >= apCount) continue;
+      if (hit(btnWifiChecks[r], tx, ty)) {
+        wifiTogglePrimedIndex(idx);
+        drawWifiScan();
+        waitTouchRelease();
+        return;
       }
-      waitTouchRelease();
-      return;
+      if (hit(btnWifiRows[r], tx, ty)) {
+        apSelected = idx;
+        wifiConnectSelectedIdx = idx;
+        drawWifiScan();
+        waitTouchRelease();
+        return;
+      }
     }
 
     waitTouchRelease();
@@ -16432,13 +16674,11 @@ void loop() {
     if (hit(btnBack, tx, ty)) { setScreen(ScreenId::HOME); waitTouchRelease(); return; }
     if (hit(btnCfgWifi, tx, ty)) { setScreen(ScreenId::WIFI_CONFIG); waitTouchRelease(); return; }
     if (hit(btnCfgWifiConnect, tx, ty)) { 
-      // Open WiFi Connect without auto-scan; scan is manual via Scan button.
+      // Open unified WiFi scanner screen.
       wifiConnectStatus = "Press Scan to find networks";
-      wifiConnectSelectedIdx = -1;
-      wifiConnectScroll = 0;
-      Serial.println("[cfg] Opening WiFi Connect (manual scan)");
-      setScreen(ScreenId::WIFI_CONNECT); 
-      drawWifiConnect();
+      Serial.println("[cfg] Opening WiFi Scanner");
+      setScreen(ScreenId::WIFI_SCAN); 
+      drawWifiScan();
       waitTouchRelease();
       return; 
     }

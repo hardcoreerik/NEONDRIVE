@@ -77,10 +77,9 @@ String bruceFormatMAC(const uint8_t* mac);
 typedef void (*BruceFrameTxCallback)(const uint8_t* frame, size_t len, uint8_t channel);
 void bruceSetFrameCallback(BruceFrameTxCallback cb);
 
-#if defined(NEONDRIVE_TARGET_M5TAB5)
-// ESP32-P4 co-processor WiFi architecture does not support raw 802.11 frame
-// injection via esp_wifi_80211_tx. Provide no-op stubs so call sites in
-// main.cpp compile without change.
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER)
+// These targets do not support raw 802.11 frame injection via esp_wifi_80211_tx.
+// Provide no-op stubs so call sites in main.cpp compile without change.
 #include <Arduino.h>
 inline void bruceInit() {}
 inline void bruceStartDeauthFlood(const BruceTarget&, uint16_t) {}
@@ -104,5 +103,5 @@ inline String bruceFormatMAC(const uint8_t* mac) {
   return String(buf);
 }
 inline void bruceSetFrameCallback(BruceFrameTxCallback) {}
-#endif // NEONDRIVE_TARGET_M5TAB5
+#endif // NEONDRIVE_TARGET_M5TAB5 || NEONDRIVE_TARGET_M5CARDPUTER
 

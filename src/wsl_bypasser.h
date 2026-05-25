@@ -3,10 +3,9 @@
 // to allow transmission of management frames (deauth, disassoc, etc.)
 #pragma once
 
-#if defined(NEONDRIVE_TARGET_M5TAB5)
-// ESP32-P4 delegates WiFi to the ESP32-C6 co-processor.
-// ieee80211_raw_frame_sanity_check and esp_wifi_80211_tx are not available
-// via the same libnet80211 path as classic ESP32/S3. Provide no-ops.
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER)
+// These targets do not use the classic ESP32 libnet80211 frame injection path.
+// Provide no-op stubs so call sites in main.cpp compile without change.
 #include <esp_err.h>
 namespace WSLBypasser {
   inline bool isActive() { return false; }
@@ -45,4 +44,4 @@ void randomizeMAC();
 
 }  // namespace WSLBypasser
 
-#endif // NEONDRIVE_TARGET_M5TAB5
+#endif // NEONDRIVE_TARGET_M5TAB5 || NEONDRIVE_TARGET_M5CARDPUTER

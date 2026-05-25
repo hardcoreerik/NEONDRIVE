@@ -321,6 +321,75 @@ Do not touch `hal_cyd.cpp` values — they are calibrated to match the original 
 
 ---
 
+## M5Stack Cardputer Advanced Port (added 2026-05-24)
+
+### Hardware profile
+
+| Item | Value |
+|------|-------|
+| MCU | ESP32-S3FN8 (8 MB flash, no PSRAM) |
+| Display | 240×135 ST7789 (via M5Cardputer library / M5GFX) |
+| Keyboard | 56-key mechanical (TCA8418 I²C, polled via M5Cardputer.Keyboard) |
+| WiFi | On-chip ESP32-S3 (standard WiFi.h, same pattern as CYD) |
+| SD | SPI — SCK=40, MISO=39, MOSI=14, CS=12 |
+| Touch | None |
+| Sub-GHz radio | None |
+
+### Keyboard navigation model
+
+The Cardputer has no touch screen. Navigation is handled by the focus ring system:
+
+- `NeonKey` enum + `neon_key_t` struct declared in `src/hal/neon_hal.h`
+- `neon_hal_key_get()` polls `M5Cardputer.Keyboard.isChange()` and maps keys:
+  - `0xB5`=UP, `0xB6`=DOWN, `0xB4`=LEFT, `0xB7`=RIGHT
+  - `\n` / `\r` → `NeonKey::ENTER`
+  - `0x08` / `0x7F` / `0x1B` → `NeonKey::BACK`
+  - All other printable → `NeonKey::CHAR` + `ch`
+- CYD and Tab5 return `{NeonKey::NONE, 0}` (stubs in `hal_cyd.cpp`, `hal_m5tab5.cpp`)
+- Call `neon_hal_key_get()` in `loop()` guarded by `#if ND_HW_KEYBOARD`
+
+### HAL values for Cardputer (240×135)
+
+Defined in `src/hal/hal_cardputer_adv.cpp`. All fonts are `nullptr` (M5GFX `setTextSize`):
+
+| Field | Value |
+|-------|-------|
+| `safe_margin` | 4 |
+| `header_h` | 18 |
+| `row_h` | 12 |
+| `btn_h` | 20 |
+| `btn_gap` | 3 |
+| `bottom_bar_h` | 20 |
+| `pad` | 3 |
+| `border_r` | 4 |
+| `text_size_sm/md` | 1 (GLCD 6×8) |
+| `text_size_lg` | 2 (12×16, titles only) |
+
+### NEONDRIVE_USES_M5GFX umbrella macro
+
+`neon_hal.h` defines `NEONDRIVE_USES_M5GFX` when either `NEONDRIVE_TARGET_M5TAB5`
+or `NEONDRIVE_TARGET_M5CARDPUTER` is defined. Use this macro for any code that is
+M5GFX-generic (tft binding, clip rect, M5.begin, M5.update, applyFont).
+Use `#ifdef NEONDRIVE_TARGET_M5TAB5` only for Tab5-specific things (GT911 touch,
+1280×720 layout, SDIO WiFi, Tab5 rotation tick, screenshot overlay).
+
+### No-op stubs for excluded translation units
+
+`hypercube_widget.cpp`, `bruce_wifi.cpp`, and `wsl_bypasser.cpp` are excluded from
+the Cardputer build via `build_src_filter`. Their symbols are provided as inline
+stubs directly in the respective headers, guarded by `NEONDRIVE_TARGET_M5CARDPUTER`.
+When adding new symbols to these files, add matching inline stubs to their headers.
+
+### Flash command (Windows)
+
+```powershell
+$env:PYTHONUTF8=1; & "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -e firmware_cardputer_adv -t upload --upload-port COMx
+```
+
+Cardputer Adv auto-resets via DTR — no hold-RESET procedure required.
+
+---
+
 ## PlatformIO Environments
 
 | Environment | Board | Status |
@@ -331,14 +400,23 @@ Do not touch `hal_cyd.cpp` values — they are calibrated to match the original 
 | `firmware_t_display_s3` | LilyGO T-Display-S3 | ⚠️ Beta |
 | `firmware_t_embed_cc1101` | LilyGO T-Embed CC1101 | 🚧 Untested |
 | `firmware_m5tab5` | M5Stack Tab5 (ESP32-P4) | ✅ Display + touch working, WiFi working |
+| `firmware_cardputer_adv` | M5Stack Cardputer Adv (ESP32-S3) | 🚧 Alpha — compiles, untested on hardware |
 
 Flash command: `pio run -e <env> -t upload --upload-port <COMx>`
 
 Tab5 download mode: hold RESET ~2 s until green LED blinks rapidly, then release.
 
-**Tab5 flash on Windows** — esptool crashes with `UnicodeEncodeError` on the chip info output unless UTF-8 is forced:
+**Tab5 / Cardputer flash on Windows** — esptool crashes with `UnicodeEncodeError` unless UTF-8 is forced:
 ```powershell
 $env:PYTHONUTF8=1; & "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -e firmware_m5tab5 -t upload --upload-port COM4
+```
+
+**Tab5 esptool version note** — pioarduino requires its own patched esptool (hyphen args: `--flash-mode`,
+`--flash-freq`). The correct version is auto-installed by pioarduino's `configure_default_packages` via
+`uv pip install -e ~/.platformio/tools/tool-esptoolpy`. If `pip install esptool` is run manually, it will
+install the official PyPI version (underscore args) and break Tab5 builds. Restore with:
+```powershell
+& "$env:USERPROFILE\.platformio\penv\Scripts\uv.exe" pip install -e "$env:USERPROFILE\.platformio\tools\tool-esptoolpy" --python "$env:USERPROFILE\.platformio\penv\Scripts\python.exe"
 ```
 
 ---

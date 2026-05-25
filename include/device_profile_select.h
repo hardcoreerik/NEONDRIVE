@@ -3,6 +3,8 @@
 // Select active compile-time device profile.
 #if defined(NEONDRIVE_TARGET_M5TAB5)
   #include "device_profiles/profile_m5tab5.h"
+#elif defined(NEONDRIVE_TARGET_M5CARDPUTER)
+  #include "device_profiles/profile_m5cardputer.h"
 #elif defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
   #include "device_profiles/profile_t_embed_cc1101.h"
 #elif defined(NEONDRIVE_TARGET_TDISPLAY_S3)

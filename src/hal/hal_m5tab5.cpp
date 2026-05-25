@@ -70,6 +70,12 @@ static const neon_hal_ui_t s_tab5_ui = {
     /* text_size_sm */ 1,
     /* text_size_md */ 1,
     /* text_size_lg */ 1,
+
+    // Upper-right reserve for Hypercub widget.
+    /* reserve_x    */ 1040,
+    /* reserve_y    */ 6,
+    /* reserve_w    */ 230,
+    /* reserve_h    */ 130,
 };
 
 const neon_hal_ui_t *neon_hal_ui_metrics(void)
@@ -128,6 +134,14 @@ neon_touch_t neon_hal_touch_get(void)
     t.x       = td.x;
     t.y       = td.y;
     return t;
+}
+
+// ── Keyboard ──────────────────────────────────────────────────────────────────
+// Tab5 has no physical keyboard — stub returns NONE every call.
+
+neon_key_t neon_hal_key_get(void)
+{
+    return { NeonKey::NONE, 0 };
 }
 
 #endif // NEONDRIVE_TARGET_M5TAB5

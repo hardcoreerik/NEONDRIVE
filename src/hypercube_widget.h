@@ -1,7 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
-#if defined(NEONDRIVE_TARGET_M5TAB5)
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER)
 #include <M5GFX.h>
 #else
 #include <TFT_eSPI.h>
@@ -44,7 +44,7 @@ enum class Activity : uint8_t {
 };
 
 // Call once in setup() — creates the sprite and seeds rotation state.
-#if defined(NEONDRIVE_TARGET_M5TAB5)
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER)
 void begin(M5GFX& tft);
 #else
 void begin(TFT_eSPI& tft);
@@ -66,3 +66,18 @@ void setActivity(Activity a);
 Activity getActivity();
 
 } // namespace HypercubeWidget
+
+#if defined(NEONDRIVE_TARGET_M5CARDPUTER)
+// HypercubeWidget is not rendered on 240x135 — hypercube_widget.cpp is excluded
+// from the Cardputer build. Provide inline no-op stubs so call sites in main.cpp
+// compile and link without change.
+namespace HypercubeWidget {
+  inline void begin(M5GFX&) {}
+  inline void tick() {}
+  inline void notifyScreenDrawn() {}
+  inline void setEnabled(bool) {}
+  inline bool isEnabled() { return false; }
+  inline void setActivity(Activity) {}
+  inline Activity getActivity() { return Activity::IDLE; }
+} // namespace HypercubeWidget (stubs)
+#endif // NEONDRIVE_TARGET_M5CARDPUTER

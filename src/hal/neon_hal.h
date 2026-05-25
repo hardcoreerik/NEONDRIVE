@@ -10,8 +10,9 @@
  * No #ifdef blocks belong in feature code — they live in the HAL files.
  *
  * Current implementations:
- *   hal_m5tab5.cpp  — M5Stack Tab5 (ESP32-P4 + ESP32-C6 SDIO WiFi 6)
- *   hal_cyd.cpp     — CYD 2.4/2.8/3.5", T-Display-S3, T-Embed-CC1101
+ *   hal_m5tab5.cpp        — M5Stack Tab5 (ESP32-P4 + ESP32-C6 SDIO WiFi 6)
+ *   hal_cardputer_adv.cpp — M5Stack Cardputer Advanced (ESP32-S3, 240×135, keyboard)
+ *   hal_cyd.cpp           — CYD 2.4/2.8/3.5", T-Display-S3, T-Embed-CC1101
  *
  * Status: scaffold.  Stubs are in place; implementations expand as features
  *         are ported per-target.  Call sites in main.cpp will be migrated
@@ -20,6 +21,16 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+
+// ── M5GFX umbrella ────────────────────────────────────────────────────────────
+// Targets that share the M5GFX/M5Unified display stack.
+// Use NEONDRIVE_USES_M5GFX instead of NEONDRIVE_TARGET_M5TAB5 for any
+// code that is M5GFX-generic (tft binding, named fonts, clip rect, M5.update).
+// Tab5-specific code (SDIO WiFi, GT911 touch, IMU rotation) still uses
+// NEONDRIVE_TARGET_M5TAB5 directly.
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER)
+  #define NEONDRIVE_USES_M5GFX 1
+#endif
 
 // ── Display ───────────────────────────────────────────────────────────────────
 
@@ -103,7 +114,46 @@ struct neon_hal_ui_t {
     int text_size_sm;   ///< fallback setTextSize for non-Tab5 small
     int text_size_md;   ///< fallback setTextSize for non-Tab5 medium
     int text_size_lg;   ///< fallback setTextSize for non-Tab5 large
+
+    // Optional hard no-draw reserve rectangle (e.g., Hypercub overlay area).
+    // Set width/height to 0 to disable.
+    int reserve_x;
+    int reserve_y;
+    int reserve_w;
+    int reserve_h;
 };
 
 /** Return pointer to this platform's UI metrics (never NULL). */
 const neon_hal_ui_t *neon_hal_ui_metrics(void);
+
+// ── Keyboard ──────────────────────────────────────────────────────────────────
+
+/**
+ * Logical key codes returned by neon_hal_key_get().
+ * Navigation keys map directly to UI focus movement.
+ * CHAR carries an ASCII character for text-entry fields.
+ */
+enum class NeonKey : uint8_t {
+    NONE  = 0,
+    UP,
+    DOWN,
+    LEFT,
+    RIGHT,
+    ENTER,
+    BACK,   ///< Backspace / ESC / physical Back button
+    CHAR    ///< Printable character — inspect neon_key_t::ch
+};
+
+struct neon_key_t {
+    NeonKey key;
+    char    ch; ///< ASCII value when key == NeonKey::CHAR, else 0
+};
+
+/**
+ * Poll for a single pending key event (non-blocking).
+ * Returns {NeonKey::NONE, 0} when no key is available.
+ *
+ * Cardputer: reads TCA8418 via M5Cardputer.update() + keyboard API.
+ * All other targets: stub returning NONE (no physical keyboard).
+ */
+neon_key_t neon_hal_key_get(void);
