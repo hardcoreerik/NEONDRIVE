@@ -3596,18 +3596,6 @@ static Button btnBack, btnSave;
 #include <PNGenc.h>
 #undef local  // zutil.h (pulled in by PNGenc) defines 'local' as 'static'; conflicts with variable names below
 
-// Static File* used by the PNGenc write callback (single-threaded, safe).
-static File *s_snap_file = nullptr;
-
-static void*   snap_png_open_cb (const char *)             { return (void*)1; }
-static void    snap_png_close_cb(PNGFILE *)                {}
-static int32_t snap_png_read_cb (PNGFILE *, uint8_t *, int32_t) { return 0; }
-static int32_t snap_png_seek_cb (PNGFILE *, int32_t)       { return 0; }
-static int32_t snap_png_write_cb(PNGFILE *, uint8_t *buf, int32_t len) {
-  if (!s_snap_file) return 0;
-  return (int32_t)s_snap_file->write(buf, (size_t)len);
-}
-
 static void setScreen(ScreenId next);  // forward declaration
 
 static void takeScreenshot() {
@@ -3619,40 +3607,36 @@ static void takeScreenshot() {
   const int W = ND_DISPLAY_W;
   const int H = ND_DISPLAY_H;
 
-  if (!SD.exists("/screenshots")) SD.mkdir("/screenshots");
-
-  static int snap_n = 0;
-  char fname[32];
-  snprintf(fname, sizeof(fname), "/screenshots/snap_%04d.png", snap_n++);
-
-  File f = SD.open(fname, FILE_WRITE);
-  if (!f) {
-    Serial.printf("[snap] open failed: %s\n", fname);
+  // ── Encode into a RAM buffer ──────────────────────────────────────────────
+  // PNGenc's file-based mode requires seekable R/W access to back-patch the
+  // IDAT chunk size — SD FILE_WRITE doesn't support that.
+  // RAM mode encodes fully in memory, then we write the completed buffer to SD.
+  // 240×135×3 raw = 97 KB; at level-3 compression screen content typically
+  // compresses to ~25-45 KB. 80 KB gives comfortable headroom.
+  const int SNAP_BUF = 80 * 1024;
+  uint8_t *pngBuf = (uint8_t*)malloc(SNAP_BUF);
+  if (!pngBuf) {
+    Serial.printf("[snap] OOM (%d bytes needed)\n", SNAP_BUF);
     return;
   }
-  s_snap_file = &f;
 
   // PNGENC is ~20 KB — static to avoid stack overflow.
   static PNGENC png;
-  int rc = png.open(fname,
-                    snap_png_open_cb, snap_png_close_cb,
-                    snap_png_read_cb, snap_png_write_cb,
-                    snap_png_seek_cb);
+  int rc = png.open(pngBuf, SNAP_BUF);
   if (rc != PNG_SUCCESS) {
-    f.close(); s_snap_file = nullptr;
+    free(pngBuf);
     Serial.printf("[snap] PNGenc open error %d\n", rc);
     return;
   }
 
-  // Compression level 3 — good balance of size vs. encode time on S3.
   rc = png.encodeBegin(W, H, PNG_PIXEL_TRUECOLOR, 24, nullptr, 3);
   if (rc != PNG_SUCCESS) {
-    f.close(); s_snap_file = nullptr;
+    free(pngBuf);
     Serial.printf("[snap] PNGenc begin error %d\n", rc);
     return;
   }
 
-  // addRGB565Line converts RGB565→RGB24 internally using pTempLine as scratch.
+  // addRGB565Line converts RGB565→RGB24 internally (pTempLine = scratch).
   uint16_t row_rgb565[W];
   uint8_t  row_tmp[W * 3];
 
@@ -3661,12 +3645,30 @@ static void takeScreenshot() {
     if (png.addRGB565Line(row_rgb565, row_tmp) != PNG_SUCCESS) break;
   }
 
-  png.close();
-  f.close();
-  s_snap_file = nullptr;
-  Serial.printf("[snap] saved %s\n", fname);
+  int encoded = png.close();  // returns total bytes written to pngBuf
+  Serial.printf("[snap] encoded %d bytes\n", encoded);
 
-  // Brief invert-flash feedback so the user knows it fired, then redraw.
+  // ── Write buffer to SD ────────────────────────────────────────────────────
+  if (encoded > 0) {
+    if (!SD.exists("/screenshots")) SD.mkdir("/screenshots");
+
+    static int snap_n = 0;
+    char fname[36];
+    snprintf(fname, sizeof(fname), "/screenshots/snap_%04d.png", snap_n++);
+
+    File f = SD.open(fname, FILE_WRITE);
+    if (f) {
+      f.write(pngBuf, (size_t)encoded);
+      f.close();
+      Serial.printf("[snap] saved %s\n", fname);
+    } else {
+      Serial.printf("[snap] open failed: %s\n", fname);
+    }
+  }
+
+  free(pngBuf);
+
+  // Invert-flash feedback, then restore the screen.
   tft.invertDisplay(true);
   delay(80);
   tft.invertDisplay(false);
