@@ -26,7 +26,7 @@
 #if defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
 #define NEONDRIVE_TARGET_TEMBED 1
 #endif
-#if defined(NEONDRIVE_TARGET_CYD24) || defined(NEONDRIVE_TARGET_CYD28) || defined(NEONDRIVE_TARGET_CYD35)
+#if defined(NEONDRIVE_TARGET_CYD24) || defined(NEONDRIVE_TARGET_CYD28) || defined(NEONDRIVE_TARGET_CYD35) || defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
 #define NEONDRIVE_TARGET_CYD 1
 #endif
 #if defined(NEONDRIVE_TARGET_CYD) && \
@@ -51,6 +51,9 @@
 #if defined(NEONDRIVE_TARGET_CYD28)
 #include <XPT2046_Bitbang.h>
 #endif
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+#include "variants/cyd28/nm_rf_hat_pinmap.h"
+#endif
 #endif // NEONDRIVE_USES_M5GFX / TFT_eSPI
 #include <LittleFS.h>
 #include <SD.h>
@@ -69,6 +72,10 @@ using fs::File;
 #include <esp_timer.h>
 #include <esp_heap_caps.h>
 #include <esp_task_wdt.h>
+#define RAW_BUFFER_LENGTH 100
+#define DECODE_NEC
+#define DECODE_HASH
+#include <IRremote.hpp>
 
 #include <ctype.h>
 #include <math.h>
@@ -599,6 +606,60 @@ static int display_get_height() { return tft.height(); }
 
 // ---------- Touch ----------
 
+#if defined(NEONDRIVE_TARGET_CYD)
+static void cydRotateTouchFromBaseToCurrent(int& x, int& y) {
+  const int baseRotation = (BOARD_TFT_ROTATION & 3);
+  const int currentRotation = (tft.getRotation() & 3);
+  const int delta = (currentRotation - baseRotation + 4) & 3;
+  if (delta == 0) return;
+
+  const int baseW = (baseRotation & 1) ? ND_DISPLAY_W : ND_DISPLAY_H;
+  const int baseH = (baseRotation & 1) ? ND_DISPLAY_H : ND_DISPLAY_W;
+  const int ox = x;
+  const int oy = y;
+
+  switch (delta) {
+    case 1:  // +90 deg from base
+      x = (baseH - 1) - oy;
+      y = ox;
+      break;
+    case 2:  // +180 deg from base
+      x = (baseW - 1) - ox;
+      y = (baseH - 1) - oy;
+      break;
+    case 3:  // +270 deg from base
+      x = oy;
+      y = (baseW - 1) - ox;
+      break;
+    default:
+      break;
+  }
+}
+
+static void cydMapRawTouchToDisplay(int rawX, int rawY, int& outX, int& outY) {
+  int x = rawX;
+  int y = rawY;
+  if (g_touchSwapXY) {
+    const int tmp = x;
+    x = y;
+    y = tmp;
+  }
+
+  const int baseRotation = (BOARD_TFT_ROTATION & 3);
+  const int baseW = (baseRotation & 1) ? ND_DISPLAY_W : ND_DISPLAY_H;
+  const int baseH = (baseRotation & 1) ? ND_DISPLAY_H : ND_DISPLAY_W;
+
+  int mx = mapRawToRange(x, g_touchRawXMin, g_touchRawXMax, baseW);
+  int my = mapRawToRange(y, g_touchRawYMin, g_touchRawYMax, baseH);
+  if (g_touchInvertX) mx = (baseW - 1) - mx;
+  if (g_touchInvertY) my = (baseH - 1) - my;
+
+  cydRotateTouchFromBaseToCurrent(mx, my);
+  outX = clampi(mx, 0, display_get_width() - 1);
+  outY = clampi(my, 0, display_get_height() - 1);
+}
+#endif
+
 struct TouchState {
   bool down;
   int x;
@@ -834,20 +895,7 @@ static bool touch_read_point(TouchState& s) {
   g_lastTouchRawY = s.ry;
   g_lastTouchRawZ = s.z;
 
-  int rawX = s.rx;
-  int rawY = s.ry;
-  if (g_touchSwapXY) {
-    const int tmp = rawX;
-    rawX = rawY;
-    rawY = tmp;
-  }
-  int mx = mapRawToRange(rawX, g_touchRawXMin, g_touchRawXMax, display_get_width());
-  int my = mapRawToRange(rawY, g_touchRawYMin, g_touchRawYMax, display_get_height());
-  if (g_touchInvertX) mx = (display_get_width() - 1) - mx;
-  if (g_touchInvertY) my = (display_get_height() - 1) - my;
-
-  s.x = clampi(mx, 0, display_get_width() - 1);
-  s.y = clampi(my, 0, display_get_height() - 1);
+  cydMapRawTouchToDisplay(s.rx, s.ry, s.x, s.y);
   return true;
 #elif defined(NEONDRIVE_TARGET_TEMBED)
   // T-Embed uses encoder/buttons only; no touch controller.
@@ -878,20 +926,7 @@ static bool touch_read_point(TouchState& s) {
   // Map raw to screen-space.
   // IMPORTANT: when swapXY is active, swap raw axes BEFORE scaling so
   // X still maps to full display width and Y to full display height.
-  int rawX = s.rx;
-  int rawY = s.ry;
-  if (g_touchSwapXY) {
-    const int tmp = rawX;
-    rawX = rawY;
-    rawY = tmp;
-  }
-  int mx = mapRawToRange(rawX, g_touchRawXMin, g_touchRawXMax, display_get_width());
-  int my = mapRawToRange(rawY, g_touchRawYMin, g_touchRawYMax, display_get_height());
-  if (g_touchInvertX) mx = (display_get_width() - 1) - mx;
-  if (g_touchInvertY) my = (display_get_height() - 1) - my;
-
-  s.x = clampi(mx, 0, display_get_width() - 1);
-  s.y = clampi(my, 0, display_get_height() - 1);
+  cydMapRawTouchToDisplay(s.rx, s.ry, s.x, s.y);
 
   return true;
 #endif
@@ -1078,6 +1113,8 @@ static void drawAutomateMenu();
 static void drawScopeGraph();
 static void drawLedControl();
 static void drawSync();
+static void drawHatTrick();
+static void drawIrStudio();
 static void monitorReset();
 static void monitorPushLine(uint16_t color, const char* fmt, ...);
 static void monitorUpdateLine(int lineIdx, uint16_t color, const char* fmt, ...);
@@ -2429,6 +2466,9 @@ static const char* androidApkPath = "/CYDCompanion.apk";
 static const char* wpasecResultsPath = "/wpasec_results.txt";
 static const char* wpasecUploadedPath = "/wpasec_uploaded.txt";
 static File androidApkUploadFile;
+static File irDbUploadFile;
+static bool irDbUploadApplied = false;
+static char irDbUploadError[64] = {0};
 static bool sdUploadOk = false;
 static String apSsid = "CYD_COMPANION";  // AP SSID when in AP mode
 static String apPassword = "";          // AP password (empty = open)
@@ -2460,6 +2500,8 @@ static uint32_t pendingRiskyWebActionMs = 0;
 // ---------- UI ----------
 enum class ScreenId : uint8_t {
   HOME,
+  HAT_TRICK,
+  IR_STUDIO,
   JUST_GO,
   WIFI_SCAN,
   CONFIRM_TARGET,
@@ -2493,6 +2535,8 @@ static ScreenId screen = ScreenId::HOME;
 static const char* screenToStr(ScreenId s) {
   switch (s) {
     case ScreenId::HOME: return "HOME";
+    case ScreenId::HAT_TRICK: return "HAT_TRICK";
+    case ScreenId::IR_STUDIO: return "IR_STUDIO";
     case ScreenId::JUST_GO: return "JUST_GO";
     case ScreenId::WIFI_SCAN: return "WIFI_SCAN";
     case ScreenId::CONFIRM_TARGET: return "CONFIRM_TARGET";
@@ -3205,6 +3249,18 @@ static void drawHomeGlyph(const char* label, int cx, int cy, int iconW, int icon
     tft.drawCircle(cx, cy, max(8, iconH / 3), col);
     tft.drawLine(cx + 2, cy + 2, cx + max(9, iconH / 2), cy - max(7, iconH / 3), col);
     tft.fillCircle(cx + max(9, iconH / 2), cy - max(7, iconH / 3), 1, col);
+  } else if (strcmp(label, "HAT TRICK") == 0) {
+    const int brimW = max(20, iconW / 2);
+    const int brimH = 4;
+    const int crownW = max(12, brimW / 2);
+    const int crownH = max(10, iconH / 3);
+    const int brimX = cx - (brimW / 2);
+    const int brimY = cy + (iconH / 6);
+    const int crownX = cx - (crownW / 2);
+    const int crownY = brimY - crownH;
+    tft.fillRect(brimX, brimY, brimW, brimH, col);
+    tft.drawRect(crownX, crownY, crownW, crownH, col);
+    tft.drawLine(crownX + 2, crownY + (crownH / 2), crownX + crownW - 3, crownY + (crownH / 2), col);
   } else if (strcmp(label, "Logs") == 0) {
     const int rw = iconW / 2;
     const int rh = iconH / 2;
@@ -3579,12 +3635,23 @@ static void drawHeaderTitleOverlay() {
   tft.setTextDatum(TL_DATUM);
 #if defined(NEONDRIVE_TARGET_CYD24)
   applyFontMd();
+#elif defined(NEONDRIVE_TARGET_CYD28) || defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+  // CYD 2.8 variants: keep titles smaller than legacy, but 25% larger than the prior reduced pass.
+  // Approx target = 0.625 * legacy large size.
+  int headerSize = max(1, (((g_ui ? g_ui->text_size_lg : 3) * 5) + 7) / 8);
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+  // Home title on HAT variant is longer; trim just that title by 25%.
+  if (currentHeaderTitle && strcmp(currentHeaderTitle, ND_HOME_HEADER) == 0) {
+    headerSize = max(1, (headerSize * 3) / 4);
+  }
+#endif
+  applyFont(g_ui ? g_ui->font_lg : nullptr, headerSize);
 #else
   applyFontLg();
 #endif
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   String headerTitle = String(currentHeaderTitle);
-  const int maxTitleW = uiActionDockSafeLeft() - 8;
+  int maxTitleW = uiActionDockSafeLeft() - 8;
   if (maxTitleW > 8) {
     while (headerTitle.length() > 3 && tft.textWidth(headerTitle) > maxTitleW) {
       headerTitle.remove(headerTitle.length() - 1);
@@ -4024,6 +4091,9 @@ static Button btnWifiSavedRows[AppConfig::MAX_SAVED_WIFI], btnWifiSavedClose;
 static Button btnWebserverBack, btnWebserverStartAP, btnWebserverStartServer;
 static Button btnWebserverStopServer;
 static Button btnWebserverWpaSecSync, btnWebserverDownloadResults;
+static Button btnHatTrickBack, btnHatTrickRf, btnHatTrickNrf, btnHatTrickGps;
+static Button btnIrBack, btnIrLearn, btnIrSave, btnIrSend, btnIrPrev, btnIrNext;
+static Button btnCfgRotate;
 static Button btnCfgWifiConnect, btnCfgWebserver, btnCfgLed;
 static Button btnCfgStartup, btnCfgTelemetry, btnCfgSync;
 static Button btnSyncDropbox, btnSyncWpasec, btnSyncWigle;
@@ -4037,6 +4107,355 @@ static int wifiListDrawW = 120;
 static Button btnWifiRows[4];
 static Button btnWifiChecks[4];
 static int wifiRadarX = 0, wifiRadarY = 0, wifiRadarW = 0, wifiRadarH = 0;
+
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+static constexpr int IR_SLOT_COUNT = 6;
+static constexpr const char* IR_SLOTS_PATH_LFS = "/ir_slots.json";
+static constexpr const char* IR_SLOTS_PATH_SD  = "/ir/ir_slots.json";
+static constexpr int IR_WF_W = 14;
+static constexpr int IR_WF_H = 6;
+struct IrSlot {
+  bool used = false;
+  uint16_t protocol = 0;
+  uint16_t address = 0;
+  uint16_t command = 0;
+  uint8_t bits = 0;
+  char name[8] = {0};
+};
+static IrSlot g_irSlots[IR_SLOT_COUNT];
+static int g_irSlotIdx = 0;
+static bool g_irLearning = false;
+static bool g_irHasCaptured = false;
+static uint16_t g_irCapProtocol = 0;
+static uint16_t g_irCapAddress = 0;
+static uint16_t g_irCapCommand = 0;
+static uint8_t g_irCapBits = 0;
+static char g_irStatus[48] = "Ready";
+static uint8_t g_irWaterfall[IR_WF_H][IR_WF_W] = {};
+#endif
+
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+static NmHatMode g_hatMode = NmHatMode::CC1101;
+static void setScreen(ScreenId next);
+static const char* hatModeLabel(NmHatMode m) {
+  switch (m) {
+    case NmHatMode::CC1101: return "CC1101";
+    case NmHatMode::NRF24:  return "NRF24";
+    case NmHatMode::PN532:  return "PN532";
+    case NmHatMode::IR:     return "IR";
+    case NmHatMode::RF433:  return "RF433";
+    default:                return "CC1101";
+  }
+}
+static const char* hatModeActionHint(NmHatMode m) {
+  switch (m) {
+    case NmHatMode::CC1101: return "Launch Recon (SubGHz prep)";
+    case NmHatMode::NRF24:  return "Launch Packet Lab (2.4G)";
+    case NmHatMode::PN532:  return "Launch Config (NFC staging)";
+    case NmHatMode::IR:     return "Launch IR Studio";
+    case NmHatMode::RF433:  return "Launch Recon (OOK workflow)";
+    default:                return "Launch Recon";
+  }
+}
+static void hatModeCycle() {
+  int next = ((int)g_hatMode + 1) % 5;
+  g_hatMode = (NmHatMode)next;
+  cfg.hat_trick_mode = next;
+  saveConfig(cfg);
+}
+static void hatModeLaunch() {
+  switch (g_hatMode) {
+    case NmHatMode::CC1101: setScreen(ScreenId::RECON); break;
+    case NmHatMode::NRF24:  setScreen(ScreenId::PACKETLAB_MENU); break;
+    case NmHatMode::PN532:  setScreen(ScreenId::CONFIG); break;
+    case NmHatMode::IR:     setScreen(ScreenId::IR_STUDIO); break;
+    case NmHatMode::RF433:  setScreen(ScreenId::RECON); break;
+  }
+}
+
+static void irStatusSet(const char* msg) {
+  if (!msg) return;
+  strncpy(g_irStatus, msg, sizeof(g_irStatus) - 1);
+  g_irStatus[sizeof(g_irStatus) - 1] = '\0';
+}
+
+static bool irValidateSlotsDoc(JsonDocument& doc, String& err) {
+  JsonArray arr = doc["slots"].as<JsonArray>();
+  if (arr.isNull()) {
+    err = "Missing 'slots' array";
+    return false;
+  }
+
+  int idx = 0;
+  for (JsonVariant v : arr) {
+    JsonObject o = v.as<JsonObject>();
+    if (o.isNull()) {
+      err = "slots[" + String(idx) + "] must be object";
+      return false;
+    }
+    const bool used = o["used"] | false;
+    const uint16_t protocol = o["protocol"] | 0;
+    const uint8_t bits = o["bits"] | 0;
+    if (!used) { idx++; continue; }
+    if (protocol != (uint16_t)NEC) {
+      err = "slots[" + String(idx) + "] protocol unsupported (v1 NEC only)";
+      return false;
+    }
+    if (bits == 0 || bits > 64) {
+      err = "slots[" + String(idx) + "] invalid bits";
+      return false;
+    }
+    idx++;
+  }
+  return true;
+}
+
+static int irTrimSlotsArrayToCapacity(JsonDocument& doc) {
+  JsonArray arr = doc["slots"].as<JsonArray>();
+  if (arr.isNull()) return 0;
+  int trimmed = 0;
+  while ((int)arr.size() > IR_SLOT_COUNT) {
+    arr.remove(arr.size() - 1);
+    trimmed++;
+  }
+  return trimmed;
+}
+
+static void irLoadSlotsFromDoc(JsonDocument& doc) {
+  for (int i = 0; i < IR_SLOT_COUNT; ++i) g_irSlots[i] = IrSlot{};
+  JsonArray arr = doc["slots"].as<JsonArray>();
+  int idx = 0;
+  for (JsonVariant v : arr) {
+    if (idx >= IR_SLOT_COUNT) break;
+    JsonObject o = v.as<JsonObject>();
+    g_irSlots[idx].used = o["used"] | false;
+    g_irSlots[idx].protocol = o["protocol"] | 0;
+    g_irSlots[idx].address = o["address"] | 0;
+    g_irSlots[idx].command = o["command"] | 0;
+    g_irSlots[idx].bits = o["bits"] | 0;
+    String n = String(o["name"] | "");
+    n.toCharArray(g_irSlots[idx].name, sizeof(g_irSlots[idx].name));
+    idx++;
+  }
+}
+
+static void irSlotsLoad() {
+  for (int i = 0; i < IR_SLOT_COUNT; ++i) g_irSlots[i] = IrSlot{};
+  fs::FS* storage = &LittleFS;
+  const char* path = IR_SLOTS_PATH_LFS;
+  if ((sdReady || mountSdCard(false)) && SD.exists(IR_SLOTS_PATH_SD)) {
+    storage = &SD;
+    path = IR_SLOTS_PATH_SD;
+  } else if (!LittleFS.exists(IR_SLOTS_PATH_LFS)) {
+    return;
+  }
+  File f = storage->open(path, "r");
+  if (!f) return;
+  JsonDocument doc;
+  if (deserializeJson(doc, f)) { f.close(); return; }
+  f.close();
+  String err;
+  if (!irValidateSlotsDoc(doc, err)) return;
+  irLoadSlotsFromDoc(doc);
+}
+
+static void irSlotsSave() {
+  JsonDocument doc;
+  JsonArray arr = doc["slots"].to<JsonArray>();
+  for (int i = 0; i < IR_SLOT_COUNT; ++i) {
+    JsonObject o = arr.add<JsonObject>();
+    o["used"] = g_irSlots[i].used;
+    o["protocol"] = g_irSlots[i].protocol;
+    o["address"] = g_irSlots[i].address;
+    o["command"] = g_irSlots[i].command;
+    o["bits"] = g_irSlots[i].bits;
+    o["name"] = g_irSlots[i].name;
+  }
+  fs::FS* storage = &LittleFS;
+  const char* path = IR_SLOTS_PATH_LFS;
+  if (sdReady || mountSdCard(false)) {
+    if (!SD.exists("/ir")) SD.mkdir("/ir");
+    storage = &SD;
+    path = IR_SLOTS_PATH_SD;
+  }
+  File f = storage->open(path, "w");
+  if (!f) return;
+  serializeJsonPretty(doc, f);
+  f.close();
+}
+
+static bool irWriteDocToPreferredStorage(JsonDocument& doc, String& err) {
+  fs::FS* storage = &LittleFS;
+  const char* path = IR_SLOTS_PATH_LFS;
+  if (sdReady || mountSdCard(false)) {
+    if (!SD.exists("/ir")) SD.mkdir("/ir");
+    storage = &SD;
+    path = IR_SLOTS_PATH_SD;
+  }
+  File f = storage->open(path, "w");
+  if (!f) {
+    err = String("Failed to open ") + path;
+    return false;
+  }
+  if (serializeJsonPretty(doc, f) == 0) {
+    f.close();
+    err = "Failed to serialize JSON";
+    return false;
+  }
+  f.close();
+  return true;
+}
+
+static bool irImportSlotsFromJsonString(const String& body, String& err) {
+  JsonDocument doc;
+  DeserializationError de = deserializeJson(doc, body);
+  if (de) {
+    err = String("Invalid JSON: ") + de.c_str();
+    return false;
+  }
+  if (!irValidateSlotsDoc(doc, err)) return false;
+  const int trimmed = irTrimSlotsArrayToCapacity(doc);
+  (void)trimmed;
+  irLoadSlotsFromDoc(doc);
+  if (!irWriteDocToPreferredStorage(doc, err)) return false;
+  return true;
+}
+
+static const char* irSlotCategory(const char* name) {
+  if (!name || !*name) return "GEN";
+  String s = String(name);
+  s.toLowerCase();
+  if (s.indexOf("tv") >= 0) return "TV";
+  if (s.indexOf("ac") >= 0 || s.indexOf("air") >= 0) return "AC";
+  if (s.indexOf("audio") >= 0 || s.indexOf("amp") >= 0 || s.indexOf("sound") >= 0) return "AUDIO";
+  if (s.indexOf("proj") >= 0) return "PROJ";
+  return "GEN";
+}
+
+static String irSlotThumbSvg(const char* category) {
+  if (!category) category = "GEN";
+  if (strcmp(category, "TV") == 0) {
+    return "<svg width='52' height='34' viewBox='0 0 52 34'><rect x='3' y='4' width='46' height='24' rx='4' fill='#0f2238' stroke='#2ae8ff'/><rect x='20' y='29' width='12' height='2' fill='#2ae8ff'/></svg>";
+  }
+  if (strcmp(category, "AC") == 0) {
+    return "<svg width='52' height='34' viewBox='0 0 52 34'><rect x='5' y='6' width='42' height='10' rx='3' fill='#0f2238' stroke='#2ae8ff'/><path d='M12 22 q4 3 0 6 M25 22 q4 3 0 6 M38 22 q4 3 0 6' stroke='#2ae8ff' fill='none'/></svg>";
+  }
+  if (strcmp(category, "AUDIO") == 0) {
+    return "<svg width='52' height='34' viewBox='0 0 52 34'><rect x='6' y='8' width='40' height='18' rx='3' fill='#0f2238' stroke='#2ae8ff'/><circle cx='19' cy='17' r='4' stroke='#2ae8ff' fill='none'/><circle cx='33' cy='17' r='4' stroke='#2ae8ff' fill='none'/></svg>";
+  }
+  if (strcmp(category, "PROJ") == 0) {
+    return "<svg width='52' height='34' viewBox='0 0 52 34'><rect x='6' y='10' width='30' height='14' rx='3' fill='#0f2238' stroke='#2ae8ff'/><circle cx='28' cy='17' r='4' stroke='#2ae8ff' fill='none'/><path d='M36 14 l8 -4 v14 l-8 -4' fill='#2ae8ff'/></svg>";
+  }
+  return "<svg width='52' height='34' viewBox='0 0 52 34'><rect x='5' y='6' width='42' height='22' rx='4' fill='#0f2238' stroke='#2ae8ff'/><text x='26' y='20' text-anchor='middle' fill='#2ae8ff' font-size='8'>IR</text></svg>";
+}
+
+static String irBuildFactoryPackJson() {
+  JsonDocument doc;
+  JsonArray arr = doc["slots"].to<JsonArray>();
+  auto addSlot = [&](const char* name, uint16_t cmd) {
+    JsonObject o = arr.add<JsonObject>();
+    o["used"] = true;
+    o["protocol"] = (uint16_t)NEC;
+    o["address"] = 0;
+    o["command"] = cmd;
+    o["bits"] = 32;
+    o["name"] = name;
+  };
+  addSlot("Power", 0x10EF);
+  addSlot("Mute", 0x40BF);
+  addSlot("Vol+", 0x00FF);
+  addSlot("Vol-", 0x807F);
+  addSlot("Ch+", 0x20DF);
+  addSlot("Ch-", 0xA05F);
+  addSlot("Input", 0xC03F);
+  addSlot("Menu", 0xE01F);
+  String out;
+  serializeJsonPretty(doc, out);
+  return out;
+}
+
+static inline uint16_t irHeatColor(uint8_t v) {
+  if (v < 32) return 0x0841;
+  if (v < 64) return 0x001F;
+  if (v < 96) return 0x07FF;
+  if (v < 128) return 0x07E0;
+  if (v < 160) return 0xFFE0;
+  if (v < 208) return 0xFD20;
+  return 0xF800;
+}
+
+static void irWaterfallAddPulse(uint8_t energy) {
+  for (int y = IR_WF_H - 1; y > 0; --y) {
+    memcpy(g_irWaterfall[y], g_irWaterfall[y - 1], IR_WF_W);
+  }
+  for (int x = 0; x < IR_WF_W; ++x) {
+    const int center = (IR_WF_W * energy) / 255;
+    const int dist = abs(x - center);
+    int val = max(0, (int)energy - (dist * 6));
+    g_irWaterfall[0][x] = (uint8_t)val;
+  }
+}
+
+static void irSendCaptured() {
+  if (!g_irHasCaptured) { irStatusSet("No captured signal"); return; }
+  if (g_irCapProtocol != (uint16_t)NEC) {
+    irStatusSet("Captured non-NEC; replay not yet");
+    return;
+  }
+  IrSender.sendNEC(g_irCapAddress, g_irCapCommand, 1);
+  irWaterfallAddPulse((uint8_t)min(255, (int)g_irCapBits * 3 + 80));
+  irStatusSet("Sent captured signal");
+}
+
+static void irSaveCapturedToCurrentSlot() {
+  if (!g_irHasCaptured) { irStatusSet("Capture first"); return; }
+  IrSlot& s = g_irSlots[g_irSlotIdx];
+  s.used = true;
+  s.protocol = g_irCapProtocol;
+  s.address = g_irCapAddress;
+  s.command = g_irCapCommand;
+  s.bits = g_irCapBits;
+  snprintf(s.name, sizeof(s.name), "Slot %d", g_irSlotIdx + 1);
+  irSlotsSave();
+  irStatusSet("Saved to slot");
+}
+
+static void irSendSlot(int idx) {
+  if (idx < 0 || idx >= IR_SLOT_COUNT || !g_irSlots[idx].used) { irStatusSet("Slot empty"); return; }
+  IRData d = {};
+  d.protocol = (decode_type_t)g_irSlots[idx].protocol;
+  d.address = g_irSlots[idx].address;
+  d.command = g_irSlots[idx].command;
+  if (d.protocol != NEC) { irStatusSet("Only NEC replay in v1"); return; }
+  IrSender.sendNEC(d.address, d.command, 1);
+  irWaterfallAddPulse((uint8_t)min(255, (int)d.command + 64));
+  irStatusSet("Sent saved slot");
+}
+
+static void irPollLearn() {
+  if (!g_irLearning) return;
+  if (!IrReceiver.decode()) return;
+  g_irCapProtocol = (uint16_t)IrReceiver.decodedIRData.protocol;
+  g_irCapAddress = IrReceiver.decodedIRData.address;
+  g_irCapCommand = IrReceiver.decodedIRData.command;
+  g_irCapBits = IrReceiver.decodedIRData.numberOfBits;
+  // Fallback for non-decoded protocols: keep a stable fingerprint in command.
+  if (g_irCapProtocol == (uint16_t)UNKNOWN && g_irCapCommand == 0) {
+    g_irCapCommand = (uint16_t)(IrReceiver.decodedIRData.decodedRawData & 0xFFFFu);
+  }
+  g_irHasCaptured = true;
+  g_irLearning = false;
+  const uint8_t energy = (uint8_t)min(255, (int)g_irCapBits * 4 + ((int)g_irCapProtocol & 0x1F) * 3);
+  irWaterfallAddPulse(energy);
+  snprintf(g_irStatus, sizeof(g_irStatus), "Captured P:%u A:%u C:%u B:%u",
+           (unsigned)g_irCapProtocol,
+           (unsigned)g_irCapAddress,
+           (unsigned)g_irCapCommand,
+           (unsigned)g_irCapBits);
+  IrReceiver.resume();
+  if (screen == ScreenId::IR_STUDIO) drawIrStudio();
+}
+#endif
 
 static Button btnHopMinus, btnHopPlus;
 static Button btnScanMinus, btnScanPlus;
@@ -4688,6 +5107,20 @@ static void tdisplayNavBuild() {
         for (int i = 0; i < HOME_BTN_COUNT; i++) tdisplayNavPush(homeBtns[i]);
       }
       break;
+    case ScreenId::HAT_TRICK:
+      tdisplayNavPush(btnHatTrickBack);
+      tdisplayNavPush(btnHatTrickRf);
+      tdisplayNavPush(btnHatTrickNrf);
+      tdisplayNavPush(btnHatTrickGps);
+      break;
+    case ScreenId::IR_STUDIO:
+      tdisplayNavPush(btnIrBack);
+      tdisplayNavPush(btnIrLearn);
+      tdisplayNavPush(btnIrSend);
+      tdisplayNavPush(btnIrSave);
+      tdisplayNavPush(btnIrPrev);
+      tdisplayNavPush(btnIrNext);
+      break;
     case ScreenId::JUST_GO:
       tdisplayNavPush(btnJustGoBack);
       tdisplayNavPush(btnJustGoToggle);
@@ -4746,6 +5179,7 @@ static void tdisplayNavBuild() {
       tdisplayNavPush(btnCfgStartup);
       tdisplayNavPush(btnCfgTelemetry);
       tdisplayNavPush(btnCfgLed);
+      tdisplayNavPush(btnCfgRotate);
       break;
     case ScreenId::WIFI_CONFIG:
       tdisplayNavPush(btnBack);
@@ -5018,9 +5452,13 @@ static void layoutHome() {
   const int row1Y = topBtnY + gridBtnH + gapV;
   const int row2Y = row1Y + gridBtnH + gapV;
 
-  // Reserve right-side room on row 0 for the hypercube module frame.
+  // Reserve right-side room on row 0 for the hypercube module frame (except CYD2.8 series).
   layoutActionDockBox();
+#if defined(NEONDRIVE_TARGET_CYD28) || defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+  const int topRightLimit = w - pad;
+#else
   const int topRightLimit = ActionDockBoxX - 14;
+#endif
   const int topWidth = max(180, topRightLimit - pad);
   const int topBtnW = (topWidth - ((HOME_BTN_COLS - 1) * gapH)) / HOME_BTN_COLS;
 
@@ -5028,7 +5466,11 @@ static void layoutHome() {
 
   homeBtns[0] = {pad,                        topBtnY, topBtnW, gridBtnH, "Just Go"};
   homeBtns[1] = {pad + topBtnW + gapH,       topBtnY, topBtnW, gridBtnH, "WiFi"};
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+  homeBtns[8] = {pad + (topBtnW + gapH) * 2, topBtnY, topBtnW, gridBtnH, "HAT TRICK"};
+#else
   homeBtns[8] = {pad + (topBtnW + gapH) * 2, topBtnY, topBtnW, gridBtnH, "GPS"};
+#endif
 
   // Main grid (2 rows x 3 cols): Logs / Target / Recon / Config / Net Scan / PACKETLAB.
   const char* gridLabels[6] = {"Logs", "Target", "Recon", "Config", "Net Scan", "Packet Lab"};
@@ -5044,30 +5486,56 @@ static void layoutHome() {
 
 static void drawHomeTargetsPromptOverlay();
 static void drawHomeReconnectPromptOverlay();
+static String homeIpStatusText() {
+  if (WiFi.status() == WL_CONNECTED) return "IP: " + WiFi.localIP().toString();
+  return "IP: not connected";
+}
 
 static void layoutActionDockBox() {
   const int w = tft.width();
   const int h = tft.height();
   ActionDockBoxW = HypercubeWidget::REGION_W;
   ActionDockBoxH = HypercubeWidget::REGION_H;
+#if defined(NEONDRIVE_TARGET_CYD28) || defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+  // Hard-lock CYD 2.8 dock geometry in header corner to avoid row/button overlap.
+  ActionDockBoxW = 14;
+  ActionDockBoxH = 14;
+#endif
   ActionDockBoxX = w - HypercubeWidget::REGION_PAD - ActionDockBoxW;
   ActionDockBoxY = HypercubeWidget::REGION_PAD;
+#if defined(NEONDRIVE_TARGET_CYD28) || defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+  ActionDockBoxX = w - ActionDockBoxW - 4;
+  ActionDockBoxY = 2;
+#endif
   ActionDockBoxX = clampi(ActionDockBoxX, ActionDock_CLEARANCE_PX, max(ActionDock_CLEARANCE_PX, w - ActionDock_CLEARANCE_PX - ActionDockBoxW));
   ActionDockBoxY = clampi(ActionDockBoxY, 0, max(0, h - ActionDockBoxH));
 }
 
 static void drawHomeHypercubeFrame() {
   layoutActionDockBox();
-  const int x = ActionDockBoxX - 8;
-  const int y = ActionDockBoxY - 8;
-  const int w = ActionDockBoxW + 16;
-  const int h = ActionDockBoxH + 34;
+  int x = ActionDockBoxX - 8;
+  int y = ActionDockBoxY - 8;
+  int w = ActionDockBoxW + 16;
+  int h = ActionDockBoxH + 34;
+#if defined(NEONDRIVE_TARGET_CYD28) || defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+  // Keep frame compact in header region for CYD 2.8.
+  w = 28;
+  h = 24;
+  x = tft.width() - w - 2;
+  y = 0;
+#endif
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  if (x + w > tft.width()) w = tft.width() - x;
+  if (y + h > tft.height()) h = tft.height() - y;
   tft.drawRoundRect(x, y, w, h, 6, TFT_CYAN);
   tft.drawRoundRect(x + 2, y + 2, w - 4, h - 4, 5, 0x2104);
+#if !defined(NEONDRIVE_TARGET_CYD28) && !defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
   tft.setTextDatum(TC_DATUM);
   applyFontSm();
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("HYPERCUBE", x + (w / 2), y + h - 14);
+#endif
 }
 
 static void drawCyberBackdrop() {
@@ -5099,6 +5567,12 @@ static void drawHome() {
   drawUniversalBackground();
   drawHomeHypercubeFrame();
 
+  tft.setTextDatum(TL_DATUM);
+  applyFontSm();
+  const int ipY = uiHeaderBandH() + 2;
+  const int ipMaxW = max(80, uiActionDockSafeLeft() - 10);
+  drawTextClipped(homeIpStatusText(), 8, ipY, ipMaxW, TFT_YELLOW, TFT_BLACK, true);
+
   layoutHome();
   // Draw cyber-styled home buttons with icon lane + label lane.
   for (int i = 0; i < HOME_BTN_COUNT; ++i) {
@@ -5111,8 +5585,6 @@ static void drawHome() {
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   if (tft.height() <= 180) {
     tft.drawString("BTN1=Next  BTN2=Select", tft.width() / 2, tft.height() - 6);
-  } else {
-    tft.drawString("NeonDrive: CYD UI + WiFi scan + target ops", tft.width() / 2, tft.height() - 6);
   }
   drawBorder();
   if (homeReconnectPromptActive) drawHomeReconnectPromptOverlay();
@@ -5535,14 +6007,20 @@ static void drawWifiScan() {
 #else
   const bool cyd24Layout = false;
 #endif
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+  const bool cyd28HatLayout = true;
+#else
+  const bool cyd28HatLayout = false;
+#endif
   const UiRect content = computeContentRect();
   const UiRect bottom = computeBottomBarRect();
   const int reserveLeft = (UI_HYPERCUB_RESERVE_W > 0) ? UI_HYPERCUB_RESERVE_X : w;
   const int rightLimit = max(content.x + 120, min(content.x + content.w, reserveLeft - 6));
   // Keep radar narrower so WiFi rows can use more width on the right panel.
   const int leftColW = cyd35Layout ? clampi((w * 96) / 480, 86, 120)
-                                    : (cyd24Layout ? clampi((w * 72) / 320, 56, 74)
-                                    : clampi((w * 220) / 1280, compact ? 56 : 48, 220));
+                    : (cyd24Layout ? clampi((w * 72) / 320, 56, 74)
+                    : (cyd28HatLayout ? clampi((w * 80) / 320, 62, 82)
+                    : clampi((w * 220) / 1280, compact ? 56 : 48, 220)));
   const int panelGap = (cyd35Layout || cyd24Layout) ? 6 : (compact ? 6 : 10);
   const int leftX = content.x;
   const int leftW = min(leftColW, rightLimit - leftX - 40);
@@ -5566,7 +6044,8 @@ static void drawWifiScan() {
   // Scale radar panel from Tab5 baseline (250px @ 720h ~= 34.7% height).
   const int radarH = cyd35Layout ? 110
                    : (cyd24Layout ? 84
-                   : clampi((h * 250) / 720, compact ? 56 : 72, 250));
+                   : (cyd28HatLayout ? 74
+                   : clampi((h * 250) / 720, compact ? 56 : 72, 250)));
   wifiRadarX = leftX;
   wifiRadarY = topY;
   wifiRadarW = leftW;
@@ -5588,29 +6067,35 @@ static void drawWifiScan() {
   // Keep selected-network card tall enough that details and Connect never overlap.
   const int selectedH = cyd35Layout ? 72
                     : (cyd24Layout ? 44
-                    : (compact ? 72 : 148));
+                    : (cyd28HatLayout ? 40
+                    : (compact ? 72 : 148)));
   tft.drawRoundRect(rightX, topY, rightW, selectedH, 8, TFT_GREEN);
   applyFontSm();
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
   tft.drawString("SELECTED NETWORK", rightX + 6, topY + 6);
   String ssid = "(none)";
   if (apSelected >= 0 && apSelected < apCount) ssid = aps[apSelected].ssid.isEmpty() ? String("(hidden)") : aps[apSelected].ssid;
-  applyFontMd();
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  drawTextClipped(ssid, rightX + 6, topY + (compact ? 22 : 30), rightW - 12, TFT_CYAN, TFT_BLACK, true);
   applyFontSm();
-  const int detailLine1Y = topY + (cyd35Layout ? 34 : (cyd24Layout ? 24 : (compact ? 40 : 66)));
-  const int detailLine2Y = topY + (cyd35Layout ? 50 : (cyd24Layout ? 34 : (compact ? 52 : 84)));
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  drawTextClipped(ssid, rightX + 6, topY + (cyd28HatLayout ? 18 : (compact ? 22 : 30)), rightW - 12, TFT_CYAN, TFT_BLACK, true);
+  applyFontSm();
+  const int detailLine1Y = topY + (cyd35Layout ? 34 : (cyd24Layout ? 24 : (cyd28HatLayout ? 28 : (compact ? 40 : 66))));
+  const int detailLine2Y = topY + (cyd35Layout ? 50 : (cyd24Layout ? 34 : (cyd28HatLayout ? 34 : (compact ? 52 : 84))));
   if (apSelected >= 0 && apSelected < apCount) {
     const ApRecord& a = aps[apSelected];
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    drawTextClipped("BSSID: " + a.bssid, rightX + 6, detailLine1Y, rightW - 12, TFT_WHITE, TFT_BLACK, false);
-    drawTextClipped("CH " + String(a.channel) + "  " + String(a.rssi) + "dBm  " + authToStr(a.auth),
-                    rightX + 6, detailLine2Y, rightW - 12, TFT_WHITE, TFT_BLACK, true);
+    if (!cyd28HatLayout) {
+      drawTextClipped("BSSID: " + a.bssid, rightX + 6, detailLine1Y, rightW - 12, TFT_WHITE, TFT_BLACK, false);
+      drawTextClipped("CH " + String(a.channel) + "  " + String(a.rssi) + "dBm  " + authToStr(a.auth),
+                      rightX + 6, detailLine2Y, rightW - 12, TFT_WHITE, TFT_BLACK, true);
+    } else {
+      drawTextClipped("CH " + String(a.channel) + "  " + String(a.rssi) + "dBm  " + authToStr(a.auth),
+                      rightX + 6, detailLine1Y, rightW - 12, TFT_WHITE, TFT_BLACK, true);
+    }
   }
   const int tableY = topY + selectedH + panelGap;
   const int scrollBtn = compact ? 18 : 24;
-  wifiListTopY = tableY + ((cyd35Layout || cyd24Layout) ? 14 : 20);
+  wifiListTopY = tableY + ((cyd35Layout || cyd24Layout) ? 14 : (cyd28HatLayout ? 12 : 20));
   wifiListBottomY = bottom.y - panelGap;
   wifiListDrawX = rightX;
   wifiListDrawW = rightW;
@@ -5618,11 +6103,11 @@ static void drawWifiScan() {
   tft.drawString("TARGET  SSID / BSSID", rightX + 2, tableY + 4);
   tft.setTextDatum(TL_DATUM);
 
-  const int maxRows = (cyd35Layout || cyd24Layout)
+  const int maxRows = (cyd35Layout || cyd24Layout || cyd28HatLayout)
                     ? 4
                     : min(4, max(1, (wifiListBottomY - wifiListTopY) / (compact ? 18 : 36)));
-  wifiRowH = (cyd35Layout || cyd24Layout)
-           ? max(g_ui->row_h + (cyd24Layout ? 2 : 8), (wifiListBottomY - wifiListTopY) / 4)
+  wifiRowH = (cyd35Layout || cyd24Layout || cyd28HatLayout)
+           ? max(g_ui->row_h + (cyd24Layout ? 2 : (cyd28HatLayout ? 3 : 8)), (wifiListBottomY - wifiListTopY) / 4)
            : max(18, (wifiListBottomY - wifiListTopY) / maxRows);
   for (int r = 0; r < 4; r++) {
     btnWifiRows[r] = {0,0,0,0,""};
@@ -7838,6 +8323,8 @@ static void drawConfig() {
 
   btnCfgSync = {x0, y3, bw, bh, "Sync"};
   drawButton(btnCfgSync, 0x0228, TFT_GREEN, TFT_WHITE);
+  btnCfgRotate = {x1, y3, bw, bh, "Rotate +90"};
+  drawButton(btnCfgRotate, TFT_DARKGREY, TFT_MAGENTA, TFT_WHITE);
 
   uiLogLayout("drawConfig(CYD)", content, bottom);
   uiLogButtonRect("Config.Back", btnBack);
@@ -7896,6 +8383,7 @@ static void drawConfig() {
 
   btnCfgLed = {pad + bw + gap, top + ((bh + gap) * 2), bw, bh, compact ? "LED" : "LED Control"};
   drawButton(btnCfgLed, TFT_DARKGREY, TFT_YELLOW, TFT_WHITE);
+  btnCfgRotate = {0, 0, 0, 0, ""};
 
   uiLogLayout("drawConfig", content, bottom);
   uiLogButtonRect("Config.Back", btnBack);
@@ -8890,6 +9378,7 @@ static String neonPageStart(const String& title,
   html += neonNavLink("/", "Home", activeNav);
   html += neonNavLink("/android", "Android", activeNav);
   html += neonNavLink("/sd", "SD Manager", activeNav);
+  html += neonNavLink("/ir", "IR Studio", activeNav);
   html += neonNavLink("/wpasec", "WPA-SEC", activeNav);
   html += neonNavLink("/yoink/log", "YOINK Log", activeNav);
   html += neonNavLink("/keys/config", "API Keys", activeNav);
@@ -8974,6 +9463,7 @@ static void startWebServer() {
     toolsBlock += "<a class='nd-btn-ghost' href='/android'>Android Companion</a>";
     toolsBlock += "<a class='nd-btn-ghost' href='/wpasec'>WPA-SEC Console</a>";
     toolsBlock += "<a class='nd-btn-ghost' href='/sd'>SD File Manager</a>";
+    toolsBlock += "<a class='nd-btn-ghost' href='/ir'>IR Studio</a>";
     toolsBlock += "<a class='nd-btn-ghost' href='/android.apk'>Download APK</a>";
     toolsBlock += "<a class='nd-btn-ghost' href='/wpasec/results/download'>Download WPA-SEC Results</a>";
     toolsBlock += "</div></section>";
@@ -9253,6 +9743,314 @@ static void startWebServer() {
     webServer.sendHeader("Content-Disposition", "attachment; filename=CYDCompanion.apk");
     webServer.streamFile(apk, "application/vnd.android.package-archive");
     apk.close();
+  });
+
+  webServer.on("/ir", HTTP_GET, [](){
+    const bool sdOk = sdReady || mountSdCard(false);
+    String html = neonPageStart("IR Studio Setup",
+                                "Guided IR database setup and slot management.",
+                                "/ir");
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+    irSlotsLoad();
+    html += "<section class='nd-panel'><h2>Hardware Status</h2>";
+    html += "<p><span class='nd-status nd-ok'>NM-RF-HAT IR SUPPORTED</span></p>";
+    html += "<p>TX Pin: <code>" + String(NMHAT_IR_TX) + "</code> | RX Pin: <code>" + String(NMHAT_IR_RX) + "</code></p>";
+    html += "<p>Storage: ";
+    html += sdOk ? "<span class='nd-status nd-ok'>SD Ready</span>" : "<span class='nd-status nd-warn'>SD Missing (LittleFS fallback)</span>";
+    html += "</p></section>";
+
+    html += "<section class='nd-panel'><h2>Remote Library Preview</h2>";
+    html += "<p>See loaded remotes and send directly from web controls.</p>";
+    html += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;'>";
+    int usedCount = 0;
+    for (int i = 0; i < IR_SLOT_COUNT; i++) {
+      const IrSlot& s = g_irSlots[i];
+      if (!s.used) continue;
+      usedCount++;
+      const char* cat = irSlotCategory(s.name);
+      html += "<div style='border:1px solid #114f6b;border-radius:10px;padding:10px;background:#071427;'>";
+      html += "<div style='display:flex;align-items:center;gap:8px;'>";
+      html += irSlotThumbSvg(cat);
+      html += "<div><b>" + escapeHtml(String(s.name[0] ? s.name : "Unnamed")) + "</b><br>";
+      html += "<span class='nd-help'>Slot " + String(i + 1) + " · " + String(cat) + "</span></div></div>";
+      html += "<p class='nd-help'>P:" + String((unsigned)s.protocol) + " A:" + String((unsigned)s.address) + " C:" + String((unsigned)s.command) + " B:" + String((unsigned)s.bits) + "</p>";
+      html += "<div class='nd-actions'><form method='POST' action='/ir/send' class='nd-inline'>";
+      html += "<input type='hidden' name='slot' value='" + String(i) + "'>";
+      html += "<button class='nd-btn' type='submit'>Send</button></form></div></div>";
+    }
+    if (usedCount == 0) {
+      html += "<p><span class='nd-status nd-warn'>No loaded slots yet. Install a pack or upload JSON.</span></p>";
+    }
+    html += "</div></section>";
+
+    html += "<section class='nd-panel'><h2>Current Slot Database</h2>";
+    html += "<p>Download current IR slot DB used by firmware.</p>";
+    html += "<div class='nd-actions'><a class='nd-btn' href='/ir/slots/download'>Download ir_slots.json</a>";
+    html += "<a class='nd-btn-ghost' href='/ir/db/factory/download'>Download factory_ir_slots.json</a></div>";
+    html += "</section>";
+
+    html += "<section class='nd-panel'><h2>Upload/Replace Slot Database</h2>";
+    html += "<p>Upload a prepared <code>ir_slots.json</code> and apply immediately.</p>";
+    html += "<form method='POST' action='/ir/db/upload' enctype='multipart/form-data'>";
+    html += "<input type='file' name='db' accept='.json,application/json' required>";
+    html += "<p class='nd-help'>Preferred location: SD <code>/ir/ir_slots.json</code>. LittleFS fallback is automatic.</p>";
+    html += "<div class='nd-actions'><button class='nd-btn' type='submit'>Upload & Apply</button></div>";
+    html += "</form></section>";
+
+    html += "<section class='nd-panel'><h2>Import from URL</h2>";
+    html += "<p>Paste URL, browser fetches JSON, then applies to device.</p>";
+    html += "<form id='irImportUrlForm' method='POST' action='/ir/db/import-url'>";
+    html += "<input type='url' name='url' placeholder='https://example.com/ir_slots.json' required>";
+    html += "<input type='hidden' name='payload' id='irImportPayload'>";
+    html += "<div class='nd-actions'><button class='nd-btn' type='submit'>Import URL</button></div>";
+    html += "</form>";
+    html += R"JS(<script>
+document.getElementById('irImportUrlForm').addEventListener('submit', async function(e){
+  e.preventDefault();
+  const f = e.target;
+  const url = f.querySelector("input[name='url']").value;
+  const payloadInput = document.getElementById('irImportPayload');
+  const btn = f.querySelector("button[type='submit']");
+  btn.disabled = true; btn.textContent = 'Fetching...';
+  try {
+    const r = await fetch(url, {cache: 'no-store'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const txt = await r.text();
+    payloadInput.value = txt;
+    btn.textContent = 'Applying...';
+    f.submit();
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = 'Import URL';
+    alert('Failed to fetch URL: ' + err.message);
+  }
+});
+</script>)JS";
+    html += "</section>";
+
+    html += "<section class='nd-panel'><h2>Factory IR Pack</h2>";
+    html += "<p>Install starter packs with ready-to-use remote profiles.</p>";
+    html += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;'>";
+    html += "<div style='border:1px solid #114f6b;border-radius:10px;padding:10px;background:#071427;'>" + irSlotThumbSvg("TV") + "<p><b>TV Starter</b><br><span class='nd-help'>Power / Vol / Ch / Input / Menu</span></p><form method='POST' action='/ir/db/factory'><button class='nd-btn-ghost' type='submit'>Install TV Pack</button></form></div>";
+    html += "<div style='border:1px solid #114f6b;border-radius:10px;padding:10px;background:#071427;'>" + irSlotThumbSvg("AUDIO") + "<p><b>Audio Starter</b><br><span class='nd-help'>Power / Mute / Vol / Source</span></p><form method='POST' action='/ir/db/factory'><button class='nd-btn-ghost' type='submit'>Install Starter</button></form></div>";
+    html += "</div></section>";
+#else
+    html += "<section class='nd-panel'><h2>IR Studio Unavailable</h2>";
+    html += "<p><span class='nd-status nd-warn'>This build does not expose NM-RF-HAT IR features.</span></p>";
+    html += "<p>The page is visible for guided setup consistency across devices.</p>";
+    html += "</section>";
+#endif
+    html += neonPageEnd();
+    webServer.send(200, "text/html", html);
+  });
+
+  webServer.on("/ir/slots/download", HTTP_GET, [](){
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+    const bool sdOk = sdReady || mountSdCard(false);
+    const char* sdPath = "/ir/ir_slots.json";
+    const char* lfsPath = "/ir_slots.json";
+    if (sdOk && SD.exists(sdPath)) {
+      File f = SD.open(sdPath, FILE_READ);
+      if (!f) { webServer.send(500, "text/plain", "Failed to open SD IR DB"); return; }
+      webServer.sendHeader("Content-Disposition", "attachment; filename=\"ir_slots.json\"");
+      webServer.streamFile(f, "application/json");
+      f.close();
+      return;
+    }
+    if (LittleFS.exists(lfsPath)) {
+      File f = LittleFS.open(lfsPath, FILE_READ);
+      if (!f) { webServer.send(500, "text/plain", "Failed to open LittleFS IR DB"); return; }
+      webServer.sendHeader("Content-Disposition", "attachment; filename=\"ir_slots.json\"");
+      webServer.streamFile(f, "application/json");
+      f.close();
+      return;
+    }
+    // Fallback: if no runtime DB exists yet, return factory pack so onboarding still works.
+    String fallback = irBuildFactoryPackJson();
+    webServer.sendHeader("Content-Disposition", "attachment; filename=\"ir_slots.json\"");
+    webServer.send(200, "application/json", fallback);
+#else
+    webServer.send(404, "text/plain", "IR DB unsupported on this target");
+#endif
+  });
+
+  webServer.on("/ir/db/factory/download", HTTP_GET, [](){
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+    String payload = irBuildFactoryPackJson();
+    webServer.sendHeader("Content-Disposition", "attachment; filename=\"factory_ir_slots.json\"");
+    webServer.send(200, "application/json", payload);
+#else
+    webServer.send(404, "text/plain", "IR DB unsupported on this target");
+#endif
+  });
+
+  webServer.on("/ir/db/upload", HTTP_POST, [](){
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+    if (irDbUploadFile) irDbUploadFile.close();
+    String html = neonPageStart("IR DB Upload Result", "IR slot database import completed.", "/ir");
+    html += "<section class='nd-panel'><h2>";
+    if (irDbUploadApplied) {
+      irSlotsLoad();
+      html += "IR database uploaded and applied.";
+    } else {
+      html += "Upload failed";
+      html += "</h2><p>";
+      html += escapeHtml(String(irDbUploadError));
+      html += "</p>";
+      html += "<div class='nd-actions'><a class='nd-btn-ghost' href='/ir'>Back to IR Studio</a></div></section>";
+      html += neonPageEnd();
+      webServer.send(400, "text/html", html);
+      return;
+    }
+    html += "</h2>";
+    html += "<div class='nd-actions'><a class='nd-btn-ghost' href='/ir'>Back to IR Studio</a></div></section>";
+    html += neonPageEnd();
+    webServer.send(200, "text/html", html);
+#else
+    webServer.send(404, "text/plain", "IR DB unsupported on this target");
+#endif
+  }, [](){
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+    HTTPUpload& upload = webServer.upload();
+    const bool sdOk = sdReady || mountSdCard(false);
+    const char* sdDir = "/ir";
+    const char* sdPath = "/ir/ir_slots.json";
+    const char* lfsPath = "/ir_slots.json";
+
+    if (upload.status == UPLOAD_FILE_START) {
+      irDbUploadApplied = false;
+      irDbUploadError[0] = '\0';
+      if (irDbUploadFile) irDbUploadFile.close();
+      if (sdOk) {
+        if (!SD.exists(sdDir)) SD.mkdir(sdDir);
+        if (SD.exists(sdPath)) SD.remove(sdPath);
+        irDbUploadFile = SD.open(sdPath, FILE_WRITE);
+      } else {
+        if (LittleFS.exists(lfsPath)) LittleFS.remove(lfsPath);
+        irDbUploadFile = LittleFS.open(lfsPath, FILE_WRITE);
+      }
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+      if (irDbUploadFile) irDbUploadFile.write(upload.buf, upload.currentSize);
+    } else if (upload.status == UPLOAD_FILE_END) {
+      if (irDbUploadFile) irDbUploadFile.close();
+      fs::FS* storage = nullptr;
+      const char* target = nullptr;
+      if (sdOk && SD.exists(sdPath)) { storage = &SD; target = sdPath; }
+      else if (LittleFS.exists(lfsPath)) { storage = &LittleFS; target = lfsPath; }
+      if (!storage || !target) {
+        strncpy(irDbUploadError, "No uploaded file found", sizeof(irDbUploadError)-1);
+        return;
+      }
+      File rf = storage->open(target, "r");
+      if (!rf) {
+        strncpy(irDbUploadError, "Failed to re-open uploaded file", sizeof(irDbUploadError)-1);
+        return;
+      }
+      JsonDocument doc;
+      DeserializationError de = deserializeJson(doc, rf);
+      rf.close();
+      if (de) {
+        snprintf(irDbUploadError, sizeof(irDbUploadError), "JSON parse error: %s", de.c_str());
+        storage->remove(target);
+        return;
+      }
+      String err;
+      if (!irValidateSlotsDoc(doc, err)) {
+        snprintf(irDbUploadError, sizeof(irDbUploadError), "Schema error: %s", err.c_str());
+        storage->remove(target);
+        return;
+      }
+      const int trimmed = irTrimSlotsArrayToCapacity(doc);
+      if (trimmed > 0) {
+        File wf = storage->open(target, "w");
+        if (wf) {
+          serializeJsonPretty(doc, wf);
+          wf.close();
+        }
+      }
+      irLoadSlotsFromDoc(doc);
+      irDbUploadApplied = true;
+    } else if (upload.status == UPLOAD_FILE_ABORTED) {
+      if (irDbUploadFile) irDbUploadFile.close();
+      strncpy(irDbUploadError, "Upload aborted", sizeof(irDbUploadError)-1);
+    }
+#endif
+  });
+
+  webServer.on("/ir/db/import-url", HTTP_POST, [](){
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+    const String url = webServer.arg("url");
+    const String payload = webServer.arg("payload");
+    String html = neonPageStart("IR URL Import Result", "Remote DB fetch completed.", "/ir");
+    html += "<section class='nd-panel'><h2>";
+    if (url.isEmpty() || payload.isEmpty()) {
+      html += "Import failed</h2><p>Missing URL.</p>";
+      html += "<div class='nd-actions'><a class='nd-btn-ghost' href='/ir'>Back to IR Studio</a></div></section>";
+      html += neonPageEnd();
+      webServer.send(400, "text/html", html);
+      return;
+    }
+    String err;
+    if (!irImportSlotsFromJsonString(payload, err)) {
+      html += "Import failed</h2><p>" + escapeHtml(err) + "</p>";
+      html += "<div class='nd-actions'><a class='nd-btn-ghost' href='/ir'>Back to IR Studio</a></div></section>";
+      html += neonPageEnd();
+      webServer.send(400, "text/html", html);
+      return;
+    }
+    irSlotsLoad();
+    html += "Import complete</h2><p>URL loaded via browser and saved.</p>";
+    html += "<div class='nd-actions'><a class='nd-btn-ghost' href='/ir'>Back to IR Studio</a></div></section>";
+    html += neonPageEnd();
+    webServer.send(200, "text/html", html);
+#else
+    webServer.send(404, "text/plain", "IR DB unsupported on this target");
+#endif
+  });
+
+  webServer.on("/ir/db/factory", HTTP_POST, [](){
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+    String payload = irBuildFactoryPackJson();
+    String err;
+    String html = neonPageStart("IR Factory Pack", "Factory install completed.", "/ir");
+    html += "<section class='nd-panel'><h2>";
+    if (!irImportSlotsFromJsonString(payload, err)) {
+      html += "Install failed</h2><p>" + escapeHtml(err) + "</p>";
+      html += "<div class='nd-actions'><a class='nd-btn-ghost' href='/ir'>Back to IR Studio</a></div></section>";
+      html += neonPageEnd();
+      webServer.send(500, "text/html", html);
+      return;
+    }
+    irSlotsLoad();
+    html += "Factory pack installed</h2><p>Starter NEC set is ready.</p>";
+    html += "<div class='nd-actions'><a class='nd-btn-ghost' href='/ir'>Back to IR Studio</a></div></section>";
+    html += neonPageEnd();
+    webServer.send(200, "text/html", html);
+#else
+    webServer.send(404, "text/plain", "IR DB unsupported on this target");
+#endif
+  });
+
+  webServer.on("/ir/send", HTTP_POST, [](){
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+    irSlotsLoad();
+    const int slot = webServer.arg("slot").toInt();
+    if (slot < 0 || slot >= IR_SLOT_COUNT || !g_irSlots[slot].used) {
+      webServer.send(400, "text/plain", "Invalid or empty slot");
+      return;
+    }
+    irSendSlot(slot);
+    String html = neonPageStart("IR Send Result", "IR command sent from web control.", "/ir");
+    html += "<section class='nd-panel'><h2>Sent slot ";
+    html += String(slot + 1);
+    html += "</h2><p>Status: ";
+    html += escapeHtml(String(g_irStatus));
+    html += "</p><div class='nd-actions'><a class='nd-btn-ghost' href='/ir'>Back to IR Studio</a></div></section>";
+    html += neonPageEnd();
+    webServer.send(200, "text/html", html);
+#else
+    webServer.send(404, "text/plain", "IR DB unsupported on this target");
+#endif
   });
 
   webServer.on("/sd", HTTP_GET, [](){
@@ -10417,6 +11215,11 @@ static void drawWifiPasswordModal() {
 #else
   const bool cyd24Layout = false;
 #endif
+#if defined(NEONDRIVE_TARGET_CYD) && !defined(NEONDRIVE_TARGET_CYD24)
+  const bool cyd28Layout = true;
+#else
+  const bool cyd28Layout = false;
+#endif
   const bool portrait = (h > w);
   const bool tab5Large = (w >= 900 || h >= 900);
   const bool compact = cyd24Layout ? true : !tab5Large;
@@ -10445,28 +11248,30 @@ static void drawWifiPasswordModal() {
   const char* row3 = wifiPwSymbols ? symRow3 : alphaRow3;
   const char* row4 = wifiPwSymbols ? symRow4 : alphaRow4;
 
-  // Network panel
-  const int netH = cyd24Layout ? 38 : (compact ? 66 : (portrait ? 188 : 124));
+  // Shared panel: selected network + password in one compact block.
+  const int netH = cyd24Layout ? 58 : (cyd28Layout ? 72 : (compact ? 104 : (portrait ? 248 : 168)));
   tft.fillRoundRect(x0, y0, ww, netH, panelR, TFT_BLACK);
   tft.drawRoundRect(x0, y0, ww, netH, panelR, TFT_MAGENTA);
   applyFontSm();
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
-  tft.drawString("SELECTED NETWORK", x0 + (compact ? 6 : 14), y0 + (compact ? 5 : 10));
+  tft.drawString(cyd28Layout ? "SELECTED" : "SELECTED NETWORK", x0 + (compact ? 6 : 14), y0 + (compact ? 5 : 10));
   String ssid = "(none)";
   if (wifiConnectSelectedIdx >= 0 && wifiConnectSelectedIdx < apCount) {
     ssid = aps[wifiConnectSelectedIdx].ssid.isEmpty() ? String("(hidden)") : aps[wifiConnectSelectedIdx].ssid;
   }
   if (!compact) applyFontMd();
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  const int ssidY = y0 + (cyd24Layout ? 15 : (compact ? 22 : 42));
+  const int ssidY = y0 + (cyd24Layout ? 15 : (cyd28Layout ? 20 : (compact ? 22 : 42)));
   drawTextClipped(ssid, x0 + (compact ? 6 : 14), ssidY, ww - (compact ? 12 : 24), TFT_CYAN, TFT_BLACK, true);
   applyFontSm();
   if (wifiConnectSelectedIdx >= 0 && wifiConnectSelectedIdx < apCount) {
     const ApRecord& a = aps[wifiConnectSelectedIdx];
-    const int infoY = y0 + (cyd24Layout ? 26 : (compact ? 40 : 82));
+    const int infoY = y0 + (cyd24Layout ? 26 : (cyd28Layout ? 32 : (compact ? 40 : 82)));
     if (cyd24Layout) {
       drawTextClipped(String(authToStr(a.auth)) + "  " + String(a.rssi) + "dBm", x0 + 6, infoY, ww - 12, TFT_GREEN, TFT_BLACK, false);
+    } else if (cyd28Layout) {
+      drawTextClipped(String(a.rssi) + " dBm  " + authToStr(a.auth), x0 + 6, infoY, ww - 12, TFT_GREEN, TFT_BLACK, false);
     } else {
       drawTextClipped(authToStr(a.auth), x0 + (compact ? 6 : 14), infoY, ww / 3, TFT_GREEN, TFT_BLACK, false);
       drawTextClipped(String(a.rssi) + " dBm", x0 + ww / 3, infoY, ww / 3, TFT_GREEN, TFT_BLACK, false);
@@ -10474,11 +11279,9 @@ static void drawWifiPasswordModal() {
     }
   }
 
-  // Password panel
-  const int pwY = y0 + netH + keyGap;
-  const int pwH = cyd24Layout ? 24 : (compact ? 42 : 84);
-  tft.fillRoundRect(x0, pwY, ww, pwH, panelR, TFT_BLACK);
-  tft.drawRoundRect(x0, pwY, ww, pwH, panelR, 0x781F);
+  // Password area within shared panel.
+  const int pwY = y0 + (cyd24Layout ? 30 : (cyd28Layout ? 38 : (compact ? 56 : 102)));
+  const int pwH = cyd24Layout ? 24 : (cyd28Layout ? 28 : (compact ? 40 : 58));
   tft.setTextColor(0xD81F, TFT_BLACK);
   tft.drawString("PASSWORD", x0 + (compact ? 6 : 14), pwY + (cyd24Layout ? 3 : (compact ? 4 : 10)));
   String shown = wifiConnectPassword;
@@ -10499,11 +11302,16 @@ static void drawWifiPasswordModal() {
                        wifiConnectRevealPassword ? "Hide" : "Show"};
   drawButton(btnWifiPwShowHide, TFT_NAVY, TFT_CYAN, TFT_WHITE);
 
-  if (cyd24Layout) {
+  if (cyd24Layout || cyd28Layout) {
     const int rowsAreaTop = pwY + pwH + keyGap;
-    const int rowsAreaH = max(72, safeBottom - rowsAreaTop);
-    actionH = clampi(g_ui->btn_h - 2, 16, 20);
-    keyH = clampi((rowsAreaH - actionH - (4 * keyGap)) / 4, 14, 18);
+    const int rowsAreaH = max(64, safeBottom - rowsAreaTop - 2);
+    if (cyd24Layout) {
+      actionH = clampi(g_ui->btn_h - 2, 16, 20);
+      keyH = clampi((rowsAreaH - actionH - (4 * keyGap)) / 4, 14, 18);
+    } else {
+      actionH = 18;
+      keyH = clampi((rowsAreaH - actionH - (4 * keyGap)) / 4, 13, 16);
+    }
   }
 
   // Keyboard rows
@@ -10532,7 +11340,7 @@ static void drawWifiPasswordModal() {
     }
   };
 
-  const int kY0 = pwY + pwH + keyGap;
+  const int kY0 = y0 + netH + keyGap;
   drawRow(row1, kY0, false);
   drawRow(row2, kY0 + keyH + keyGap, true);
 
@@ -10572,18 +11380,16 @@ static void drawWifiPasswordModal() {
   // Action row
   int r5y = r4y + keyH + keyGap;
   const int actGap = keyGap;
-  const int actCount = 5;
+  const int actCount = 3;
   const int actW = max(cyd24Layout ? 40 : 44, (ww - (actGap * (actCount - 1))) / actCount);
   btnWifiPwSaved = {x0 + (actW + actGap) * 0, r5y, actW, actionH, "Saved"};
-  btnWifiPwClear = {x0 + (actW + actGap) * 1, r5y, actW, actionH, "Clear"};
-  btnWifiPwCancel = {x0 + (actW + actGap) * 2, r5y, actW, actionH, "Cancel"};
-  btnWifiPwConnect = {x0 + (actW + actGap) * 3, r5y, actW, actionH, "Connect"};
-  btnWifiPwReconnect = {x0 + (actW + actGap) * 4, r5y, actW, actionH, "Reconnect"};
+  btnWifiPwCancel = {x0 + (actW + actGap) * 1, r5y, actW, actionH, "Cancel"};
+  btnWifiPwConnect = {x0 + (actW + actGap) * 2, r5y, actW, actionH, "Connect"};
+  btnWifiPwClear = {0, 0, 0, 0, ""};
+  btnWifiPwReconnect = {0, 0, 0, 0, ""};
   drawButton(btnWifiPwSaved, TFT_NAVY, TFT_CYAN, TFT_WHITE);
-  drawButton(btnWifiPwClear, TFT_BLACK, TFT_CYAN, TFT_CYAN);
   drawButton(btnWifiPwCancel, TFT_BLACK, TFT_RED, TFT_RED);
   drawButton(btnWifiPwConnect, TFT_DARKGREEN, TFT_GREEN, TFT_GREEN);
-  drawButton(btnWifiPwReconnect, TFT_BLACK, TFT_YELLOW, TFT_YELLOW);
 
   if (wifiConnectShowSavedDrawer) {
     const int dw = compact ? (ww - 8) : min(ww - 18, (portrait ? ww - 18 : ww / 2));
@@ -10733,21 +11539,26 @@ static void drawWifiConnect() {
   int rowH = max(18, (listBottomY - listTopY) / WIFI_CONNECT_VISIBLE_ROWS);
 
 #if defined(NEONDRIVE_TARGET_CYD)
+#if defined(NEONDRIVE_TARGET_CYD24)
+  const bool cyd28TightLayout = false;
+#else
+  const bool cyd28TightLayout = true;
+#endif
   // CYD hard-locked geometry for the WiFi Connect screen.
   btnGap = 6;
   btnH = 30;
   btnY = h - 36;
   controlsW = max(236, uiRightLimitForBand(btnY, btnH) - 8);
-  hideBottomConnect = false;
+  hideBottomConnect = wifiConnectShowPasswordModal;
   bottomBtnCount = 4;
   btnW = (controlsW - (btnGap * 3)) / 4;
-  selectedY = 24;
-  statusY = 36;
-  hintY = 48;
+  selectedY = cyd28TightLayout ? 22 : 24;
+  statusY = cyd28TightLayout ? 32 : 36;
+  hintY = cyd28TightLayout ? 42 : 48;
   statusLineY = btnY - 14;
-  listTopY = 62;
+  listTopY = cyd28TightLayout ? 54 : 62;
   listBottomY = statusLineY - 4;
-  rowH = max(18, (listBottomY - listTopY) / WIFI_CONNECT_VISIBLE_ROWS);
+  rowH = max(cyd28TightLayout ? 20 : 18, (listBottomY - listTopY) / WIFI_CONNECT_VISIBLE_ROWS);
 #else
   btnGap = compact ? 4 : 6;
   btnH = tab5Large ? 40 : (compact ? 24 : 30);
@@ -10823,8 +11634,12 @@ static void drawWifiConnect() {
     String selectedLine = "Selected: (none)";
     if (wifiConnectSelectedIdx >= 0 && wifiConnectSelectedIdx < apCount) {
       const ApRecord& a = aps[wifiConnectSelectedIdx];
-      selectedLine = "Selected: " + (a.ssid.isEmpty() ? String("(hidden)") : a.ssid) +
-                     " | CH " + String(a.channel) + " | " + String(a.rssi) + "dBm";
+      const String ssid = a.ssid.isEmpty() ? String("(hidden)") : a.ssid;
+#if defined(NEONDRIVE_TARGET_CYD) && !defined(NEONDRIVE_TARGET_CYD24)
+      selectedLine = "Sel: " + ssid;
+#else
+      selectedLine = "Selected: " + ssid + " | CH " + String(a.channel) + " | " + String(a.rssi) + "dBm";
+#endif
     }
     selectedLine = trimToWidth(selectedLine, uiRightLimitForBand(selectedY, 14) - 8);
     tft.drawString(selectedLine, listX, selectedY);
@@ -16144,6 +16959,137 @@ static void drawAbout() {
   drawBorder();
 }
 
+static void drawHatTrick() {
+  drawHeader("HAT TRICK");
+  drawUniversalBackground();
+
+  const UiRect content = computeContentRect();
+  const UiRect bottom = computeBottomBarRect();
+  const bool compact = (tft.height() <= 180);
+
+  const int panelX = content.x + 6;
+  const int panelY = content.y + 6;
+  const int panelW = content.w - 12;
+  const int panelH = max(96, content.h / 2);
+  tft.drawRoundRect(panelX, panelY, panelW, panelH, 8, TFT_CYAN);
+  tft.drawRoundRect(panelX + 2, panelY + 2, panelW - 4, panelH - 4, 6, 0x2945);
+
+  tft.setTextDatum(TL_DATUM);
+  applyFontSm();
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("NM RF HAT MODE CONTROLLER", panelX + 10, panelY + 10);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("DIP 1=CC1101  2=nRF24  3=PN532", panelX + 10, panelY + 24);
+  tft.drawString("DIP 4=IR  5=RF433  6=BAT PWR", panelX + 10, panelY + 36);
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+  char modeLine[96];
+  snprintf(modeLine, sizeof(modeLine), "ACTIVE MODE: %s", hatModeLabel(g_hatMode));
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.drawString(modeLine, panelX + 10, panelY + 48);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(hatModeActionHint(g_hatMode), panelX + 10, panelY + 60);
+  char pinLine[96];
+  snprintf(pinLine, sizeof(pinLine), "SPI MISO/SCK/MOSI: %d/%d/%d",
+           NMHAT_SPI_MISO, NMHAT_SPI_SCK, NMHAT_SPI_MOSI);
+  tft.drawString(pinLine, panelX + 10, panelY + 72);
+  snprintf(pinLine, sizeof(pinLine), "Shared TX/RX/AUX: %d/%d/%d",
+           NMHAT_IO_TX, NMHAT_IO_RX, NMHAT_IO_AUX);
+  tft.drawString(pinLine, panelX + 10, panelY + 84);
+#else
+  tft.drawString("Pins: RF/IR TX=22  RX=27", panelX + 10, panelY + 48);
+#endif
+
+  const int gap = compact ? 6 : 8;
+  const int btnW = (content.w - (gap * 2)) / 3;
+  const int btnY = panelY + panelH + 10;
+  btnHatTrickRf  = {content.x, btnY, btnW, UI_BUTTON_H, "Mode"};
+  btnHatTrickNrf = {content.x + btnW + gap, btnY, btnW, UI_BUTTON_H, "Launch"};
+  btnHatTrickGps = {content.x + ((btnW + gap) * 2), btnY, btnW, UI_BUTTON_H, "Pins"};
+  btnHatTrickBack = {bottom.x, bottom.y, compact ? 96 : 120, UI_BUTTON_H, "Back"};
+
+  drawButton(btnHatTrickRf, TFT_NAVY, TFT_CYAN, TFT_WHITE);
+  drawButton(btnHatTrickNrf, 0x2945, TFT_GREEN, TFT_WHITE);
+  drawButton(btnHatTrickGps, TFT_DARKGREY, TFT_YELLOW, TFT_WHITE);
+  drawButton(btnHatTrickBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
+  drawBorder();
+}
+
+static void drawIrStudio() {
+  drawHeader("IR STUDIO");
+  drawUniversalBackground();
+  const UiRect content = computeContentRect();
+  const UiRect bottom = computeBottomBarRect();
+  const bool compact = (tft.height() <= 180);
+
+  const int panelX = content.x + 6;
+  const int panelY = content.y + 6;
+  const int panelW = content.w - 12;
+  const int panelH = max(92, content.h / 2);
+  tft.drawRoundRect(panelX, panelY, panelW, panelH, 8, TFT_CYAN);
+  tft.drawRoundRect(panelX + 2, panelY + 2, panelW - 4, panelH - 4, 6, 0x2945);
+
+  tft.setTextDatum(TL_DATUM);
+  applyFontSm();
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("LEARN / SAVE / REPLAY", panelX + 8, panelY + 8);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+  char line[96];
+  snprintf(line, sizeof(line), "IR TX=%d RX=%d  Slot %d/%d",
+           NMHAT_IR_TX, NMHAT_IR_RX, g_irSlotIdx + 1, IR_SLOT_COUNT);
+  tft.drawString(line, panelX + 8, panelY + 22);
+  tft.drawString(g_irStatus, panelX + 8, panelY + 36);
+  const IrSlot& s = g_irSlots[g_irSlotIdx];
+  if (s.used) {
+    snprintf(line, sizeof(line), "Saved P:%u A:%u C:%u B:%u",
+             (unsigned)s.protocol, (unsigned)s.address, (unsigned)s.command, (unsigned)s.bits);
+    tft.drawString(line, panelX + 8, panelY + 50);
+  } else {
+    tft.drawString("Saved: (empty slot)", panelX + 8, panelY + 50);
+  }
+  if (g_irHasCaptured) {
+    snprintf(line, sizeof(line), "Captured P:%u A:%u C:%u B:%u",
+             (unsigned)g_irCapProtocol, (unsigned)g_irCapAddress,
+             (unsigned)g_irCapCommand, (unsigned)g_irCapBits);
+    tft.drawString(line, panelX + 8, panelY + 64);
+  } else {
+    tft.drawString("Captured: none", panelX + 8, panelY + 64);
+  }
+
+  const int wfW = min(IR_WF_W, panelW - 20);
+  const int wfH = min(IR_WF_H, panelH - 18);
+  const int wfX = panelX + panelW - wfW - 8;
+  const int wfY = panelY + 8;
+  tft.drawRect(wfX - 1, wfY - 1, wfW + 2, wfH + 2, 0x39E7);
+  for (int y = 0; y < wfH; ++y) {
+    for (int x = 0; x < wfW; ++x) {
+      tft.drawPixel(wfX + x, wfY + y, irHeatColor(g_irWaterfall[y][x]));
+    }
+  }
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("IR HEAT", wfX, wfY + wfH + 2);
+#endif
+
+  const int gap = compact ? 6 : 8;
+  const int rowW = (content.w - gap) / 2;
+  const int btnY1 = panelY + panelH + 8;
+  const int btnY2 = btnY1 + UI_BUTTON_H + gap;
+  btnIrLearn = {content.x, btnY1, rowW, UI_BUTTON_H, g_irLearning ? "Learning..." : "Learn"};
+  btnIrSend  = {content.x + rowW + gap, btnY1, rowW, UI_BUTTON_H, "Send"};
+  btnIrSave  = {content.x, btnY2, rowW, UI_BUTTON_H, "Save"};
+  btnIrPrev  = {content.x + rowW + gap, btnY2, (rowW - gap) / 2, UI_BUTTON_H, "<"};
+  btnIrNext  = {btnIrPrev.x + btnIrPrev.w + gap, btnY2, (rowW - gap) / 2, UI_BUTTON_H, ">"};
+  btnIrBack  = {bottom.x, bottom.y, compact ? 96 : 120, UI_BUTTON_H, "Back"};
+
+  drawButton(btnIrLearn, TFT_NAVY, TFT_CYAN, TFT_WHITE);
+  drawButton(btnIrSend, 0x2945, TFT_GREEN, TFT_WHITE);
+  drawButton(btnIrSave, TFT_DARKGREY, TFT_YELLOW, TFT_WHITE);
+  drawButton(btnIrPrev, TFT_NAVY, TFT_WHITE, TFT_WHITE);
+  drawButton(btnIrNext, TFT_NAVY, TFT_WHITE, TFT_WHITE);
+  drawButton(btnIrBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
+  drawBorder();
+}
+
 static void setScreen(ScreenId next) {
   screen = next;
   if (verboseSerial) {
@@ -16155,6 +17101,12 @@ static void setScreen(ScreenId next) {
       g_focusIdx = 0;
 #endif
       drawHome();
+      break;
+    case ScreenId::HAT_TRICK:
+      drawHatTrick();
+      break;
+    case ScreenId::IR_STUDIO:
+      drawIrStudio();
       break;
     case ScreenId::JUST_GO:
       justGoLayoutDrawn = false;
@@ -16249,6 +17201,8 @@ static void setScreen(ScreenId next) {
 static void redrawActiveScreen() {
   switch (screen) {
     case ScreenId::HOME:                drawHome(); break;
+    case ScreenId::HAT_TRICK:           drawHatTrick(); break;
+    case ScreenId::IR_STUDIO:           drawIrStudio(); break;
     case ScreenId::JUST_GO:             drawJustGo(); break;
     case ScreenId::WIFI_SCAN:           drawWifiScan(); break;
     case ScreenId::CONFIRM_TARGET:      drawConfirmTarget(); break;
@@ -17068,6 +18022,9 @@ void setup() {
   } else {
     Serial.println("[fs] LittleFS mounted.");
     restoreEpochFromLittleFs();
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+    irSlotsLoad();
+#endif
   }
 
   // SD (optional but required for PCAP capture files)
@@ -17078,6 +18035,12 @@ void setup() {
   initCyd35TouchCalibrationFromSdOrWizard();
 #endif
   variantBootSelfTest();
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+  IrReceiver.begin(NMHAT_IR_RX, DISABLE_LED_FEEDBACK);
+  IrSender.begin(NMHAT_IR_TX, ENABLE_LED_FEEDBACK);
+  irStatusSet("IR RX/TX ready");
+  Serial.printf("[ir] init RX=%d TX=%d\n", NMHAT_IR_RX, NMHAT_IR_TX);
+#endif
 
   // Create mutex for serializing WiFi driver ops
   wifiOpMutex = xSemaphoreCreateMutex();
@@ -17094,6 +18057,11 @@ void setup() {
     saveConfig(temp);
   }
   cfg = temp;
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+  if (cfg.hat_trick_mode < 0) cfg.hat_trick_mode = 0;
+  if (cfg.hat_trick_mode > 4) cfg.hat_trick_mode = 4;
+  g_hatMode = (NmHatMode)cfg.hat_trick_mode;
+#endif
 #if defined(NEONDRIVE_TARGET_CYD)
   applyCydManualRotation(cfg.startup_manualRotation, false);
 #endif
@@ -17239,6 +18207,9 @@ void loop() {
   scopeTick();
   reconTick();
   portScannerTick();
+  #if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+  irPollLearn();
+  #endif
   PACKETLABMonitorTick();
   updateHypercubeActivity();
   HypercubeWidget::tick();
@@ -17393,15 +18364,104 @@ void loop() {
           setScreen(ScreenId::PACKETLAB_MENU);
           break;
         case 8:
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+          Serial.println("[ui] Home -> HAT TRICK");
+          setScreen(ScreenId::HAT_TRICK);
+#else
           Serial.println("[ui] Home -> WARDRIVE");
 #if defined(CYD35_GPS_RX) && defined(CYD35_GPS_TX)
           if (!GpsService::isRunning()) GpsService::begin(CYD35_GPS_RX, CYD35_GPS_TX);
 #endif
           setScreen(ScreenId::WARDRIVE);
+#endif
           break;
         default:
           break;
       }
+      waitTouchRelease();
+      return;
+    }
+    waitTouchRelease();
+    return;
+  }
+
+  if (screen == ScreenId::HAT_TRICK) {
+    if (hit(btnHatTrickBack, tx, ty)) { setScreen(ScreenId::HOME); waitTouchRelease(); return; }
+    if (hit(btnHatTrickRf, tx, ty)) {
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+      hatModeCycle();
+      drawHatTrick();
+#else
+      setScreen(ScreenId::RECON);
+#endif
+      waitTouchRelease();
+      return;
+    }
+    if (hit(btnHatTrickNrf, tx, ty)) {
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+      hatModeLaunch();
+#else
+      setScreen(ScreenId::PACKETLAB_MENU);
+#endif
+      waitTouchRelease();
+      return;
+    }
+    if (hit(btnHatTrickGps, tx, ty)) {
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+      monitorMode = MonitorMode::FILES;
+      monitorReturnScreen = ScreenId::HAT_TRICK;
+      monitorLoadFileDir("/");
+      setScreen(ScreenId::MONITOR);
+#else
+      setScreen(ScreenId::WARDRIVE);
+#endif
+      waitTouchRelease();
+      return;
+    }
+    waitTouchRelease();
+    return;
+  }
+
+  if (screen == ScreenId::IR_STUDIO) {
+    if (hit(btnIrBack, tx, ty)) { setScreen(ScreenId::HAT_TRICK); waitTouchRelease(); return; }
+    if (hit(btnIrLearn, tx, ty)) {
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+      g_irLearning = true;
+      irStatusSet("Point remote and press key");
+      drawIrStudio();
+#endif
+      waitTouchRelease();
+      return;
+    }
+    if (hit(btnIrSend, tx, ty)) {
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+      if (g_irHasCaptured) irSendCaptured(); else irSendSlot(g_irSlotIdx);
+      drawIrStudio();
+#endif
+      waitTouchRelease();
+      return;
+    }
+    if (hit(btnIrSave, tx, ty)) {
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+      irSaveCapturedToCurrentSlot();
+      drawIrStudio();
+#endif
+      waitTouchRelease();
+      return;
+    }
+    if (hit(btnIrPrev, tx, ty)) {
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+      g_irSlotIdx = (g_irSlotIdx + IR_SLOT_COUNT - 1) % IR_SLOT_COUNT;
+      drawIrStudio();
+#endif
+      waitTouchRelease();
+      return;
+    }
+    if (hit(btnIrNext, tx, ty)) {
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+      g_irSlotIdx = (g_irSlotIdx + 1) % IR_SLOT_COUNT;
+      drawIrStudio();
+#endif
       waitTouchRelease();
       return;
     }
@@ -18277,6 +19337,16 @@ void loop() {
       waitTouchRelease();
       return;
     }
+#if defined(NEONDRIVE_TARGET_CYD)
+    if (hit(btnCfgRotate, tx, ty)) {
+      int next = (cfg.startup_manualRotation + 1) & 3;
+      applyCydManualRotation(next, false);
+      saveConfig(cfg);
+      drawConfig();
+      waitTouchRelease();
+      return;
+    }
+#endif
     waitTouchRelease();
     return;
   }
@@ -18599,12 +19669,6 @@ void loop() {
         waitTouchRelease();
         return;
       }
-      if (hit(btnWifiPwClear, tx, ty)) {
-        wifiConnectPassword = "";
-        drawWifiPasswordModal();
-        waitTouchRelease();
-        return;
-      }
       if (hit(btnWifiPwSaved, tx, ty)) {
         wifiConnectShowSavedDrawer = !wifiConnectShowSavedDrawer;
         drawWifiConnect();
@@ -18645,22 +19709,6 @@ void loop() {
         waitTouchRelease();
         return;
       }
-      if (hit(btnWifiPwReconnect, tx, ty)) {
-        if (!cfg.wifi_ssid.isEmpty()) {
-          wifiConnectPassword = cfg.wifi_password;
-          connectToWifi(cfg.wifi_ssid, cfg.wifi_password);
-          wifiConnectStatus = "Reconnecting to saved network";
-        } else if (cfg.wifi_savedCount > 0) {
-          connectToWifi(cfg.wifi_savedSsid[0], cfg.wifi_savedPassword[0]);
-          wifiConnectStatus = "Reconnecting saved[0]";
-        } else {
-          wifiConnectStatus = "No saved network";
-        }
-        drawWifiConnect();
-        waitTouchRelease();
-        return;
-      }
-
       waitTouchRelease();
       return;
     }
