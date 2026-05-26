@@ -16988,6 +16988,13 @@ static void initCyd35TouchCalibrationFromSdOrWizard() {
 
 void setup() {
   Serial.begin(115200);
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && (ARDUINO_USB_CDC_ON_BOOT == 1)
+  // Native USB CDC: wait up to 1500 ms for a terminal to open the port.
+  // Without this, boot log is output before the host CDC driver is ready
+  // and every message is silently dropped.  On standalone operation (no PC)
+  // this just adds 1500 ms to boot time.
+  { uint32_t t = millis(); while (!Serial && millis() - t < 1500) delay(10); }
+#endif
   delay(100);
   initUiMetrics();
   Serial.println();
