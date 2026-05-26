@@ -252,8 +252,8 @@ static constexpr uint8_t LED_PWM_CHANNELS[] = {0, 1, 2};
 static constexpr bool BOARD_HAS_TOUCH = false;
 static constexpr bool BOARD_HAS_IMU   = false;
 static constexpr bool BOARD_HAS_SD    = true;
-static constexpr bool TFT_USES_SPI_BUS = true;
-static constexpr int  BOARD_TFT_ROTATION = 1;
+static constexpr bool TFT_USES_SPI_BUS = false;  // TFT_eSPI (USE_HSPI_PORT) owns the SPI3 bus; don't pre-init SPI2 on the same pins
+static constexpr int  BOARD_TFT_ROTATION = 3;
 static constexpr bool BOARD_TFT_INVERT = true;
 static constexpr int  PIN_LCD_POWER_ON = -1;
 
@@ -16637,7 +16637,7 @@ static void updateHypercubeActivity() {
 
 static void display_init() {
   if (TFT_USES_SPI_BUS) {
-    SPI.begin(PIN_TFT_SCLK, PIN_TFT_MISO, PIN_TFT_MOSI, PIN_TFT_CS);
+    SPI.begin(PIN_TFT_SCLK, PIN_TFT_MISO, PIN_TFT_MOSI, -1);
   }
   tft.init();
   tft.setRotation(BOARD_TFT_ROTATION);

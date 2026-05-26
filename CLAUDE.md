@@ -442,6 +442,18 @@ tft.width()=320 tft.height()=170
 [fs] LittleFS mounted.
 ```
 
+### Display bringup — root causes documented (2026-05-25)
+
+Three bugs caused the blank display on first bringup:
+
+| Bug | Root cause | Fix |
+|-----|-----------|-----|
+| Black screen (primary) | TFT_eSPI defaults to VSPI which does not exist on ESP32-S3; SPI peripheral never initialised | Add `#define USE_HSPI_PORT` to `User_Setup_tembed_cc1101.h` — selects SPI3/HSPI |
+| SPI bus conflict | `SPI.begin(11,10,9)` in `display_init()` claimed GPIO9/10/11 under SPI2 before TFT_eSPI could configure them under SPI3 | `TFT_USES_SPI_BUS = false` for T-Embed; TFT_eSPI manages the bus itself |
+| Inverted colours | `tft.invertDisplay(false)` after `tft.init()` undid the `TFT_INVERSION_ON` command sent during init | `BOARD_TFT_INVERT = true` — re-applies inversion consistently |
+
+Rotation `3` (not `1`) is correct for landscape with USB connector at the bottom — verified against Bruce firmware.
+
 ### Known issues / Phase 6 TODO
 
 - CC1101 RadioLib driver not yet wired into neon_rf — antenna switch LOW (radio disabled)
@@ -465,7 +477,7 @@ scripts\monitor_tembed_cc1101.cmd COM9
 | `firmware_cyd_2_8` | CYD 2.8" (ESP32) | ✅ Stable |
 | `firmware_cyd_3_5` | CYD 3.5" (ESP32) | ✅ Stable |
 | `firmware_t_display_s3` | LilyGO T-Display-S3 | ⚠️ Beta |
-| `firmware_t_embed_cc1101` | LilyGO T-Embed CC1101 | ✅ Compiles + flashes (Phase 5 hardware validation in progress) |
+| `firmware_t_embed_cc1101` | LilyGO T-Embed CC1101 | ✅ Display + encoder nav working (Beta) |
 | `firmware_m5tab5` | M5Stack Tab5 (ESP32-P4) | ✅ Display + touch working, WiFi working |
 | `firmware_cardputer_adv` | M5Stack Cardputer Adv (ESP32-S3) | 🚧 Alpha — compiles, untested on hardware |
 

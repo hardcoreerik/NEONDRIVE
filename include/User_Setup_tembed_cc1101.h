@@ -8,7 +8,8 @@
 
 #define ST7789_DRIVER
 
-#define TFT_RGB_ORDER TFT_BGR
+#define USE_HSPI_PORT     // T-Embed uses SPI3/HSPI — without this TFT_eSPI defaults to VSPI which doesn't exist on ESP32-S3
+
 #define TFT_INVERSION_ON
 
 #define TFT_WIDTH  170
@@ -21,7 +22,7 @@
 
 #define TFT_CS    41   // DISPLAY_CS
 #define TFT_DC    16
-#define TFT_RST   40   // DISPLAY_RST
+#define TFT_RST   40   // GPIO40 = display RST (wired on hardware; verified by Bruce firmware)
 
 #define TFT_BL    21   // DISPLAY_BL
 #define TFT_BACKLIGHT_ON HIGH

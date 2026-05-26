@@ -11,7 +11,7 @@ NEONDRIVE is a multi-target ESP32 firmware suite for authorized wireless assessm
 | CYD 3.5 (ESP32-3248S035 family) | `firmware_cyd_3_5` | Touch (XPT2046 + calibration path) | Stable |
 | LilyGO T-Display-S3 | `firmware_t_display_s3` | Button nav (short press left/right, long press select) | Beta |
 | LilyGO T-Display-S3 Touch | `firmware_t_display_s3_touch` | Touch + button nav | Beta |
-| LilyGO T-Embed CC1101 | `firmware_t_embed_cc1101` | Button/encoder-style nav (target profile) | Untested |
+| LilyGO T-Embed CC1101 | `firmware_t_embed_cc1101` | Encoder + side key nav | Beta |
 | M5Stack Tab5 (ESP32-P4 + C6) | `firmware_m5tab5` | Touch (GT911 via M5GFX) | Active |
 | M5Stack Cardputer Advanced | `firmware_cardputer_adv` | Physical keyboard-first UX | Alpha |
 
