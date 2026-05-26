@@ -6,6 +6,9 @@
 #include <WiFi.h>
 #include <driver/gpio.h>
 #endif
+#if defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
+#include "device_profile_select.h"
+#endif
 
 // Last RF action persisted in-memory across the current boot.
 // TODO: persist to LittleFS /rf_last_action.txt so the value survives a
@@ -45,7 +48,36 @@ static void tab5_configure_wifi_sdio_pins_once() {
 
 // ── Capability tables ──────────────────────────────────────────────────────
 
-#if defined(NEONDRIVE_TARGET_M5TAB5)
+#if defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
+// T-Embed CC1101 Plus — ESP32-S3 with on-chip WiFi.
+// CC1101 sub-GHz radio and nRF24L01 expansion are on the shared SPI bus;
+// their drivers are Phase 6 (RadioLib). This block logs their presence.
+//
+// Antenna switch pins (verified from pinmap):
+//   SW1=GPIO47, SW0=GPIO48  — select frequency band before CC1101 TX/RX:
+//     SW1=H, SW0=L → 315 MHz
+//     SW1=L, SW0=H → 868/915 MHz
+//     SW1=H, SW0=H → 434 MHz
+static constexpr int TEMBED_ANT_SW1  = 47;
+static constexpr int TEMBED_ANT_SW0  = 48;
+static constexpr int TEMBED_CC1101_CS   = 12;
+static constexpr int TEMBED_CC1101_GDO0 =  3;
+static constexpr int TEMBED_CC1101_GDO2 = 38;
+
+static const NeonRfCaps s_caps = {
+    /* supports_station_scan    */ true,
+    /* supports_channel_control */ true,
+    /* supports_promiscuous_rx  */ true,
+    /* supports_raw_frame_tx    */ true,
+    /* supports_ble             */ false,
+    /* requires_remote_coprocessor  */ false,
+    /* requires_custom_c6_firmware  */ false,
+    /* backend_name             */ "tembed-s3",
+};
+
+bool neon_rf_is_local_radio() { return true; }
+
+#elif defined(NEONDRIVE_TARGET_M5TAB5)
 
 // ESP32-P4 + ESP32-C6 co-processor over SDIO.
 // WiFi scan is enabled via compile-time SDIO pin override (tab5_sdkconfig_override.h).
@@ -62,7 +94,7 @@ static const NeonRfCaps s_caps = {
 
 bool neon_rf_is_local_radio() { return false; }
 
-#else  // CYD / classic ESP32 local-radio targets
+#else  // CYD / T-Display-S3 / Cardputer — classic ESP32/S3 local-radio targets
 
 static const NeonRfCaps s_caps = {
     /* supports_station_scan    */ true,
@@ -156,7 +188,25 @@ void neon_rf_init() {
     }
     Serial.println("[c6test] auto-test complete");
 #endif
-#endif  // NEONDRIVE_TARGET_M5TAB5
+#elif defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
+    // Configure antenna switch to neutral / off before CC1101 driver takes over.
+    // Default: both LOW — radio disabled until band is explicitly selected.
+    pinMode(TEMBED_ANT_SW1, OUTPUT); digitalWrite(TEMBED_ANT_SW1, LOW);
+    pinMode(TEMBED_ANT_SW0, OUTPUT); digitalWrite(TEMBED_ANT_SW0, LOW);
+
+    Serial.println("[neon_rf] T-Embed CC1101 Plus radio map:");
+    Serial.printf("[neon_rf]   CC1101: CS=%d GDO0=%d GDO2=%d  "
+                  "ANT_SW1=%d ANT_SW0=%d\n",
+                  TEMBED_CC1101_CS, TEMBED_CC1101_GDO0, TEMBED_CC1101_GDO2,
+                  TEMBED_ANT_SW1, TEMBED_ANT_SW0);
+#if ND_HW_NRF24
+    Serial.println("[neon_rf]   nRF24L01: CE=43 CS=44 IRQ=-1 (expansion module)");
+#endif
+#if ND_HW_IR_TX
+    Serial.println("[neon_rf]   IR: TX_EN=2 RX=1");
+#endif
+    Serial.println("[neon_rf]   CC1101 RadioLib driver: Phase 6 (not yet active)");
+#endif  // NEONDRIVE_TARGET_M5TAB5 / T_EMBED_CC1101
 }
 
 const NeonRfCaps* neon_rf_get_caps() { return &s_caps; }

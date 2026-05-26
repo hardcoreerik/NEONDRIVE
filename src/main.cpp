@@ -4923,31 +4923,33 @@ static bool keyboardNavHandleArrowOrEnter(neon_key_t k) {
 }
 
 static bool tdisplayHandleButtonInput(int& outX, int& outY) {
-  static bool wasNextDown = false;
+  static bool wasNextDown   = false;
   static bool wasSelectDown = false;
-  static int lastEncA = HIGH;
-
-  const bool nextDown = (PIN_NAV_NEXT >= 0) && (digitalRead(PIN_NAV_NEXT) == LOW);
-  const bool selectDown = (PIN_NAV_SELECT >= 0) && (digitalRead(PIN_NAV_SELECT) == LOW);
 
   tdisplayNavBuild();
 
+  bool nextDown   = false;
+  bool selectDown = false;
   bool rotateNext = false;
   bool rotatePrev = false;
+
 #if defined(NEONDRIVE_TARGET_TEMBED)
-  if (PIN_ENCODER_A >= 0 && PIN_ENCODER_B >= 0) {
-    const int a = digitalRead(PIN_ENCODER_A);
-    const int b = digitalRead(PIN_ENCODER_B);
-    if (a != lastEncA) {
-      // Quadrature decode on A edge: CW => next, CCW => previous.
-      if (b != a) {
-        rotateNext = true;
-      } else {
-        rotatePrev = true;
-      }
-      lastEncA = a;
+  // T-Embed: all input comes through the HAL (RotaryEncoder library + debounced buttons).
+  // neon_hal_key_get() returns one edge event per call; no raw GPIO reads needed here.
+  {
+    neon_key_t k = neon_hal_key_get();
+    switch (k.key) {
+      case NeonKey::DOWN:  rotateNext  = true; break;
+      case NeonKey::UP:    rotatePrev  = true; break;
+      case NeonKey::ENTER: selectDown  = true; break;
+      case NeonKey::BACK:  nextDown    = true; break;
+      default: break;
     }
   }
+#else
+  // Other BUTTON_NAV targets (T-Display-S3): direct GPIO level reads.
+  nextDown   = (PIN_NAV_NEXT   >= 0) && (digitalRead(PIN_NAV_NEXT)   == LOW);
+  selectDown = (PIN_NAV_SELECT >= 0) && (digitalRead(PIN_NAV_SELECT) == LOW);
 #endif
 
   if (rotatePrev) {
