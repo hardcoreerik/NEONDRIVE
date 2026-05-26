@@ -15,7 +15,14 @@
 #define ND_HW_ENCODER 1
 #define ND_HW_KEYBOARD 0
 #define ND_HW_CC1101 1
-#define ND_HW_SD 0
+#define ND_HW_SD 1
+
+#define ND_HW_NRF24         1
+#define ND_HW_IR_TX         1
+#define ND_HW_IR_RX         1
+#define ND_HW_WS2812        1
+#define ND_HW_ROTARY_BUTTON 1
+#define ND_HW_BATTERY_ADC   0
 
 #define ND_FLASH_MB 16
 #define ND_EXPECT_PSRAM 1

@@ -11,7 +11,8 @@
  *          TODO: route neon_hal_touch_get() through XPT2046 once the
  *          existing touch path in main.cpp is migrated to the HAL.
  */
-#if !defined(NEONDRIVE_TARGET_M5TAB5) && !defined(NEONDRIVE_TARGET_M5CARDPUTER) && !defined(NEONDRIVE_TARGET_TDISPLAY_S3)
+#if !defined(NEONDRIVE_TARGET_M5TAB5) && !defined(NEONDRIVE_TARGET_M5CARDPUTER) \
+ && !defined(NEONDRIVE_TARGET_TDISPLAY_S3) && !defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
 
 #include "neon_hal.h"
 #include <WiFi.h>
@@ -130,4 +131,4 @@ neon_key_t neon_hal_key_get(void)
     return { NeonKey::NONE, 0 };
 }
 
-#endif // !NEONDRIVE_TARGET_M5TAB5 && !NEONDRIVE_TARGET_M5CARDPUTER && !NEONDRIVE_TARGET_TDISPLAY_S3
+#endif // !M5TAB5 && !M5CARDPUTER && !TDISPLAY_S3 && !T_EMBED_CC1101

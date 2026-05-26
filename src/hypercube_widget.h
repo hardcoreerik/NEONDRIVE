@@ -81,3 +81,17 @@ namespace HypercubeWidget {
   inline Activity getActivity() { return Activity::IDLE; }
 } // namespace HypercubeWidget (stubs)
 #endif // NEONDRIVE_TARGET_M5CARDPUTER
+
+#if defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
+// HypercubeWidget not rendered on 320x170 — hypercube_widget.cpp excluded.
+// T-Embed uses TFT_eSPI so begin() takes TFT_eSPI& (not M5GFX&).
+namespace HypercubeWidget {
+  inline void begin(TFT_eSPI&) {}
+  inline void tick() {}
+  inline void notifyScreenDrawn() {}
+  inline void setEnabled(bool) {}
+  inline bool isEnabled() { return false; }
+  inline void setActivity(Activity) {}
+  inline Activity getActivity() { return Activity::IDLE; }
+} // namespace HypercubeWidget (T-Embed stubs)
+#endif // NEONDRIVE_TARGET_T_EMBED_CC1101

@@ -3,7 +3,8 @@
 // to allow transmission of management frames (deauth, disassoc, etc.)
 #pragma once
 
-#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER)
+#if defined(NEONDRIVE_TARGET_M5TAB5) || defined(NEONDRIVE_TARGET_M5CARDPUTER) \
+ || defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
 // These targets do not use the classic ESP32 libnet80211 frame injection path.
 // Provide no-op stubs so call sites in main.cpp compile without change.
 #include <esp_err.h>
@@ -44,4 +45,4 @@ void randomizeMAC();
 
 }  // namespace WSLBypasser
 
-#endif // NEONDRIVE_TARGET_M5TAB5 || NEONDRIVE_TARGET_M5CARDPUTER
+#endif // M5TAB5 || M5CARDPUTER || T_EMBED_CC1101

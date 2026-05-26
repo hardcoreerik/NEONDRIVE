@@ -205,7 +205,8 @@ static constexpr uint8_t BL_PWM_CHANNELS[] = {4};
 static constexpr int LED_PINS[] = {-1, -1, -1};
 static constexpr uint8_t LED_PWM_CHANNELS[] = {0, 1, 2};
 
-#elif defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH) || defined(ARDUINO_LILYGO_T_DISPLAY_S3)
+#elif (defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH) || defined(ARDUINO_LILYGO_T_DISPLAY_S3)) \
+   && !defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
 static constexpr bool BOARD_HAS_TOUCH = true;
 static constexpr bool BOARD_HAS_IMU   = false;
 static constexpr bool BOARD_HAS_SD = true;
@@ -246,41 +247,68 @@ static constexpr uint8_t BL_PWM_CHANNELS[] = {4};
 static constexpr int LED_PINS[] = {-1, -1, -1};
 static constexpr uint8_t LED_PWM_CHANNELS[] = {0, 1, 2};
 #elif defined(NEONDRIVE_TARGET_TEMBED)
+// LilyGO T-Embed CC1101 Plus — ESP32-S3, 16MB flash, 8MB PSRAM
+// Pins verified from official repo: examples/factory_test/utilities.h
+// All SPI devices (display, CC1101, SD, nRF24) share GPIO 9/10/11 bus.
 static constexpr bool BOARD_HAS_TOUCH = false;
 static constexpr bool BOARD_HAS_IMU   = false;
-static constexpr bool BOARD_HAS_SD = false;
-static constexpr bool TFT_USES_SPI_BUS = true;
-static constexpr int BOARD_TFT_ROTATION = 1;
+static constexpr bool BOARD_HAS_SD    = true;
+static constexpr bool TFT_USES_SPI_BUS = false;  // TFT_eSPI (USE_HSPI_PORT) owns the SPI3 bus; don't pre-init SPI2 on the same pins
+static constexpr int  BOARD_TFT_ROTATION = 3;
 static constexpr bool BOARD_TFT_INVERT = true;
-static constexpr int PIN_LCD_POWER_ON = -1;
+static constexpr int  PIN_LCD_POWER_ON = -1;
 
-static constexpr int PIN_TFT_SCLK = 40;
-static constexpr int PIN_TFT_MISO = -1;
-static constexpr int PIN_TFT_MOSI = 42;
-static constexpr int PIN_TFT_CS   = 45;
+// Shared SPI bus (BOARD_SPI_MOSI/MISO/SCK)
+static constexpr int PIN_TFT_SCLK = 11;   // BOARD_SPI_SCK
+static constexpr int PIN_TFT_MISO = 10;   // BOARD_SPI_MISO
+static constexpr int PIN_TFT_MOSI = 9;    // BOARD_SPI_MOSI
+static constexpr int PIN_TFT_CS   = 41;   // DISPLAY_CS
 
-static constexpr int PIN_TOUCH_CS = -1;
-static constexpr int PIN_TOUCH_SDA = -1;
-static constexpr int PIN_TOUCH_SCL = -1;
-static constexpr int PIN_TOUCH_INT = -1;
-static constexpr int PIN_TOUCH_RST = -1;
-static constexpr uint8_t TOUCH_ADDR_CST_SELF = 0x00;
+static constexpr int PIN_TOUCH_CS      = -1;
+static constexpr int PIN_TOUCH_SDA     = -1;
+static constexpr int PIN_TOUCH_SCL     = -1;
+static constexpr int PIN_TOUCH_INT     = -1;
+static constexpr int PIN_TOUCH_RST     = -1;
+static constexpr uint8_t TOUCH_ADDR_CST_SELF   = 0x00;
 static constexpr uint8_t TOUCH_ADDR_CST_MUTUAL = 0x00;
-static constexpr int PIN_SD_SCLK  = -1;
-static constexpr int PIN_SD_MISO  = -1;
-static constexpr int PIN_SD_MOSI  = -1;
-static constexpr int PIN_SD_CS    = -1;
-static constexpr int PIN_NAV_NEXT = 6;    // BOARD_USER_KEY
-static constexpr int PIN_NAV_SELECT = 0;  // ENCODER_KEY
-static constexpr int PIN_ENCODER_A = 1;
-static constexpr int PIN_ENCODER_B = 2;
-static constexpr int PIN_SW1 = -1;
+
+// SD card on shared SPI bus
+static constexpr int PIN_SD_SCLK = 11;    // BOARD_SPI_SCK
+static constexpr int PIN_SD_MISO = 10;    // BOARD_SPI_MISO
+static constexpr int PIN_SD_MOSI = 9;     // BOARD_SPI_MOSI
+static constexpr int PIN_SD_CS   = 13;    // BOARD_SD_CS
+
+// Navigation / encoder
+static constexpr int PIN_NAV_NEXT   = 6;  // BOARD_USER_KEY (side button)
+static constexpr int PIN_NAV_SELECT = 0;  // ENCODER_KEY (also BOOT button)
+static constexpr int PIN_ENCODER_A  = 4;  // ENCODER_INA
+static constexpr int PIN_ENCODER_B  = 5;  // ENCODER_INB
+static constexpr int PIN_SW1        = -1;
+
+// CC1101 on shared SPI bus
+static constexpr int PIN_CC1101_CS   = 12;  // BOARD_LORA_CS
+static constexpr int PIN_CC1101_GDO0 = 3;   // BOARD_LORA_IO0 (GDO0 / IRQ)
+static constexpr int PIN_CC1101_GDO2 = 38;  // BOARD_LORA_IO2
+static constexpr int PIN_ANT_SW1     = 47;  // BOARD_LORA_SW1 (antenna band select)
+static constexpr int PIN_ANT_SW0     = 48;  // BOARD_LORA_SW0
+
+// nRF24L01 expansion module on shared SPI bus (Plus variant)
+static constexpr int PIN_NRF24_CE  = 43;  // BOARD_NRF24_CE
+static constexpr int PIN_NRF24_CS  = 44;  // BOARD_NRF24_CS
+static constexpr int PIN_NRF24_IRQ = -1;  // not connected
+
+// Power enable — must be set HIGH before using CC1101 or WS2812
+static constexpr int PIN_PWR_EN = 15;     // BOARD_PWR_EN
+
+// IR transceiver
+static constexpr int PIN_IR_RX = 1;       // BOARD_IR_RX
+static constexpr int PIN_IR_EN = 2;       // BOARD_IR_EN (TX enable)
 
 static constexpr int BL_PINS[] = {21};
 static constexpr uint8_t BL_PWM_CHANNELS[] = {4};
 
-// No discrete RGB status LED on T-Embed.
-static constexpr int LED_PINS[] = {-1, -1, -1};
+// WS2812B ring — 8 LEDs on GPIO 14
+static constexpr int LED_PINS[] = {14, -1, -1};
 static constexpr uint8_t LED_PWM_CHANNELS[] = {0, 1, 2};
 #else
 static constexpr bool BOARD_HAS_TOUCH = true;
@@ -4896,31 +4924,48 @@ static bool keyboardNavHandleArrowOrEnter(neon_key_t k) {
 }
 
 static bool tdisplayHandleButtonInput(int& outX, int& outY) {
-  static bool wasNextDown = false;
+  static bool wasNextDown   = false;
   static bool wasSelectDown = false;
-  static int lastEncA = HIGH;
-
-  const bool nextDown = (PIN_NAV_NEXT >= 0) && (digitalRead(PIN_NAV_NEXT) == LOW);
-  const bool selectDown = (PIN_NAV_SELECT >= 0) && (digitalRead(PIN_NAV_SELECT) == LOW);
 
   tdisplayNavBuild();
 
+  bool nextDown   = false;
+  bool selectDown = false;
   bool rotateNext = false;
   bool rotatePrev = false;
+
 #if defined(NEONDRIVE_TARGET_TEMBED)
-  if (PIN_ENCODER_A >= 0 && PIN_ENCODER_B >= 0) {
-    const int a = digitalRead(PIN_ENCODER_A);
-    const int b = digitalRead(PIN_ENCODER_B);
-    if (a != lastEncA) {
-      // Quadrature decode on A edge: CW => next, CCW => previous.
-      if (b != a) {
-        rotateNext = true;
-      } else {
-        rotatePrev = true;
+  // T-Embed: all input comes through the HAL (RotaryEncoder library + debounced buttons).
+  // neon_hal_key_get() returns one edge event per call; no raw GPIO reads needed here.
+  {
+    neon_key_t k = neon_hal_key_get();
+    switch (k.key) {
+      case NeonKey::DOWN:  rotateNext  = true; break;
+      case NeonKey::UP:    rotatePrev  = true; break;
+      case NeonKey::ENTER: selectDown  = true; break;
+      case NeonKey::BACK: {
+        // Side key: activate "Back" or "Cancel" button if one exists;
+        // otherwise fall back to cycling to the next nav item.
+        bool foundBack = false;
+        for (uint8_t i = 0; i < tdisplayNavCount; i++) {
+          const char* lbl = tdisplayNavItems[i].label;
+          if (lbl && (strcasecmp(lbl, "Back") == 0 || strcasecmp(lbl, "Cancel") == 0)) {
+            tdisplayNavIndex = i;
+            selectDown = true;
+            foundBack = true;
+            break;
+          }
+        }
+        if (!foundBack) nextDown = true;
+        break;
       }
-      lastEncA = a;
+      default: break;
     }
   }
+#else
+  // Other BUTTON_NAV targets (T-Display-S3): direct GPIO level reads.
+  nextDown   = (PIN_NAV_NEXT   >= 0) && (digitalRead(PIN_NAV_NEXT)   == LOW);
+  selectDown = (PIN_NAV_SELECT >= 0) && (digitalRead(PIN_NAV_SELECT) == LOW);
 #endif
 
   if (rotatePrev) {
@@ -16823,7 +16868,7 @@ static void updateHypercubeActivity() {
 
 static void display_init() {
   if (TFT_USES_SPI_BUS) {
-    SPI.begin(PIN_TFT_SCLK, PIN_TFT_MISO, PIN_TFT_MOSI, PIN_TFT_CS);
+    SPI.begin(PIN_TFT_SCLK, PIN_TFT_MISO, PIN_TFT_MOSI, -1);
   }
   tft.init();
   tft.setRotation(BOARD_TFT_ROTATION);
@@ -17174,11 +17219,32 @@ static void initCyd35TouchCalibrationFromSdOrWizard() {
 
 void setup() {
   Serial.begin(115200);
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && (ARDUINO_USB_CDC_ON_BOOT == 1)
+  // Native USB CDC: wait up to 1500 ms for a terminal to open the port.
+  // Without this, boot log is output before the host CDC driver is ready
+  // and every message is silently dropped.  On standalone operation (no PC)
+  // this just adds 1500 ms to boot time.
+  { uint32_t t = millis(); while (!Serial && millis() - t < 1500) delay(10); }
+#endif
   delay(100);
   initUiMetrics();
   Serial.println();
   Serial.printf("=== %s | Milestone D ===\n", ND_PROFILE_NAME);
   printDeviceProfileBanner();
+#if defined(NEONDRIVE_TARGET_TEMBED)
+  // Power enable — GPIO15 must be HIGH before CC1101 or WS2812 will respond.
+  // Set this before neon_rf_init() / display_init() / SPI.begin().
+  pinMode(PIN_PWR_EN, OUTPUT);
+  digitalWrite(PIN_PWR_EN, HIGH);
+  delay(50);
+  // Deassert all SPI CS lines so no peripheral is selected during init.
+  pinMode(PIN_TFT_CS,    OUTPUT); digitalWrite(PIN_TFT_CS,    HIGH);
+  pinMode(PIN_CC1101_CS, OUTPUT); digitalWrite(PIN_CC1101_CS, HIGH);
+  pinMode(PIN_SD_CS,     OUTPUT); digitalWrite(PIN_SD_CS,     HIGH);
+  pinMode(PIN_NRF24_CS,  OUTPUT); digitalWrite(PIN_NRF24_CS,  HIGH);
+  Serial.println("[tembed] PWR_EN=HIGH, all SPI CS deasserted");
+#endif
+
 #if !defined(NEONDRIVE_TARGET_M5TAB5)
   // On Tab5, neon_rf_init() is deferred to after M5.begin() because
   // PI4IOE2 (I²C addr 0x44) powers the C6 WiFi module; it is initialised
