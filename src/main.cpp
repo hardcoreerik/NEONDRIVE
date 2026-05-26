@@ -69,6 +69,9 @@ using fs::File;
 #include <esp_timer.h>
 #include <esp_heap_caps.h>
 #include <esp_task_wdt.h>
+#if defined(NEONDRIVE_TARGET_T_EMBED_CC1101)
+#include <esp_sleep.h>
+#endif
 
 #include <ctype.h>
 #include <math.h>
@@ -4895,10 +4898,34 @@ static bool keyboardNavHandleArrowOrEnter(neon_key_t k) {
 #endif
 }
 
+#if defined(NEONDRIVE_TARGET_TEMBED)
+static void tembedEnterDeepSleep() {
+  tft.fillScreen(TFT_BLACK);
+  // Fade out backlight over ~300 ms
+  for (int v = (int)backlightLevel; v >= 0; v -= 8) {
+    ledcWrite(BL_PWM_CHANNELS[0], (uint8_t)max(0, v));
+    delay(10);
+  }
+  ledcWrite(BL_PWM_CHANNELS[0], 0);
+  // Wake on side button (GPIO6) or encoder press (GPIO0), both active-LOW
+  esp_sleep_enable_ext1_wakeup(
+    (1ULL << PIN_NAV_NEXT) | (1ULL << PIN_NAV_SELECT),
+    ESP_EXT1_WAKEUP_ANY_LOW
+  );
+  esp_deep_sleep_start();
+  // no return
+}
+#endif
+
 static bool tdisplayHandleButtonInput(int& outX, int& outY) {
   static bool wasNextDown = false;
   static bool wasSelectDown = false;
   static int lastEncA = HIGH;
+#if defined(NEONDRIVE_TARGET_TEMBED)
+  static uint32_t s_nextPressMs = 0;
+  static bool     s_nextHolding = false;
+  static uint8_t  s_savedBl = 255;
+#endif
 
   const bool nextDown = (PIN_NAV_NEXT >= 0) && (digitalRead(PIN_NAV_NEXT) == LOW);
   const bool selectDown = (PIN_NAV_SELECT >= 0) && (digitalRead(PIN_NAV_SELECT) == LOW);
@@ -4931,7 +4958,44 @@ static bool tdisplayHandleButtonInput(int& outX, int& outY) {
     return false;
   }
 
-  if (rotateNext || (nextDown && !wasNextDown)) {
+  if (rotateNext) {
+    if (tdisplayNavCount > 0) {
+      tdisplayNavIndex = (uint8_t)((tdisplayNavIndex + 1) % tdisplayNavCount);
+      tdisplayNavRefreshRequested = true;
+    }
+    return false;
+  }
+
+#if defined(NEONDRIVE_TARGET_TEMBED)
+  // Side button: short press = nav advance (fires on release); 5-second hold = deep sleep.
+  // Last second of the hold dims backlight as a countdown cue.
+  if (nextDown && !wasNextDown && !s_nextHolding) {
+    wasNextDown = true;
+    s_nextPressMs = millis();
+    s_nextHolding = true;
+    s_savedBl = backlightLevel;
+  }
+  if (s_nextHolding && nextDown) {
+    uint32_t held = millis() - s_nextPressMs;
+    if (held >= 5000) {
+      s_nextHolding = false;
+      tembedEnterDeepSleep(); // no return
+    }
+    if (held > 4000) {
+      uint8_t pct = (uint8_t)min(100u, (held - 4000) / 10);
+      ledcWrite(BL_PWM_CHANNELS[0], (uint8_t)((100u - pct) * s_savedBl / 100u));
+    }
+  }
+  if (s_nextHolding && !nextDown) {
+    s_nextHolding = false;
+    ledcWrite(BL_PWM_CHANNELS[0], s_savedBl); // restore brightness
+    if (tdisplayNavCount > 0) {
+      tdisplayNavIndex = (uint8_t)((tdisplayNavIndex + 1) % tdisplayNavCount);
+      tdisplayNavRefreshRequested = true;
+    }
+  }
+#else
+  if (nextDown && !wasNextDown) {
     wasNextDown = true;
     if (tdisplayNavCount > 0) {
       tdisplayNavIndex = (uint8_t)((tdisplayNavIndex + 1) % tdisplayNavCount);
@@ -4939,6 +5003,7 @@ static bool tdisplayHandleButtonInput(int& outX, int& outY) {
     }
     return false;
   }
+#endif
 
   if (selectDown && !wasSelectDown) {
     wasSelectDown = true;
