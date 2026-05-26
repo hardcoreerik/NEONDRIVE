@@ -80,6 +80,7 @@ using fs::File;
 #include "deauth_hunter.h"
 #include "packetlab_wifi.h"
 #include "dropbox_client.h"
+#include "analyzer_sync.h"
 #include "gps_service.h"
 #include "hypercube_widget.h"
 #include "wpasec_client.h"
@@ -8863,6 +8864,7 @@ static String neonPageStart(const String& title,
   html += neonNavLink("/wpasec", "WPA-SEC", activeNav);
   html += neonNavLink("/yoink/log", "YOINK Log", activeNav);
   html += neonNavLink("/keys/config", "API Keys", activeNav);
+  html += neonNavLink("/analyzer", "Analyzer Sync", activeNav);
   html += "</nav></header><main class='nd-main'>";
   return html;
 }
@@ -10352,6 +10354,235 @@ function saveKeys() {
     String out;
     serializeJson(doc, out);
     webServer.send(200, "application/json", out);
+  });
+
+  // ── Wardrive Analyzer Sync ───────────────────────────────────────────────
+
+  // GET /analyzer — technician-facing sync page
+  webServer.on("/analyzer", HTTP_GET, [](){
+    Serial.println("[web] GET /analyzer");
+    bool sdOk = sdReady || mountSdCard(false);
+    bool dbxOk = !cfg.dropbox_token.isEmpty();
+
+    const char* dbxStatus = dbxOk
+      ? "<span class='nd-status nd-ok'>CONFIGURED</span>"
+      : "<span class='nd-status nd-bad'>NOT CONFIGURED</span>";
+    const char* sdStatus = sdOk
+      ? "<span class='nd-status nd-ok'>READY</span>"
+      : "<span class='nd-status nd-bad'>NOT READY</span>";
+
+    String lastSync   = String(AnalyzerSync::g_state.sync_status);
+    String sessionId  = String(AnalyzerSync::g_state.session_id);
+    String moduleName = String(AnalyzerSync::g_state.module_name);
+    bool   hasSession = sessionId.length() > 0;
+
+    String syncBadge;
+    if      (lastSync == "synced")  syncBadge = "<span class='nd-status nd-ok'>SYNCED</span>";
+    else if (lastSync == "staged")  syncBadge = "<span class='nd-status nd-warn'>STAGED — NOT YET UPLOADED</span>";
+    else if (lastSync == "syncing") syncBadge = "<span class='nd-status nd-warn'>SYNCING\xe2\x80\xa6</span>";
+    else if (lastSync == "failed")  syncBadge = "<span class='nd-status nd-bad'>FAILED</span>";
+    else                            syncBadge = "<span class='nd-status'>NONE</span>";
+
+    String verdictBadge;
+    if (hasSession) {
+      String manifest = AnalyzerSync::sessionManifestJson(SD, sessionId.c_str());
+      if      (manifest.indexOf("\"FAIL\"")          >= 0) verdictBadge = "<span class='nd-status nd-bad'>FAIL \xe2\x80\x94 Evidence captured</span>";
+      else if (manifest.indexOf("\"WARNING\"")        >= 0) verdictBadge = "<span class='nd-status nd-warn'>WARNING \xe2\x80\x94 Partial evidence</span>";
+      else if (manifest.indexOf("\"PASS\"")           >= 0) verdictBadge = "<span class='nd-status nd-ok'>PASS \xe2\x80\x94 No evidence captured</span>";
+      else                                                   verdictBadge = "<span class='nd-status'>INCONCLUSIVE</span>";
+    }
+
+    String html = neonPageStart("Wardrive Analyzer Sync",
+      "Stage and sync wireless validation evidence to Wardrive Analyzer via Dropbox.",
+      "/analyzer");
+
+    html += "<section class='nd-panel'><h2>About</h2>"
+            "<p>NEONDRIVE packages capture evidence into a versioned session bundle and "
+            "uploads it to Dropbox. Wardrive Analyzer imports the bundle on the PC for "
+            "scoring, reporting, and remediation guidance.</p></section>";
+
+    // Status cards
+    html += "<section class='nd-panel'><h2>System Status</h2><table class='nd-table'>";
+    html += "<tr><td>SD Card</td><td>"; html += sdStatus; html += "</td></tr>";
+    html += "<tr><td>Dropbox</td><td>"; html += dbxStatus; html += "</td></tr>";
+    if (dbxOk) {
+      html += "<tr><td>Dropbox Folder</td><td><code>";
+      html += escapeHtml(cfg.dropbox_folder); html += "</code></td></tr>";
+    }
+    html += "<tr><td>Device ID</td><td><code>";
+    html += escapeHtml(AnalyzerSync::deviceId().c_str()); html += "</code></td></tr>";
+    html += "</table></section>";
+
+    // Last session
+    html += "<section class='nd-panel'><h2>Last Session Bundle</h2>";
+    if (hasSession) {
+      html += "<table class='nd-table'>";
+      html += "<tr><td>Session ID</td><td><code>"; html += escapeHtml(sessionId.c_str()); html += "</code></td></tr>";
+      html += "<tr><td>Module</td><td>"; html += escapeHtml(moduleName.c_str()); html += "</td></tr>";
+      html += "<tr><td>Quick Result</td><td>"; html += verdictBadge; html += "</td></tr>";
+      html += "<tr><td>Sync Status</td><td>"; html += syncBadge; html += "</td></tr>";
+      if (AnalyzerSync::g_state.files_total > 0) {
+        html += "<tr><td>Files Uploaded</td><td>";
+        html += AnalyzerSync::g_state.files_uploaded; html += " / ";
+        html += AnalyzerSync::g_state.files_total; html += "</td></tr>";
+      }
+      if (AnalyzerSync::g_state.last_error[0]) {
+        html += "<tr><td>Last Error</td><td><span class='nd-status nd-bad'>";
+        html += escapeHtml(AnalyzerSync::g_state.last_error); html += "</span></td></tr>";
+      }
+      html += "</table>";
+    } else {
+      html += "<p>No session staged yet. Run a capture module then click <b>Stage Evidence Bundle</b>.</p>";
+    }
+    html += "</section>";
+
+    // Current capture context
+    if (hasTarget) {
+      html += "<section class='nd-panel'><h2>Current Capture Context</h2><table class='nd-table'>";
+      html += "<tr><td>Target SSID</td><td>"; html += escapeHtml(target.ssid.c_str()); html += "</td></tr>";
+      html += "<tr><td>BSSID</td><td><code>"; html += escapeHtml(target.bssid.c_str()); html += "</code></td></tr>";
+      html += "<tr><td>Channel</td><td>"; html += target.channel; html += "</td></tr>";
+      html += "<tr><td>Security</td><td>"; html += authToStr(target.auth); html += "</td></tr>";
+      if (autoMode != AutoMode::NONE) {
+        html += "<tr><td>Active Module</td><td>"; html += autoModeStr(autoMode); html += "</td></tr>";
+      }
+      if (captureDir[0]) {
+        html += "<tr><td>Capture Dir</td><td><code>"; html += escapeHtml(captureDir); html += "</code></td></tr>";
+      }
+      html += "</table></section>";
+    }
+
+    // Actions
+    html += "<section class='nd-panel'><h2>Actions</h2><div class='nd-actions'>";
+    if (sdOk) {
+      html += "<button class='nd-btn' type='button' onclick='stageSession()'>Stage Evidence Bundle</button>";
+      if (hasSession && dbxOk)
+        html += "<button class='nd-btn' type='button' onclick='syncSession()'>Sync to Dropbox</button>";
+      if (hasSession) {
+        html += "<a class='nd-btn-ghost' href='/api/analyzer/manifest?session=";
+        html += urlEncodeSimple(sessionId); html += "' target='_blank'>View Manifest</a>";
+        html += "<a class='nd-btn-ghost' href='/sd?path=";
+        html += urlEncodeSimple(String(AnalyzerSync::g_state.local_root));
+        html += "'>Browse Session Folder</a>";
+      }
+    } else {
+      html += "<p>SD card required for session staging.</p>";
+    }
+    if (!dbxOk)
+      html += "<p><a class='nd-btn-ghost' href='/keys/config'>Configure Dropbox Token</a></p>";
+    html += "</div></section>";
+
+    html += R"JS(<script>
+function apiAction(url, btn, doneLabel) {
+  btn.disabled = true; btn.textContent = 'Working\xe2\x80\xa6';
+  fetch(url, { method: 'POST' })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      btn.textContent = d.ok ? doneLabel : ('Error: ' + (d.error || 'unknown'));
+      btn.disabled = false;
+      setTimeout(function(){ location.reload(); }, 2000);
+    })
+    .catch(function(e){
+      btn.textContent = 'Error: ' + e.message; btn.disabled = false;
+    });
+}
+function stageSession() { apiAction('/api/analyzer/stage', event.target, 'Staged!'); }
+function syncSession()  { apiAction('/api/analyzer/sync',  event.target, 'Synced!'); }
+</script>)JS";
+
+    html += neonPageEnd();
+    webServer.send(200, "text/html", html);
+  });
+
+  // GET /api/analyzer/status
+  webServer.on("/api/analyzer/status", HTTP_GET, [](){
+    bool dbxOk = !cfg.dropbox_token.isEmpty();
+    webServer.send(200, "application/json",
+      AnalyzerSync::statusJson(dbxOk, cfg.dropbox_folder));
+  });
+
+  // POST /api/analyzer/stage
+  webServer.on("/api/analyzer/stage", HTTP_POST, [](){
+    bool sdOk = sdReady || mountSdCard(false);
+    if (!sdOk) {
+      webServer.send(503, "application/json",
+        "{\"ok\":false,\"error\":\"SD not available\"}");
+      return;
+    }
+    AnalyzerSync::StageParams p;
+    p.capture_dir     = captureDir[0] ? captureDir : "";
+    p.module          = autoModeStr(autoMode);
+    p.ssid            = hasTarget ? target.ssid.c_str()  : "";
+    p.bssid           = hasTarget ? target.bssid.c_str() : "";
+    p.channel         = hasTarget ? target.channel       : 0;
+    p.security        = hasTarget ? authToStr(target.auth) : "";
+    p.pmkid_count     = (int)specterPmkidCount;
+    p.handshake_count = (int)capturedHandshakes;
+    p.has_target      = hasTarget;
+    p.dropbox_folder  = cfg.dropbox_folder;
+
+    bool ok = AnalyzerSync::stageSession(SD, p);
+    String out = "{\"ok\":"; out += ok ? "true" : "false";
+    out += ",\"session_id\":\""; out += AnalyzerSync::g_state.session_id; out += "\"";
+    out += ",\"local_root\":\""; out += AnalyzerSync::g_state.local_root; out += "\"";
+    if (!ok) { out += ",\"error\":\""; out += AnalyzerSync::g_state.last_error; out += "\""; }
+    out += "}";
+    webServer.send(ok ? 200 : 500, "application/json", out);
+  });
+
+  // POST /api/analyzer/sync
+  webServer.on("/api/analyzer/sync", HTTP_POST, [](){
+    if (cfg.dropbox_token.isEmpty()) {
+      webServer.send(400, "application/json",
+        "{\"ok\":false,\"error\":\"Dropbox token not configured\"}");
+      return;
+    }
+    bool sdOk = sdReady || mountSdCard(false);
+    if (!sdOk) {
+      webServer.send(503, "application/json",
+        "{\"ok\":false,\"error\":\"SD not available\"}");
+      return;
+    }
+    if (AnalyzerSync::g_state.session_id[0] == '\0') {
+      webServer.send(400, "application/json",
+        "{\"ok\":false,\"error\":\"No staged session. POST /api/analyzer/stage first.\"}");
+      return;
+    }
+    bool ok = AnalyzerSync::uploadSession(SD, cfg.dropbox_token.c_str(), cfg.dropbox_folder);
+    String out = "{\"ok\":"; out += ok ? "true" : "false";
+    out += ",\"session_id\":\""; out += AnalyzerSync::g_state.session_id; out += "\"";
+    out += ",\"files_uploaded\":"; out += AnalyzerSync::g_state.files_uploaded;
+    out += ",\"files_total\":"; out += AnalyzerSync::g_state.files_total;
+    if (!ok) { out += ",\"error\":\""; out += AnalyzerSync::g_state.last_error; out += "\""; }
+    out += "}";
+    webServer.send(ok ? 200 : 500, "application/json", out);
+  });
+
+  // GET /api/analyzer/sessions
+  webServer.on("/api/analyzer/sessions", HTTP_GET, [](){
+    bool sdOk = sdReady || mountSdCard(false);
+    if (!sdOk) {
+      webServer.send(503, "application/json",
+        "{\"ok\":false,\"error\":\"SD not available\",\"sessions\":[]}");
+      return;
+    }
+    String sessions = AnalyzerSync::sessionsJson(SD);
+    webServer.send(200, "application/json",
+      "{\"ok\":true,\"sessions\":" + sessions + "}");
+  });
+
+  // GET /api/analyzer/manifest?session=<id>
+  webServer.on("/api/analyzer/manifest", HTTP_GET, [](){
+    String session = webServer.arg("session");
+    if (session.isEmpty()) session = String(AnalyzerSync::g_state.session_id);
+    bool sdOk = sdReady || mountSdCard(false);
+    if (!sdOk) {
+      webServer.send(503, "application/json",
+        "{\"ok\":false,\"error\":\"SD not available\"}");
+      return;
+    }
+    webServer.send(200, "application/json",
+      AnalyzerSync::sessionManifestJson(SD, session.c_str()));
   });
 
   webServer.begin();
