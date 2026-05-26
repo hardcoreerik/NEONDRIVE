@@ -71,3 +71,21 @@
 #ifndef ND_FEATURE_SUBGHZ_TOOLKIT
 #define ND_FEATURE_SUBGHZ_TOOLKIT 0
 #endif
+#ifndef ND_HW_NRF24
+#define ND_HW_NRF24 0
+#endif
+#ifndef ND_HW_IR_TX
+#define ND_HW_IR_TX 0
+#endif
+#ifndef ND_HW_IR_RX
+#define ND_HW_IR_RX 0
+#endif
+#ifndef ND_HW_WS2812
+#define ND_HW_WS2812 0
+#endif
+#ifndef ND_HW_ROTARY_BUTTON
+#define ND_HW_ROTARY_BUTTON 0
+#endif
+#ifndef ND_HW_BATTERY_ADC
+#define ND_HW_BATTERY_ADC 0
+#endif
