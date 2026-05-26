@@ -4942,7 +4942,22 @@ static bool tdisplayHandleButtonInput(int& outX, int& outY) {
       case NeonKey::DOWN:  rotateNext  = true; break;
       case NeonKey::UP:    rotatePrev  = true; break;
       case NeonKey::ENTER: selectDown  = true; break;
-      case NeonKey::BACK:  nextDown    = true; break;
+      case NeonKey::BACK: {
+        // Side key: activate "Back" or "Cancel" button if one exists;
+        // otherwise fall back to cycling to the next nav item.
+        bool foundBack = false;
+        for (uint8_t i = 0; i < tdisplayNavCount; i++) {
+          const char* lbl = tdisplayNavItems[i].label;
+          if (lbl && (strcasecmp(lbl, "Back") == 0 || strcasecmp(lbl, "Cancel") == 0)) {
+            tdisplayNavIndex = i;
+            selectDown = true;
+            foundBack = true;
+            break;
+          }
+        }
+        if (!foundBack) nextDown = true;
+        break;
+      }
       default: break;
     }
   }
