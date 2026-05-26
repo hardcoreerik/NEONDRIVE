@@ -390,6 +390,73 @@ Cardputer Adv auto-resets via DTR — no hold-RESET procedure required.
 
 ---
 
+## LilyGO T-Embed CC1101 Plus Hardware Bringup (2026-05-25)
+
+### Hardware profile
+
+| Item | Value |
+|------|-------|
+| MCU | ESP32-S3 (16 MB flash, 8 MB PSRAM) |
+| Display | 170×320 ST7789 (landscape via rotation=1 → 320×170) |
+| Input | Rotary encoder (GPIO4/5) + encoder button (GPIO0/BOOT) + side key (GPIO6) |
+| WiFi | On-chip ESP32-S3 (standard WiFi.h) |
+| Sub-GHz | CC1101 (SPI CS=12, GDO0=3, GDO2=38) |
+| Antenna switch | SW1=GPIO47, SW0=GPIO48 |
+| nRF24L01 | CE=43, CS=44 (expansion module) |
+| IR TX | Enable=GPIO2, RX=GPIO1 |
+| WS2812B | 8 LEDs on GPIO14 |
+| SD card | SPI3: SCK=11, MISO=10, MOSI=9, CS=13 |
+| Power enable | GPIO15 (must be HIGH before CC1101 or WS2812) |
+
+**All pins verified from LILYGO official repo: `examples/factory_test/utilities.h`.**
+There is NO `pin_config.h` in the official LILYGO T-Embed CC1101 repo.
+
+### Shared SPI bus
+
+Display, CC1101, SD card, and nRF24 all share the same MOSI/MISO/SCK bus (GPIO 9/10/11).
+Each device has its own CS pin. Firmware deasserts all CS lines in `setup()` before calling
+`SPI.begin()` to prevent bus contention during init.
+
+### Encoder navigation model
+
+- `mathertel/RotaryEncoder` with `LatchMode::TWO03` — one event per physical detent
+- `NeonKey::UP/DOWN` → rotate encoder counter-clockwise/clockwise
+- `NeonKey::ENTER` → press encoder button (GPIO0, active-low)
+- `NeonKey::BACK` → press side key (GPIO6, active-low)
+- Full implementation in `src/hal/hal_t_embed_cc1101.cpp`
+
+### Boot verification checklist
+
+Expected serial output at 115200 baud:
+
+```
+[tembed] PWR_EN=HIGH, all SPI CS deasserted
+[neon_rf] backend=tembed-s3  reset=POWERON
+[neon_rf] caps: scan=1  ch_ctrl=1  promisc=1  raw_tx=1  coprocessor=0
+[neon_rf] T-Embed CC1101 Plus radio map:
+[neon_rf]   CC1101: CS=12 GDO0=3 GDO2=38  ANT_SW1=47 ANT_SW0=48
+[neon_rf]   nRF24L01: CE=43 CS=44 IRQ=-1 (expansion module)
+[neon_rf]   CC1101 RadioLib driver: Phase 6 (not yet active)
+tft.width()=320 tft.height()=170
+[input] encoder + button navigation enabled (no touch)
+[fs] LittleFS mounted.
+```
+
+### Known issues / Phase 6 TODO
+
+- CC1101 RadioLib driver not yet wired into neon_rf — antenna switch LOW (radio disabled)
+- nRF24L01 not yet initialised
+- HypercubeWidget not rendered (stub only) — top-right corner is blank
+
+### Flash / monitor commands
+
+```cmd
+scripts\flash_tembed_cc1101.cmd COM9
+scripts\monitor_tembed_cc1101.cmd COM9
+```
+
+---
+
 ## PlatformIO Environments
 
 | Environment | Board | Status |
@@ -398,7 +465,7 @@ Cardputer Adv auto-resets via DTR — no hold-RESET procedure required.
 | `firmware_cyd_2_8` | CYD 2.8" (ESP32) | ✅ Stable |
 | `firmware_cyd_3_5` | CYD 3.5" (ESP32) | ✅ Stable |
 | `firmware_t_display_s3` | LilyGO T-Display-S3 | ⚠️ Beta |
-| `firmware_t_embed_cc1101` | LilyGO T-Embed CC1101 | 🚧 Untested |
+| `firmware_t_embed_cc1101` | LilyGO T-Embed CC1101 | ✅ Compiles + flashes (Phase 5 hardware validation in progress) |
 | `firmware_m5tab5` | M5Stack Tab5 (ESP32-P4) | ✅ Display + touch working, WiFi working |
 | `firmware_cardputer_adv` | M5Stack Cardputer Adv (ESP32-S3) | 🚧 Alpha — compiles, untested on hardware |
 
@@ -428,5 +495,6 @@ install the official PyPI version (underscore args) and break Tab5 builds. Resto
 | `a9:1b:58` | CYD 3.5" — use `firmware_cyd_3_5` |
 | `b4:95:8c` | CYD 2.4" — use `firmware_cyd_2_4` |
 | `e2:e6:95` | M5Stack Tab5 — use `firmware_m5tab5` |
+| `90:70:69:0c:b9:e0` | LilyGO T-Embed CC1101 Plus — use `firmware_t_embed_cc1101`, COM9 |
 
 Always confirm the board before flashing.  Ask if not specified.
