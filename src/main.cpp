@@ -4973,30 +4973,45 @@ static bool tdisplayHandleButtonInput(int& outX, int& outY) {
 
 #if defined(NEONDRIVE_TARGET_TEMBED)
   // Side button: short press = nav advance (fires on release); 5-second hold = deep sleep.
-  // Last second of the hold dims backlight as a countdown cue.
-  if (nextDown && !wasNextDown && !s_nextHolding) {
-    wasNextDown = true;
-    s_nextPressMs = millis();
-    s_nextHolding = true;
-    s_savedBl = backlightLevel;
-  }
-  if (s_nextHolding && nextDown) {
-    uint32_t held = millis() - s_nextPressMs;
-    if (held >= 5000) {
+  // Boot guard: don't arm the sleep timer until 3 s after boot to avoid spurious
+  // triggers from GPIO transients during reset or the esptool auto-reset sequence.
+  const bool sleepArmed = (millis() > 3000);
+  if (!sleepArmed) {
+    // During the boot guard window treat the button as ordinary nav (leading-edge fire).
+    if (nextDown && !wasNextDown) {
+      wasNextDown = true;
+      if (tdisplayNavCount > 0) {
+        tdisplayNavIndex = (uint8_t)((tdisplayNavIndex + 1) % tdisplayNavCount);
+        tdisplayNavRefreshRequested = true;
+      }
+    }
+  } else {
+    // Last second of the hold dims backlight as a visual countdown cue.
+    if (nextDown && !wasNextDown && !s_nextHolding) {
+      wasNextDown = true;
+      s_nextPressMs = millis();
+      s_nextHolding = true;
+      s_savedBl = backlightLevel;
+    }
+    if (s_nextHolding && nextDown) {
+      uint32_t held = millis() - s_nextPressMs;
+      if (held >= 5000) {
+        s_nextHolding = false;
+        Serial.println("[tembed] 5-second hold — entering deep sleep");
+        tembedEnterDeepSleep(); // no return
+      }
+      if (held > 4000) {
+        uint8_t pct = (uint8_t)min(100u, (held - 4000) / 10);
+        ledcWrite(BL_PWM_CHANNELS[0], (uint8_t)((100u - pct) * s_savedBl / 100u));
+      }
+    }
+    if (s_nextHolding && !nextDown) {
       s_nextHolding = false;
-      tembedEnterDeepSleep(); // no return
-    }
-    if (held > 4000) {
-      uint8_t pct = (uint8_t)min(100u, (held - 4000) / 10);
-      ledcWrite(BL_PWM_CHANNELS[0], (uint8_t)((100u - pct) * s_savedBl / 100u));
-    }
-  }
-  if (s_nextHolding && !nextDown) {
-    s_nextHolding = false;
-    ledcWrite(BL_PWM_CHANNELS[0], s_savedBl); // restore brightness
-    if (tdisplayNavCount > 0) {
-      tdisplayNavIndex = (uint8_t)((tdisplayNavIndex + 1) % tdisplayNavCount);
-      tdisplayNavRefreshRequested = true;
+      ledcWrite(BL_PWM_CHANNELS[0], s_savedBl); // restore brightness
+      if (tdisplayNavCount > 0) {
+        tdisplayNavIndex = (uint8_t)((tdisplayNavIndex + 1) % tdisplayNavCount);
+        tdisplayNavRefreshRequested = true;
+      }
     }
   }
 #else
