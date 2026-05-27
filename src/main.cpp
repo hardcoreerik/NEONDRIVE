@@ -4737,8 +4737,13 @@ static void tdisplayNavBuild() {
       tdisplayNavPush(btnBack);
       tdisplayNavPush(btnStartupAutoReconnect);
       tdisplayNavPush(btnStartupDefaultLockToggle);
+      tdisplayNavPush(btnStartupHypercube);
+      tdisplayNavPush(btnStartupWebserver);
 #if defined(NEONDRIVE_TARGET_M5TAB5)
       tdisplayNavPush(btnStartupAutoRotate);
+#endif
+#if defined(NEONDRIVE_TARGET_CYD)
+      tdisplayNavPush(btnStartupManualRotation);
 #endif
       break;
     case ScreenId::TELEMETRY_CONFIG:
