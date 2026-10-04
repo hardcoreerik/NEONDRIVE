@@ -145,9 +145,12 @@ static String jsonEsc(const char* s) {
 // Derive a quick PASS/WARNING/FAIL verdict from session evidence.
 // G5: crackable handshakes (hashcat-viable pairs) weigh as credential
 // evidence; bare EAPOL frame counts without a crackable pair are partial.
+// G1: evil-portal credential submissions (counted, never stored) are
+// credential evidence by definition.
 static const char* quickVerdict(const StageParams& p) {
     if (!p.has_target) return "INCONCLUSIVE";
-    bool credentialEvidence = (p.pmkid_count > 0 || p.crackable_handshakes > 0);
+    bool credentialEvidence = (p.pmkid_count > 0 || p.crackable_handshakes > 0
+                               || p.cred_submit_count > 0);
     bool partialEvidence    = (p.handshake_count > 0 && p.handshake_count < 4)
                               || (p.crackable_handshakes == 0 && p.handshake_count > 0);
     if (credentialEvidence) return "FAIL";

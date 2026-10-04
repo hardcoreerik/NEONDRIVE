@@ -107,6 +107,7 @@ using fs::File;
 #include "packetlab_wifi.h"
 #include "dropbox_client.h"
 #include "analyzer_sync.h"
+#include "evil_portal.h"
 #include "gps_service.h"
 #include "hypercube_widget.h"
 #include "wpasec_client.h"
@@ -2500,6 +2501,9 @@ static constexpr int WIFI_CONNECT_VISIBLE_ROWS = 4;
 static bool webServerRunning = false;   // Is the HTTP OTA server running?
 static uint16_t webServerPort = 8080;   // WebServer port
 static WebServer webServer(webServerPort);  // WebServer for OTA updates
+// G1 — while the evil portal owns the WiFi stack, the management UI is
+// suspended so portal clients can never reach it (it shares the AP iface).
+static bool portalUiSuspended = false;
 static const char* androidApkPath = "/CYDCompanion.apk";
 static const char* wpasecResultsPath = "/wpasec_results.txt";
 static const char* wpasecUploadedPath = "/wpasec_uploaded.txt";
@@ -9444,6 +9448,7 @@ static String neonPageStart(const String& title,
   html += neonNavLink("/yoink/log", "YOINK Log", activeNav);
   html += neonNavLink("/keys/config", "API Keys", activeNav);
   html += neonNavLink("/analyzer", "Analyzer Sync", activeNav);
+  html += neonNavLink("/portal", "Evil Portal", activeNav);
   html += "</nav></header><main class='nd-main'>";
   return html;
 }
@@ -9473,6 +9478,22 @@ static String neonPageEnd() {
   toast(d.body.getAttribute('data-toast'), d.body.getAttribute('data-toast-type'));
 })();
 </script></body></html>)HTML";
+}
+
+// G1 — start the evil portal while suspending the management web UI
+// (the portal owns the WiFi stack). Restores the UI if start fails.
+static bool portalStartSuspendUi(EvilPortal::Config& cfg) {
+  if (evil_portal_obj.running()) return false;
+  if (webServerRunning) stopWebServer();
+  portalUiSuspended = true;
+  bool sdOk = sdReady || mountSdCard(false);
+  bool ok = evil_portal_obj.start(cfg, sdOk ? &SD : nullptr);
+  if (!ok) {
+    portalUiSuspended = false;
+    webServer.begin();
+    webServerRunning = true;
+  }
+  return ok;
 }
 
 static void startWebServer() {
@@ -11515,6 +11536,128 @@ function syncSession()  { apiAction('/api/analyzer/sync',  event.target, 'Synced
     }
     webServer.send(200, "application/json",
       AnalyzerSync::sessionManifestJson(SD, session.c_str()));
+  });
+
+  // G1 — Evil Portal (captive portal assessment with evidence integration).
+  // GET /portal — status page + start/stop controls.
+  webServer.on("/portal", HTTP_GET, [](){
+    String html = neonPageStart("Evil Portal",
+      "Captive-portal assessment. Credential values are never recorded — only "
+      "timestamped submission counts enter the evidence bundle.",
+      "/portal");
+
+    bool running = evil_portal_obj.running();
+    String badge = running
+      ? "<span class='nd-status nd-bad'>RUNNING</span>"
+      : "<span class='nd-status'>IDLE</span>";
+    html += "<section class='nd-panel'><h2>Status</h2>";
+    html += "<p>" + badge + "</p>";
+    if (running) {
+      html += "<p>SSID: <b>";
+      html += String(evil_portal_obj.ssid());
+      html += "</b></p><p>Clients seen: ";
+      html += String(evil_portal_obj.clientsSeen());
+      html += "<br>Credential submits: ";
+      html += String(evil_portal_obj.credentialSubmits());
+      html += " (values not recorded)</p>";
+      html += "<button class='nd-btn' onclick=\"apiAction('/api/portal/stop', event.target, 'Stopped!')\">Stop Portal</button>";
+      html += "<p><i>Stopping auto-stages the evidence bundle.</i></p>";
+    } else {
+      String defSsid = hasTarget ? String(target.ssid) : String("LAB-PORTAL");
+      html += "<form id='portalForm'><p>SSID<br><input name='ssid' value='";
+      html += defSsid;
+      html += "' maxlength='32'></p>";
+      html += "<p>Channel (1-14)<br><input name='channel' value='";
+      html += hasTarget ? String(target.channel) : String("6");
+      html += "' size='4'></p>";
+      html += "<p>Duration seconds (0 = until stopped)<br><input name='duration_s' value='300' size='6'></p>";
+      html += "<p><label><input type='checkbox' name='kicker' value='1'> Deauth kicker (nudge target clients to the portal)</label></p>";
+      html += "<button type='button' class='nd-btn' onclick='startPortal()'>Start Portal</button></form>";
+      html += "<p><i>Starting suspends this management UI; the portal serves "
+              "port 80 on its own AP. Control returns here when it stops.</i></p>";
+    }
+    html += "</div></section>";
+
+    html += R"JS(<script>
+function apiAction(url, btn, doneLabel) {
+  btn.disabled = true; btn.textContent = 'Working...';
+  fetch(url, { method: 'POST' })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      btn.textContent = d.ok ? doneLabel : ('Error: ' + (d.error || 'unknown'));
+      btn.disabled = false;
+      setTimeout(function(){ location.reload(); }, 2000);
+    })
+    .catch(function(e){ btn.textContent = 'Error: ' + e.message; btn.disabled = false; });
+}
+function startPortal() {
+  var f = document.getElementById('portalForm');
+  var fd = new FormData(f);
+  fetch('/api/portal/start', { method: 'POST', body: new URLSearchParams(fd) })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      document.body.innerHTML = '<p style="padding:40px;font-family:sans-serif">' +
+        (d.ok ? 'Portal started. This UI is now suspended.' : 'Error: ' + (d.error || 'unknown')) + '</p>';
+    });
+}
+</script>)JS";
+    html += neonPageEnd();
+    webServer.send(200, "text/html", html);
+  });
+
+  // GET /api/portal/status
+  webServer.on("/api/portal/status", HTTP_GET, [](){
+    String out = "{\"ok\":true,\"running\":";
+    out += evil_portal_obj.running() ? "true" : "false";
+    out += ",\"ssid\":\""; out += evil_portal_obj.ssid(); out += "\"";
+    out += ",\"clients_seen\":"; out += evil_portal_obj.clientsSeen();
+    out += ",\"credential_submits\":"; out += evil_portal_obj.credentialSubmits();
+    const char* e = evil_portal_obj.lastError();
+    if (e && e[0]) { out += ",\"last_error\":\""; out += e; out += "\""; }
+    out += "}";
+    webServer.send(200, "application/json", out);
+  });
+
+  // POST /api/portal/start — ssid, channel, duration_s, kicker=1
+  webServer.on("/api/portal/start", HTTP_POST, [](){
+    if (evil_portal_obj.running()) {
+      webServer.send(409, "application/json",
+        "{\"ok\":false,\"error\":\"portal already running\"}");
+      return;
+    }
+    EvilPortal::Config cfg{};
+    String ssid = webServer.arg("ssid");
+    if (ssid.isEmpty()) ssid = hasTarget ? String(target.ssid) : String("LAB-PORTAL");
+    strncpy(cfg.ssid, ssid.c_str(), sizeof(cfg.ssid) - 1);
+    int ch = webServer.arg("channel").toInt();
+    cfg.channel = (uint8_t)(ch >= 1 && ch <= 14 ? ch : (hasTarget ? target.channel : 6));
+    int dur = webServer.arg("duration_s").toInt();
+    cfg.durationSec = (uint16_t)(dur > 0 ? dur : 0);
+    cfg.deauthKicker = webServer.arg("kicker") == "1";
+    if (cfg.deauthKicker && hasTarget) {
+      uint8_t kb[6] = {0};
+      if (macFromString(target.bssid.c_str(), kb)) memcpy(cfg.targetBssid, kb, 6);
+      else cfg.deauthKicker = false;  // no valid BSSID → no kicker
+      cfg.targetChannel = (uint8_t)target.channel;
+    }
+    // The portal owns the WiFi stack: suspend the management UI first.
+    bool ok = portalStartSuspendUi(cfg);
+    if (!ok) {
+      String err = evil_portal_obj.lastError();
+      if (!err.length()) err = "portal already running or start failed";
+      webServer.send(500, "application/json",
+        String("{\"ok\":false,\"error\":\"") + err + "\"}");
+      return;
+    }
+    String out = "{\"ok\":true,\"running\":true,\"ssid\":\"";
+    out += cfg.ssid; out += "\"}";
+    webServer.send(200, "application/json", out);
+  });
+
+  // POST /api/portal/stop
+  webServer.on("/api/portal/stop", HTTP_POST, [](){
+    evil_portal_obj.stop();
+    webServer.send(200, "application/json", "{\"ok\":true,\"running\":false}");
   });
 
   // G4 — Karma attack API (probe-response spoofing).
@@ -18615,6 +18758,17 @@ void loop() {
   // Handle WebServer requests
   if (webServerRunning) {
     webServer.handleClient();
+  }
+
+  // G1 — Evil portal owns the WiFi stack while running (its own DNS + HTTP
+  // on port 80). Pump it here; when it stops (manual or duration timeout),
+  // bring the management UI back.
+  evil_portal_obj.tick();
+  if (portalUiSuspended && !evil_portal_obj.running()) {
+    portalUiSuspended = false;
+    webServer.begin();
+    webServerRunning = true;
+    Serial.println("[portal] management UI restored");
   }
 
 #if defined(NEONDRIVE_TARGET_BUTTON_NAV)

@@ -19,35 +19,18 @@ responsibility for how it is used.
 
 ---
 
-## Reporting a Vulnerability
+## New Modules — Authorised-Use Notes (2026-10)
 
-If you discover a security vulnerability in this project (e.g. a flaw that could
-allow credential leakage, unintended remote access, or unsafe default config), please
-**do not open a public GitHub Issue**.
+### Evil Portal (credential hygiene)
 
-Instead:
+The portal is a **credential assessment aid**, not a credential harvester:
 
-1. Email the maintainer at the address listed in [.github/FUNDING.yml](.github/FUNDING.yml),
-   or open a [GitHub Security Advisory](../../security/advisories/new) on this repo.
-2. Include a description of the issue, steps to reproduce, and impact assessment.
-3. Allow up to 14 days for an initial response before any public disclosure.
+- Submitted credential values are **never written to SD or serial logs**.
+- Only timestamped *submission events* (client MAC, time) and running
+  submission **counts** enter the session bundle, and the counts feed the
+  quick-verdict. No replayable secret leaves the device.
+- Run only against SSIDs you own or are authorised to test. The captive-portal
+  page must carry the lab-authorisation notice template.
+- The portal SSID defaults to `LAB-PORTAL` and channel selection prefers the
+  currently locked target — lab-scoped defaults, no public-nuisance presets.
 
-We aim to acknowledge all valid reports and publish a fix or mitigation within 30 days.
-
----
-
-## Scope
-
-| In scope | Out of scope |
-|---|---|
-| Firmware credential handling (config.json, API keys at rest) | Vulnerabilities in third-party libraries (report upstream) |
-| Unintended network exposure via AP mode or web UI | Social engineering |
-| Config parsing / injection flaws | Physical hardware attacks |
-| Companion app (CYDCompanion) data handling | Expected offensive behaviour (that is the feature) |
-
----
-
-## Supported Versions
-
-Security fixes will be applied to the latest release only.
-Older release binaries in `Device-Bins/` or GitHub Releases are not backported.

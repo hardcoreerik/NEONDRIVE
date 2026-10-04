@@ -40,7 +40,7 @@ bool bssidEquals(const String& a, const String& b);
 
 #include <WiFi.h>
 #include <ESP32Ping.h>
-#include "EvilPortal.h"
+#include "evil_portal.h"
 #include <math.h>
 #include "esp_wifi.h"
 #include "esp_wifi_types.h"
@@ -212,7 +212,7 @@ bool bssidEquals(const String& a, const String& b);
 #define WPS_CONFIG_VIRT_DISPLAY      0x4000
 #define WPS_CONFIG_PHY_DISPLAY       0x8000
 
-extern EvilPortal evil_portal_obj;
+// evil_portal_obj is declared in evil_portal.h (defined in evil_portal.cpp).
 
 #ifdef HAS_SCREEN
   extern Display display_obj;

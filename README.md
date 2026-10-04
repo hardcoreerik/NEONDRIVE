@@ -35,6 +35,10 @@ NEONDRIVE is organized around a set of functional modules that share common targ
   - Broadcast/probe-style pressure workflow integrated into Packet Lab.
 - **JAMM!T**
   - Deauth-heavy pressure mode in controlled authorized tests.
+- **Evil Portal**
+  - Captive-portal assessment module (AP + DNS + HTTP). Credential values are
+    never recorded — only timestamped submission counts enter the evidence
+    bundle, which auto-stages on portal stop and feeds the quick-verdict.
 - **Web + Data Ops**
   - On-device web endpoints, status/telemetry views, and optional sync integrations (for example WPA-SEC/Dropbox paths when configured).
 

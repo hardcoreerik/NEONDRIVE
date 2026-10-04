@@ -48,6 +48,8 @@ struct StageParams {
     int         pmkid_count;
     int         handshake_count;
     int         crackable_handshakes;  // G5: M1+M2/M2+M3 pairs or full M1..M4
+    int         cred_submit_count = 0; // G1: evil-portal credential submissions
+                                       // (count only — values are never recorded)
     bool        has_target;
     String      dropbox_folder; // cfg.dropbox_folder
 };
