@@ -381,6 +381,8 @@ static bool uploadSingleCapture(fs::FS& fs, const char* path, const char* apiKey
   // store; to harden, place the WPA-SEC API CA (PEM) on SD and use
   // client.setCACert() instead of setInsecure(). See SECURITY.md.
   client.setInsecure();
+  if (!client.connect(kHost, kPort, 15000)) {
+    cap.close();
     setLastError("TLS CONNECT FAILED");
     return false;
   }
@@ -480,6 +482,8 @@ static bool downloadPotfile(fs::FS& fs, const char* resultsPath, const char* api
   // the WPA-SEC API CA (PEM) on SD and use client.setCACert() instead of
   // setInsecure(). See SECURITY.md.
   client.setInsecure();
+  if (!client.connect(kHost, kPort, 15000)) {
+    setLastError("POTFILE TLS FAILED");
     return false;
   }
   client.setTimeout(30000);
