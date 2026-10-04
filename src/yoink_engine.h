@@ -61,6 +61,14 @@ struct YoinkEapolFrame {
     int8_t rssi;
 };
 
+// G5 — handshake evidence grades (feeds the session quick-verdict).
+enum class HandshakeQuality : uint8_t {
+    NONE      = 0,  // slot empty
+    PARTIAL   = 1,  // single EAPOL message only — not crackable
+    CRACKABLE = 2,  // M1+M2 or M2+M3 pair — hashcat-viable
+    COMPLETE  = 3,  // full M1..M4 exchange
+};
+
 struct YoinkHandshake {
     uint8_t bssid[6];
     uint8_t station[6];
@@ -86,7 +94,16 @@ struct YoinkHandshake {
         if (hasM2() && hasM3()) return 0x02;  // M2+M3
         return 0xFF;
     }
+    // G5 — evidence grading: how crackable is this handshake?
+    HandshakeQuality getQuality() const {
+        if (capturedMask == 0x0F) return HandshakeQuality::COMPLETE;
+        if (hasValidPair())       return HandshakeQuality::CRACKABLE;
+        if (capturedMask != 0)    return HandshakeQuality::PARTIAL;
+        return HandshakeQuality::NONE;
+    }
 };
+
+// Handshake/PMKID list (for UI display)
 
 struct YoinkPmkid {
     uint8_t bssid[6];
@@ -181,6 +198,10 @@ namespace YoinkEngine {
     uint8_t  getClientCount();
     uint8_t  getHandshakeCount();
     uint8_t  getPmkidCount();
+    // G5 — evidence grading counts across handshake slots.
+    uint8_t  getCrackableHandshakeCount();  // CRACKABLE or COMPLETE
+    uint8_t  getCompleteHandshakeCount();   // COMPLETE (full M1..M4)
+    const char* handshakeQualityStr(HandshakeQuality q);
     uint8_t  getCurrentChannel();
     uint8_t  getTotalHandshakeSlots();  // total slots used (including saved)
 

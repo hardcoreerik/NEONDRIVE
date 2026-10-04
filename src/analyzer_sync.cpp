@@ -143,10 +143,13 @@ static String jsonEsc(const char* s) {
 }
 
 // Derive a quick PASS/WARNING/FAIL verdict from session evidence.
+// G5: crackable handshakes (hashcat-viable pairs) weigh as credential
+// evidence; bare EAPOL frame counts without a crackable pair are partial.
 static const char* quickVerdict(const StageParams& p) {
     if (!p.has_target) return "INCONCLUSIVE";
-    bool credentialEvidence = (p.pmkid_count > 0 || p.handshake_count >= 4);
-    bool partialEvidence    = (p.handshake_count > 0 && p.handshake_count < 4);
+    bool credentialEvidence = (p.pmkid_count > 0 || p.crackable_handshakes > 0);
+    bool partialEvidence    = (p.handshake_count > 0 && p.handshake_count < 4)
+                              || (p.crackable_handshakes == 0 && p.handshake_count > 0);
     if (credentialEvidence) return "FAIL";
     if (partialEvidence)    return "WARNING";
     return "PASS";
@@ -284,6 +287,11 @@ bool stageSession(fs::FS& sd, const StageParams& p) {
         findings += p.handshake_count;
         findings += "},";
     }
+    if (p.crackable_handshakes > 0) {
+        findings += "{\"finding\":\"Crackable handshakes (M1+M2/M2+M3 or full M1-M4)\",\"count\":";
+        findings += p.crackable_handshakes;
+        findings += "},";
+    }
     if (hasPcap)  findings += "{\"finding\":\"PCAP recorded\"},";
     if (hasHc)    findings += "{\"finding\":\"Hashcat export present\"},";
     if (hasStats) findings += "{\"finding\":\"Packet statistics logged\"},";
@@ -350,6 +358,7 @@ bool stageSession(fs::FS& sd, const StageParams& p) {
     summary += "\"evidence\":{";
       summary += "\"pmkid_count\":"; summary += p.pmkid_count; summary += ",";
       summary += "\"handshake_frames\":"; summary += p.handshake_count; summary += ",";
+      summary += "\"crackable_handshakes\":"; summary += p.crackable_handshakes; summary += ",";
       summary += "\"has_pcap\":"; summary += hasPcap ? "true" : "false"; summary += ",";
       summary += "\"has_hash_export\":"; summary += hasHc ? "true" : "false";
     summary += "},";

@@ -47,6 +47,7 @@ struct StageParams {
     const char* security;      // auth mode string
     int         pmkid_count;
     int         handshake_count;
+    int         crackable_handshakes;  // G5: M1+M2/M2+M3 pairs or full M1..M4
     bool        has_target;
     String      dropbox_folder; // cfg.dropbox_folder
 };

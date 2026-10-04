@@ -1221,6 +1221,30 @@ uint8_t  getHandshakeCount() {
     return count;
 }
 uint8_t  getPmkidCount() { return s_pmkidCount; }
+// G5 — evidence grading counts across handshake slots.
+uint8_t  getCrackableHandshakeCount() {
+    uint8_t count = 0;
+    for (uint8_t i = 0; i < s_handshakeCount; i++) {
+        HandshakeQuality q = s_handshakes[i].getQuality();
+        if (q == HandshakeQuality::CRACKABLE || q == HandshakeQuality::COMPLETE) count++;
+    }
+    return count;
+}
+uint8_t  getCompleteHandshakeCount() {
+    uint8_t count = 0;
+    for (uint8_t i = 0; i < s_handshakeCount; i++) {
+        if (s_handshakes[i].getQuality() == HandshakeQuality::COMPLETE) count++;
+    }
+    return count;
+}
+const char* handshakeQualityStr(HandshakeQuality q) {
+    switch (q) {
+        case HandshakeQuality::COMPLETE:  return "COMPLETE";
+        case HandshakeQuality::CRACKABLE: return "CRACKABLE";
+        case HandshakeQuality::PARTIAL:   return "PARTIAL";
+        default:                          return "NONE";
+    }
+}
 uint8_t  getCurrentChannel() { return s_currentCh; }
 
 const char* getTargetSSID() { return s_targetSSID; }

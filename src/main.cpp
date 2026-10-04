@@ -2649,6 +2649,8 @@ static void fillStatusJson(JsonDocument& doc) {
     JsonObject yoink = doc["yoink"].to<JsonObject>();
     yoink["state"] = YoinkEngine::getStateStr();
     yoink["hs"] = YoinkEngine::getHandshakeCount();
+    yoink["hs_crackable"] = YoinkEngine::getCrackableHandshakeCount();
+    yoink["hs_complete"] = YoinkEngine::getCompleteHandshakeCount();
     yoink["pmkid"] = YoinkEngine::getPmkidCount();
     yoink["nets"] = YoinkEngine::getNetworkCount();
     yoink["deauths"] = YoinkEngine::getDeauthCount();
@@ -11361,6 +11363,7 @@ function syncSession()  { apiAction('/api/analyzer/sync',  event.target, 'Synced
     p.security        = hasTarget ? authToStr(target.auth) : "";
     p.pmkid_count     = (int)specterPmkidCount;
     p.handshake_count = (int)capturedHandshakes;
+    p.crackable_handshakes = (int)YoinkEngine::getCrackableHandshakeCount();
     p.has_target      = hasTarget;
     p.dropbox_folder  = cfg.dropbox_folder;
 
