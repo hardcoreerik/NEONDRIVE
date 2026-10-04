@@ -30,10 +30,13 @@ static bool msc_start_stop(uint8_t power_condition, bool start, bool load_eject)
 
 static int32_t msc_read(uint32_t lba, uint32_t offset, void *buffer, uint32_t bufsize) {
   if (!s_enabled) return 0;
-  if (!buffer || bufsize == 0) return 0;
+  // F14: TinyUSB interprets a negative return as an error; 0 can be mistaken
+  // for a short transfer and retried. Hard failures return -1.
+  if (!buffer) return -1;
+  if (bufsize == 0) return 0;
 
   sdmmc_card_t *card = SD_MMC._card;
-  if (!card) return 0;
+  if (!card) return -1;
 
   // TinyUSB may issue partial-sector reads; our sector-size is 512B.
   uint8_t tmp[512];
@@ -44,7 +47,7 @@ static int32_t msc_read(uint32_t lba, uint32_t offset, void *buffer, uint32_t bu
 
   while (remain > 0) {
     if (sdmmc_read_sectors(card, tmp, sector, 1) != ESP_OK) {
-      return 0;
+      return -1;
     }
     uint32_t chunk = min(remain, 512U - ofs);
     memcpy(dst, tmp + ofs, chunk);
@@ -60,10 +63,12 @@ static int32_t msc_read(uint32_t lba, uint32_t offset, void *buffer, uint32_t bu
 
 static int32_t msc_write(uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t bufsize) {
   if (!s_enabled) return 0;
-  if (!buffer || bufsize == 0) return 0;
+  // F14: see msc_read — hard failures return -1, not 0.
+  if (!buffer) return -1;
+  if (bufsize == 0) return 0;
 
   sdmmc_card_t *card = SD_MMC._card;
-  if (!card) return 0;
+  if (!card) return -1;
 
   uint8_t tmp[512];
   size_t sector = lba;
@@ -75,15 +80,15 @@ static int32_t msc_write(uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_
     uint32_t chunk = min(remain, 512U - ofs);
     if (ofs != 0 || chunk != 512U) {
       if (sdmmc_read_sectors(card, tmp, sector, 1) != ESP_OK) {
-        return 0;
+        return -1;
       }
       memcpy(tmp + ofs, src, chunk);
       if (sdmmc_write_sectors(card, tmp, sector, 1) != ESP_OK) {
-        return 0;
+        return -1;
       }
     } else {
       if (sdmmc_write_sectors(card, src, sector, 1) != ESP_OK) {
-        return 0;
+        return -1;
       }
     }
     src += chunk;
