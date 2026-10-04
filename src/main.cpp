@@ -1885,12 +1885,15 @@ static void handleCapturedPacket(uint8_t *buf, uint32_t len) {
         const uint8_t* clientMac = buf + 10;
         if ((clientMac[0] & 0x01) == 0) {  // skip multicast/broadcast
           bool found = false;
-          portENTER_CRITICAL_ISR(&jammitClientMux);
+          // NOTE (F1): handleCapturedPacket now runs in loop() context (deferred
+          // out of the RX callback), so use the task-context critical macros.
+          // The deauth TX path (jammitModeTick) already uses portENTER_CRITICAL.
+          portENTER_CRITICAL(&jammitClientMux);
           for (uint8_t i = 0; i < jammitClientCount && !found; i++)
             if (memcmp(jammitClientMacs[i], clientMac, 6) == 0) found = true;
           if (!found && jammitClientCount < JAMMIT_MAX_CLIENTS)
             memcpy(jammitClientMacs[jammitClientCount++], clientMac, 6);
-          portEXIT_CRITICAL_ISR(&jammitClientMux);
+          portEXIT_CRITICAL(&jammitClientMux);
         }
       }
     }
@@ -1948,6 +1951,55 @@ static void handleCapturedPacket(uint8_t *buf, uint32_t len) {
   }
 }
 
+// ── Deferred capture ring (F1 fix) ──────────────────────────────────────────
+// promiscuousPacketCallback runs in the WiFi RX task (IRAM_ATTR). SD file I/O,
+// FATFS calls, and Serial output must NOT run there: an SD open/write/close
+// per beacon stalls the RX task (dropped frames, watchdog risk) and races the
+// loop task's FATFS use. So the callback only copies the frame into a static
+// ring slot; loop() drains the ring via drainDeferredCaptures() and runs
+// handleCapturedPacket() in task context. This follows the deferred-event
+// pattern already used by YoinkEngine's PendingEapol/Beacon/Client rings.
+// No heap allocation anywhere in the enqueue path.
+#define ND_CAP_RING_SLOTS 8
+#define ND_CAP_MAX_LEN    1536  // beacons/EAPOL/data headers fit; longer frames truncate (parse walks stay bounded)
+struct DeferredCapture {
+  uint8_t frame[ND_CAP_MAX_LEN];
+  uint16_t len;
+  volatile bool pending;
+};
+static DeferredCapture s_capRing[ND_CAP_RING_SLOTS];
+static volatile uint8_t s_capRingHead = 0;
+static uint32_t s_capRingDropped = 0;
+
+// RX-task context only: copy frame, set pending last. IRAM-safe: memcpy only.
+static void IRAM_ATTR deferCapturePacket(const uint8_t* payload, uint32_t len) {
+  if (!hasTarget || !sniffActive || !payload || len < 24) return;
+  uint8_t slot = s_capRingHead;
+  DeferredCapture& ev = s_capRing[slot];
+  if (!ev.pending) {
+    uint16_t copyLen = len > ND_CAP_MAX_LEN ? ND_CAP_MAX_LEN : (uint16_t)len;
+    memcpy(ev.frame, payload, copyLen);
+    ev.len = copyLen;
+    ev.pending = true;
+    s_capRingHead = (uint8_t)((slot + 1) % ND_CAP_RING_SLOTS);
+  } else {
+    // Ring full (loop() not draining fast enough): drop, never block RX.
+    s_capRingDropped++;
+  }
+}
+
+// Loop/task context: run the full capture pipeline on each deferred frame.
+// This is where all SD writes (pcap appends, .hc22000) and Serial output run.
+static void drainDeferredCaptures() {
+  for (uint8_t i = 0; i < ND_CAP_RING_SLOTS; i++) {
+    if (s_capRing[i].pending) {
+      uint16_t len = s_capRing[i].len;
+      handleCapturedPacket(s_capRing[i].frame, len);
+      s_capRing[i].pending = false;
+    }
+  }
+}
+
 // Promiscuous packet callback
 static void IRAM_ATTR promiscuousPacketCallback(void *buf, wifi_promiscuous_pkt_type_t type) {
   if (!buf) {
@@ -2000,7 +2052,9 @@ static void IRAM_ATTR promiscuousPacketCallback(void *buf, wifi_promiscuous_pkt_
 
   // Feed Recon Deauth Hunter parser from the shared global callback.
   DeauthHunter::ingestPromiscuousPacket(ppkt, type);
-  handleCapturedPacket(payload, len);
+  // F1: defer the capture pipeline out of RX context — the callback only
+  // copies the frame; SD writes run in loop() via drainDeferredCaptures().
+  deferCapturePacket(payload, len);
 }
 
 // ---------- Target / Sniff State (Milestone D) ----------
@@ -18384,6 +18438,9 @@ void loop() {
 
   // Background stats update (keeps HUD alive even without touches)
   updateSniffStats();
+  // F1: drain deferred RX capture ring — SD writes from the WiFi RX callback
+  // are deferred here so they never run in RX-task context.
+  drainDeferredCaptures();
   rawCaptureTick();
   // perform periodic auto-mode activities
   jammitModeTick();
