@@ -6,6 +6,7 @@
 #include "yoink_save.h"
 #include "neon_rf.h"
 #include "wsl_bypasser.h"
+#include "usb_msc_tdisplay.h"
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <SD.h>
@@ -20,6 +21,29 @@ static uint8_t s_logCount = 0;
 // Session log file on SD
 static const char* YOINK_SESSION_LOG = "/yoink_session.log";
 static uint32_t    s_sessionStartMs = 0;
+
+// F8: RAM-staged SD session log. logCore() used to SD.open/append/close on
+// every log line (EAPOL events fire per frame) — slow, and it raced the WiFi
+// RX task's FATFS use. Lines now accumulate in s_sdLogBuf; flushSdLog()
+// appends them in one shot. Flushed periodically from update() and on stop().
+// F2: flush is skipped while a USB MSC host has the card (buffer retained,
+// retry on the next tick) so we never race host sector writes.
+static char     s_sdLogBuf[4096];
+static size_t   s_sdLogUsed = 0;
+static uint32_t s_sdLogLastFlushMs = 0;
+
+static void flushSdLog() {
+    if (s_sdLogUsed == 0) return;
+    if (nd_usb_msc_sd_app_locked()) return;  // keep buffered, retry later
+    File f = SD.open(YOINK_SESSION_LOG, FILE_APPEND);
+    if (f) {
+        f.write((uint8_t*)s_sdLogBuf, s_sdLogUsed);
+        f.close();
+        s_sdLogUsed = 0;
+        s_sdLogLastFlushMs = millis();
+    }
+    // On open failure: keep buffered, retry next flush (bounded by 4 KB).
+}
 
 // Registered callback (main.cpp uses this to push to consoleRing + companion)
 static YoinkEngine::LogCallback s_logCb = nullptr;
@@ -36,12 +60,23 @@ static void logCore(uint8_t severity, const char* msg) {
     s_logHead = (s_logHead + 1) % YOINK_LOG_RING_SIZE;
     if (s_logCount < YOINK_LOG_RING_SIZE) s_logCount++;
 
-    // 2. Append to SD session log (best-effort, don't block on failure)
-    File f = SD.open(YOINK_SESSION_LOG, FILE_APPEND);
-    if (f) {
+    // 2. Stage into RAM buffer; flushed to SD periodically by flushSdLog()
+    // (F8 — avoids SD open/append/close per log line).
+    {
         uint32_t elapsed = millis() - s_sessionStartMs;
-        f.printf("[%lu.%03lu] %s\n", elapsed / 1000, elapsed % 1000, msg);
-        f.close();
+        char line[128];
+        int n = snprintf(line, sizeof(line), "[%lu.%03lu] %s\n",
+                         (unsigned long)(elapsed / 1000), (unsigned)(elapsed % 1000), msg);
+        if (n > 0) {
+            size_t need = (size_t)n < sizeof(line) ? (size_t)n : sizeof(line) - 1;
+            if (s_sdLogUsed + need > sizeof(s_sdLogBuf)) flushSdLog();
+            if (s_sdLogUsed + need <= sizeof(s_sdLogBuf)) {
+                memcpy(s_sdLogBuf + s_sdLogUsed, line, need);
+                s_sdLogUsed += need;
+            }
+            // else: line dropped (SD unwritable and buffer full);
+            // the RAM ring (1) and callback (3) still carry it.
+        }
     }
 
     // 3. Registered callback (for consoleRing / companion app in main.cpp)
@@ -778,7 +813,7 @@ static void processEapolEvent(const PendingEapolEvent& ev) {
                 s_networks[netIdx].hasHandshake = true;
                 s_networks[netIdx].captureCount++;
                 // Pre-set captureSeq for the next handshake from this AP
-                uint8_t nextSeq = s_networks[netIdx].captureCount;
+                uint16_t nextSeq = s_networks[netIdx].captureCount;
 
                 yoinkLog(1, "HS #%u from %s saved, slot recycled for re-capture",
                          s_networks[netIdx].captureCount, hs.ssid);
@@ -1137,6 +1172,7 @@ void stop() {
     changeState(YoinkState::IDLE);
     yoinkLog(1, "Engine stopped. Captures: %d HS, %d PMKID",
             s_handshakeCount, s_pmkidCount);
+    flushSdLog();  // F8: don't lose the tail of the session log
 }
 
 void update() {
@@ -1189,6 +1225,9 @@ void update() {
                 s_networkCount, s_handshakeCount, s_pmkidCount,
                 s_clientCount, s_packetCount, s_deauthCount);
     }
+
+    // 6. Periodic SD session-log flush (F8)
+    if (now - s_sdLogLastFlushMs >= 5000) flushSdLog();
 }
 
 bool isRunning() { return s_running; }

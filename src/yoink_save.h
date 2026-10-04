@@ -12,8 +12,9 @@ namespace YoinkSave {
 
     // Build a capture filename: /captures/<SSID>_<BSSID>/Handshakes/<SSID>_<BSSID_hex>[_N]{suffix}
     // seq=0 → no suffix, seq=1 → _2 appended before extension suffix, etc.
+    // F9: seq widened to uint16_t (was uint8_t, wrapped at 255).
     void buildFilename(char* out, size_t outLen, const char* ssid,
-                       const uint8_t bssid[6], const char* suffix, uint8_t seq = 0);
+                       const uint8_t bssid[6], const char* suffix, uint16_t seq = 0);
 
     // Save a complete handshake as PCAP (beacon + EAPOL frames)
     bool saveHandshakePcap(const YoinkHandshake& hs);

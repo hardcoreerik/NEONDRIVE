@@ -45,7 +45,7 @@ struct YoinkNetwork {
     uint16_t beaconCount;
     bool hasPMF;              // Protected Management Frames
     bool hasHandshake;        // At least one handshake captured
-    uint8_t captureCount;     // Total handshakes successfully saved from this AP
+    uint16_t captureCount;    // Total handshakes successfully saved from this AP (F9: was uint8_t, wrapped at 255)
     uint8_t attackAttempts;
     bool isHidden;
     uint32_t cooldownUntil;   // Don't re-target until this time
@@ -70,7 +70,7 @@ struct YoinkHandshake {
     uint32_t firstSeen;
     uint32_t lastSeen;
     bool saved;
-    uint8_t captureSeq;          // Sequence number for this slot (drives filename uniqueness)
+    uint16_t captureSeq;          // Sequence number for this slot (drives filename uniqueness; F9: widened from uint8_t)
     uint8_t beaconData[256];     // Static buffer (trimmed for DRAM)
     uint16_t beaconLen;
 

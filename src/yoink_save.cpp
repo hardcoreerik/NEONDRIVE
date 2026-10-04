@@ -1,6 +1,7 @@
 // YOINK Save — PCAP and Hashcat .22000 file writers
 // Ported from NEONDRIVE OINK mode for CYD ESP32
 #include "yoink_save.h"
+#include "usb_msc_tdisplay.h"
 #include <SD.h>
 
 // Trigger LED victory flash when handshake/PMKID captured (defined in main.cpp)
@@ -65,7 +66,7 @@ void ensureDirs(const char* ssid, const uint8_t bssid[6]) {
 }
 
 void buildFilename(char* out, size_t outLen, const char* ssid,
-                   const uint8_t bssid[6], const char* suffix, uint8_t seq) {
+                   const uint8_t bssid[6], const char* suffix, uint16_t seq) {
     // Build the capture dir path (dashes in BSSID for dir name)
     char captureDir[160];
     buildCaptureDir(captureDir, sizeof(captureDir), ssid, bssid);
@@ -118,6 +119,12 @@ static void writePcapPacket(File& f, const uint8_t* frame, uint16_t len, uint32_
 
 bool saveHandshakePcap(const YoinkHandshake& hs) {
     if (!hs.hasValidPair()) return false;
+    // F2: never write SD while a USB MSC host has the card — host sector
+    // writes would silently invalidate our FATFS cache.
+    if (nd_usb_msc_sd_app_locked()) {
+        YoinkEngine::logMessage("[YOINK-SAVE] SD locked by USB MSC host, pcap save skipped");
+        return false;
+    }
 
     ensureDirs(hs.ssid, hs.bssid);
     char path[192];
@@ -193,6 +200,11 @@ bool saveHandshakePcap(const YoinkHandshake& hs) {
 
 bool saveHandshake22000(const YoinkHandshake& hs) {
     if (!hs.hasValidPair()) return false;
+    // F2: never write SD while a USB MSC host has the card.
+    if (nd_usb_msc_sd_app_locked()) {
+        YoinkEngine::logMessage("[YOINK-SAVE] SD locked by USB MSC host, .22000 save skipped");
+        return false;
+    }
 
     // Determine message pair
     uint8_t msgPair;
@@ -258,7 +270,9 @@ bool saveHandshake22000(const YoinkHandshake& hs) {
     if (eapolTotalLen > eapolFrame->eapolLen) eapolTotalLen = eapolFrame->eapolLen;
     if (eapolTotalLen > 512) eapolTotalLen = 512;
 
-    uint8_t eapolCopy[512];
+    // F13: static to keep the ~900 B save-path frame off the 10 KB loop stack
+    // (matches the eapolHex pattern below).
+    static uint8_t eapolCopy[512];
     memcpy(eapolCopy, eapolFrame->eapolData, eapolTotalLen);
     memset(eapolCopy + 81, 0, 16);  // Zero MIC field
 
@@ -281,6 +295,12 @@ bool saveHandshake22000(const YoinkHandshake& hs) {
 // ============= Hashcat .22000 — PMKID =============
 
 bool savePmkid22000(const YoinkPmkid& p) {
+    // F2: never write SD while a USB MSC host has the card.
+    if (nd_usb_msc_sd_app_locked()) {
+        YoinkEngine::logMessage("[YOINK-SAVE] SD locked by USB MSC host, PMKID save skipped");
+        return false;
+    }
+
     // Skip all-zero PMKIDs
     bool allZero = true;
     for (int i = 0; i < 16; i++) {
