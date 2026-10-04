@@ -55,6 +55,21 @@
 #include "variants/cyd28/nm_rf_hat_pinmap.h"
 #endif
 #endif // NEONDRIVE_USES_M5GFX / TFT_eSPI
+
+// G15 — IR learn/replay hardware availability. The NM RF HAT (CYD 2.8) exposes
+// IR TX/RX on its pinmap; boards with discrete IR pins (e.g. LilyGO T-Embed
+// CC1101: TX_EN=2, RX=1, see device_profiles/profile_t_embed_cc1101.h) use
+// those. All other targets compile the IR studio out entirely.
+#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+#define ND_IR_AVAILABLE 1
+#define ND_IR_RX_PIN NMHAT_IR_RX
+#define ND_IR_TX_PIN NMHAT_IR_TX
+#elif ND_HW_IR_TX && ND_HW_IR_RX
+// T-Embed CC1101: discrete IR LED (TX_EN) + IR receiver pins.
+#define ND_IR_AVAILABLE 1
+#define ND_IR_RX_PIN 1
+#define ND_IR_TX_PIN 2
+#endif
 #include <LittleFS.h>
 #include <SD.h>
 #if defined(NEONDRIVE_TARGET_TDISPLAY_S3) || defined(NEONDRIVE_TARGET_TDISPLAY_S3_TOUCH)
@@ -75,7 +90,11 @@ using fs::File;
 #define RAW_BUFFER_LENGTH 100
 #define DECODE_NEC
 #define DECODE_HASH
+// G15: IRremote is only needed on IR-capable targets (was unconditionally
+// included, breaking every non-HAT build once the dep was added).
+#if defined(ND_IR_AVAILABLE)
 #include <IRremote.hpp>
+#endif
 
 #include <ctype.h>
 #include <math.h>
@@ -4129,7 +4148,8 @@ static Button btnWifiRows[4];
 static Button btnWifiChecks[4];
 static int wifiRadarX = 0, wifiRadarY = 0, wifiRadarW = 0, wifiRadarH = 0;
 
-#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+// G15: IR studio state — compiled only on IR-capable targets.
+#if defined(ND_IR_AVAILABLE)
 static constexpr int IR_SLOT_COUNT = 6;
 static constexpr const char* IR_SLOTS_PATH_LFS = "/ir_slots.json";
 static constexpr const char* IR_SLOTS_PATH_SD  = "/ir/ir_slots.json";
@@ -4193,6 +4213,11 @@ static void hatModeLaunch() {
     case NmHatMode::RF433:  setScreen(ScreenId::RECON); break;
   }
 }
+#endif  // NEONDRIVE_TARGET_CYD28_NM_RF_HAT — hat mode controller only
+
+// G15: IR learn/replay engine. Available on the NM RF HAT and on any board
+// with discrete IR pins (T-Embed CC1101); compiled out elsewhere.
+#if defined(ND_IR_AVAILABLE)
 
 static void irStatusSet(const char* msg) {
   if (!msg) return;
@@ -4476,7 +4501,7 @@ static void irPollLearn() {
   IrReceiver.resume();
   if (screen == ScreenId::IR_STUDIO) drawIrStudio();
 }
-#endif
+#endif  // ND_IR_AVAILABLE
 
 static Button btnHopMinus, btnHopPlus;
 static Button btnScanMinus, btnScanPlus;
@@ -9787,14 +9812,22 @@ static void startWebServer() {
     String html = neonPageStart("IR Studio Setup",
                                 "Guided IR database setup and slot management.",
                                 "/ir");
-#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+#if defined(ND_IR_AVAILABLE)
     irSlotsLoad();
     html += "<section class='nd-panel'><h2>Hardware Status</h2>";
-    html += "<p><span class='nd-status nd-ok'>NM-RF-HAT IR SUPPORTED</span></p>";
-    html += "<p>TX Pin: <code>" + String(NMHAT_IR_TX) + "</code> | RX Pin: <code>" + String(NMHAT_IR_RX) + "</code></p>";
+    html += "<p><span class='nd-status nd-ok'>IR SUPPORTED</span></p>";
+    html += "<p>TX Pin: <code>" + String(ND_IR_TX_PIN) + "</code> | RX Pin: <code>" + String(ND_IR_RX_PIN) + "</code></p>";
     html += "<p>Storage: ";
     html += sdOk ? "<span class='nd-status nd-ok'>SD Ready</span>" : "<span class='nd-status nd-warn'>SD Missing (LittleFS fallback)</span>";
     html += "</p></section>";
+
+    html += "<section class='nd-panel'><h2>Learn &amp; Capture</h2>";
+    html += "<p>Learn a remote key, then save it to the current slot.</p>";
+    html += "<div class='nd-actions'><form method='POST' action='/ir/learn' class='nd-inline'>";
+    html += "<button class='nd-btn' type='submit'>Learn</button></form> ";
+    html += "<form method='POST' action='/ir/save' class='nd-inline'>";
+    html += "<button class='nd-btn' type='submit'>Save capture</button></form></div>";
+    html += "<p class='nd-help'>Status: " + escapeHtml(String(g_irStatus)) + "</p></section>";
 
     html += "<section class='nd-panel'><h2>Remote Library Preview</h2>";
     html += "<p>See loaded remotes and send directly from web controls.</p>";
@@ -9882,7 +9915,7 @@ document.getElementById('irImportUrlForm').addEventListener('submit', async func
   });
 
   webServer.on("/ir/slots/download", HTTP_GET, [](){
-#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+#if defined(ND_IR_AVAILABLE)
     const bool sdOk = sdReady || mountSdCard(false);
     const char* sdPath = "/ir/ir_slots.json";
     const char* lfsPath = "/ir_slots.json";
@@ -9912,7 +9945,7 @@ document.getElementById('irImportUrlForm').addEventListener('submit', async func
   });
 
   webServer.on("/ir/db/factory/download", HTTP_GET, [](){
-#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+#if defined(ND_IR_AVAILABLE)
     String payload = irBuildFactoryPackJson();
     webServer.sendHeader("Content-Disposition", "attachment; filename=\"factory_ir_slots.json\"");
     webServer.send(200, "application/json", payload);
@@ -9922,7 +9955,7 @@ document.getElementById('irImportUrlForm').addEventListener('submit', async func
   });
 
   webServer.on("/ir/db/upload", HTTP_POST, [](){
-#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+#if defined(ND_IR_AVAILABLE)
     if (irDbUploadFile) irDbUploadFile.close();
     String html = neonPageStart("IR DB Upload Result", "IR slot database import completed.", "/ir");
     html += "<section class='nd-panel'><h2>";
@@ -9947,7 +9980,7 @@ document.getElementById('irImportUrlForm').addEventListener('submit', async func
     webServer.send(404, "text/plain", "IR DB unsupported on this target");
 #endif
   }, [](){
-#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+#if defined(ND_IR_AVAILABLE)
     HTTPUpload& upload = webServer.upload();
     const bool sdOk = sdReady || mountSdCard(false);
     const char* sdDir = "/ir";
@@ -10015,7 +10048,7 @@ document.getElementById('irImportUrlForm').addEventListener('submit', async func
   });
 
   webServer.on("/ir/db/import-url", HTTP_POST, [](){
-#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+#if defined(ND_IR_AVAILABLE)
     const String url = webServer.arg("url");
     const String payload = webServer.arg("payload");
     String html = neonPageStart("IR URL Import Result", "Remote DB fetch completed.", "/ir");
@@ -10046,7 +10079,7 @@ document.getElementById('irImportUrlForm').addEventListener('submit', async func
   });
 
   webServer.on("/ir/db/factory", HTTP_POST, [](){
-#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+#if defined(ND_IR_AVAILABLE)
     String payload = irBuildFactoryPackJson();
     String err;
     String html = neonPageStart("IR Factory Pack", "Factory install completed.", "/ir");
@@ -10069,7 +10102,7 @@ document.getElementById('irImportUrlForm').addEventListener('submit', async func
   });
 
   webServer.on("/ir/send", HTTP_POST, [](){
-#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+#if defined(ND_IR_AVAILABLE)
     irSlotsLoad();
     const int slot = webServer.arg("slot").toInt();
     if (slot < 0 || slot >= IR_SLOT_COUNT || !g_irSlots[slot].used) {
@@ -10081,6 +10114,41 @@ document.getElementById('irImportUrlForm').addEventListener('submit', async func
     html += "<section class='nd-panel'><h2>Sent slot ";
     html += String(slot + 1);
     html += "</h2><p>Status: ";
+    html += escapeHtml(String(g_irStatus));
+    html += "</p><div class='nd-actions'><a class='nd-btn-ghost' href='/ir'>Back to IR Studio</a></div></section>";
+    html += neonPageEnd();
+    webServer.send(200, "text/html", html);
+#else
+    webServer.send(404, "text/plain", "IR DB unsupported on this target");
+#endif
+  });
+
+  // G15: web-driven learn/save — completes the IR flow on targets without an
+  // on-device IR Studio entry point (e.g. T-Embed CC1101).
+  webServer.on("/ir/learn", HTTP_POST, [](){
+#if defined(ND_IR_AVAILABLE)
+    g_irLearning = true;
+    irStatusSet("Point remote and press key");
+    String html = neonPageStart("IR Learn", "Learning started — press a key on the remote.", "/ir");
+    html += "<section class='nd-panel'><h2>Learning…</h2>";
+    html += "<p>Point the remote at the IR receiver and press a key. Then save the capture to the current slot.</p>";
+    html += "<div class='nd-actions'><a class='nd-btn-ghost' href='/ir'>Back to IR Studio</a></div></section>";
+    html += neonPageEnd();
+    webServer.send(200, "text/html", html);
+#else
+    webServer.send(404, "text/plain", "IR DB unsupported on this target");
+#endif
+  });
+
+  webServer.on("/ir/save", HTTP_POST, [](){
+#if defined(ND_IR_AVAILABLE)
+    if (!g_irHasCaptured) {
+      webServer.send(400, "text/plain", "Nothing captured yet — learn first");
+      return;
+    }
+    irSaveCapturedToCurrentSlot();
+    String html = neonPageStart("IR Save Result", "Capture saved to slot.", "/ir");
+    html += "<section class='nd-panel'><h2>Saved</h2><p>Status: ";
     html += escapeHtml(String(g_irStatus));
     html += "</p><div class='nd-actions'><a class='nd-btn-ghost' href='/ir'>Back to IR Studio</a></div></section>";
     html += neonPageEnd();
@@ -17333,10 +17401,10 @@ static void drawIrStudio() {
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("LEARN / SAVE / REPLAY", panelX + 8, panelY + 8);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+#if defined(ND_IR_AVAILABLE)
   char line[96];
   snprintf(line, sizeof(line), "IR TX=%d RX=%d  Slot %d/%d",
-           NMHAT_IR_TX, NMHAT_IR_RX, g_irSlotIdx + 1, IR_SLOT_COUNT);
+           ND_IR_TX_PIN, ND_IR_RX_PIN, g_irSlotIdx + 1, IR_SLOT_COUNT);
   tft.drawString(line, panelX + 8, panelY + 22);
   tft.drawString(g_irStatus, panelX + 8, panelY + 36);
   const IrSlot& s = g_irSlots[g_irSlotIdx];
@@ -17368,7 +17436,6 @@ static void drawIrStudio() {
   }
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("IR HEAT", wfX, wfY + wfH + 2);
-#endif
 
   const int gap = compact ? 6 : 8;
   const int rowW = (content.w - gap) / 2;
@@ -17388,6 +17455,7 @@ static void drawIrStudio() {
   drawButton(btnIrNext, TFT_NAVY, TFT_WHITE, TFT_WHITE);
   drawButton(btnIrBack, TFT_NAVY, TFT_WHITE, TFT_WHITE);
   drawBorder();
+#endif  // ND_IR_AVAILABLE
 }
 
 static void setScreen(ScreenId next) {
@@ -17405,9 +17473,11 @@ static void setScreen(ScreenId next) {
     case ScreenId::HAT_TRICK:
       drawHatTrick();
       break;
+#if defined(ND_IR_AVAILABLE)
     case ScreenId::IR_STUDIO:
       drawIrStudio();
       break;
+#endif
     case ScreenId::JUST_GO:
       justGoLayoutDrawn = false;
       if (!justGoActive) {
@@ -17502,7 +17572,9 @@ static void redrawActiveScreen() {
   switch (screen) {
     case ScreenId::HOME:                drawHome(); break;
     case ScreenId::HAT_TRICK:           drawHatTrick(); break;
+#if defined(ND_IR_AVAILABLE)
     case ScreenId::IR_STUDIO:           drawIrStudio(); break;
+#endif
     case ScreenId::JUST_GO:             drawJustGo(); break;
     case ScreenId::WIFI_SCAN:           drawWifiScan(); break;
     case ScreenId::CONFIRM_TARGET:      drawConfirmTarget(); break;
@@ -18329,7 +18401,7 @@ void setup() {
   } else {
     Serial.println("[fs] LittleFS mounted.");
     restoreEpochFromLittleFs();
-#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+#if defined(ND_IR_AVAILABLE)
     irSlotsLoad();
 #endif
   }
@@ -18342,11 +18414,11 @@ void setup() {
   initCyd35TouchCalibrationFromSdOrWizard();
 #endif
   variantBootSelfTest();
-#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
-  IrReceiver.begin(NMHAT_IR_RX, DISABLE_LED_FEEDBACK);
-  IrSender.begin(NMHAT_IR_TX, ENABLE_LED_FEEDBACK);
+#if defined(ND_IR_AVAILABLE)
+  IrReceiver.begin(ND_IR_RX_PIN, DISABLE_LED_FEEDBACK);
+  IrSender.begin(ND_IR_TX_PIN, ENABLE_LED_FEEDBACK);
   irStatusSet("IR RX/TX ready");
-  Serial.printf("[ir] init RX=%d TX=%d\n", NMHAT_IR_RX, NMHAT_IR_TX);
+  Serial.printf("[ir] init RX=%d TX=%d\n", ND_IR_RX_PIN, ND_IR_TX_PIN);
 #endif
 
   // Create mutex for serializing WiFi driver ops
@@ -18514,7 +18586,7 @@ void loop() {
   scopeTick();
   reconTick();
   portScannerTick();
-  #if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+  #if defined(ND_IR_AVAILABLE)
   irPollLearn();
   #endif
   PACKETLABMonitorTick();
@@ -18732,7 +18804,7 @@ void loop() {
   if (screen == ScreenId::IR_STUDIO) {
     if (hit(btnIrBack, tx, ty)) { setScreen(ScreenId::HAT_TRICK); waitTouchRelease(); return; }
     if (hit(btnIrLearn, tx, ty)) {
-#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+#if defined(ND_IR_AVAILABLE)
       g_irLearning = true;
       irStatusSet("Point remote and press key");
       drawIrStudio();
@@ -18741,7 +18813,7 @@ void loop() {
       return;
     }
     if (hit(btnIrSend, tx, ty)) {
-#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+#if defined(ND_IR_AVAILABLE)
       if (g_irHasCaptured) irSendCaptured(); else irSendSlot(g_irSlotIdx);
       drawIrStudio();
 #endif
@@ -18749,7 +18821,7 @@ void loop() {
       return;
     }
     if (hit(btnIrSave, tx, ty)) {
-#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+#if defined(ND_IR_AVAILABLE)
       irSaveCapturedToCurrentSlot();
       drawIrStudio();
 #endif
@@ -18757,7 +18829,7 @@ void loop() {
       return;
     }
     if (hit(btnIrPrev, tx, ty)) {
-#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+#if defined(ND_IR_AVAILABLE)
       g_irSlotIdx = (g_irSlotIdx + IR_SLOT_COUNT - 1) % IR_SLOT_COUNT;
       drawIrStudio();
 #endif
@@ -18765,7 +18837,7 @@ void loop() {
       return;
     }
     if (hit(btnIrNext, tx, ty)) {
-#if defined(NEONDRIVE_TARGET_CYD28_NM_RF_HAT)
+#if defined(ND_IR_AVAILABLE)
       g_irSlotIdx = (g_irSlotIdx + 1) % IR_SLOT_COUNT;
       drawIrStudio();
 #endif
