@@ -28,7 +28,7 @@ static uint32_t    s_sessionStartMs = 0;
 // appends them in one shot. Flushed periodically from update() and on stop().
 // F2: flush is skipped while a USB MSC host has the card (buffer retained,
 // retry on the next tick) so we never race host sector writes.
-static char     s_sdLogBuf[4096];
+static char     s_sdLogBuf[2048];
 static size_t   s_sdLogUsed = 0;
 static uint32_t s_sdLogLastFlushMs = 0;
 
@@ -42,7 +42,7 @@ static void flushSdLog() {
         s_sdLogUsed = 0;
         s_sdLogLastFlushMs = millis();
     }
-    // On open failure: keep buffered, retry next flush (bounded by 4 KB).
+    // On open failure: keep buffered, retry next flush (bounded by 2 KB).
 }
 
 // Registered callback (main.cpp uses this to push to consoleRing + companion)

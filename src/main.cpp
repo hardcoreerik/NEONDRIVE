@@ -1960,8 +1960,12 @@ static void handleCapturedPacket(uint8_t *buf, uint32_t len) {
 // handleCapturedPacket() in task context. This follows the deferred-event
 // pattern already used by YoinkEngine's PendingEapol/Beacon/Client rings.
 // No heap allocation anywhere in the enqueue path.
-#define ND_CAP_RING_SLOTS 8
-#define ND_CAP_MAX_LEN    1536  // beacons/EAPOL/data headers fit; longer frames truncate (parse walks stay bounded)
+//
+// DRAM budget note: the capture ring is 4×1028 B (~4.1 KB) of .bss and the
+// YOINK log staging buffer is 2 KB — kept small on purpose because the
+// firmware_cyd_* targets are already tight on DRAM.
+#define ND_CAP_RING_SLOTS 4
+#define ND_CAP_MAX_LEN    1024  // beacons/EAPOL/data headers fit; longer frames truncate (parse walks stay bounded)
 struct DeferredCapture {
   uint8_t frame[ND_CAP_MAX_LEN];
   uint16_t len;
