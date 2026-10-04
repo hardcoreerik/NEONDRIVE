@@ -18,5 +18,8 @@ The format is based on Keep a Changelog and follows Semantic Versioning.
   replay, and duty-capped jammer. Captures are staged into the session bundle
   (`artifacts/`, `events.csv`) with wall-clock timestamps. No-op stubs on all
   other targets.
+- **G3 — Live capture streaming (B3)**: Wireshark-compatible pcap stream over
+  TCP (port 8081) from the WiFi RX path; SD staging continues in parallel.
+  RX-safe static ring buffer, drops counted, zero blocking.
 - Repository hygiene baseline refresh (README, templates, workflow standards)
 - Standard issue templates and pull request quality checks

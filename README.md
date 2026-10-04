@@ -43,6 +43,9 @@ NEONDRIVE is organized around a set of functional modules that share common targ
   - CC1101 315/434/868/915 MHz scan, packet capture, replay, and jammer.
     Captures land in the session bundle (`artifacts/`, `events.csv`) with
     wall-clock timestamps.
+- **Live Capture Stream**
+  - Wireshark-compatible pcap stream over TCP (port 8081) while SD staging
+    continues in parallel: `nc <ip> 8081 | wireshark -k -i -`.
 - **Web + Data Ops**
   - On-device web endpoints, status/telemetry views, and optional sync integrations (for example WPA-SEC/Dropbox paths when configured).
 

@@ -108,6 +108,7 @@ using fs::File;
 #include "dropbox_client.h"
 #include "analyzer_sync.h"
 #include "evil_portal.h"
+#include "stream_pcap.h"
 #include "subghz.h"
 #include "gps_service.h"
 #include "hypercube_widget.h"
@@ -2018,6 +2019,10 @@ static void IRAM_ATTR promiscuousPacketCallback(void *buf, wifi_promiscuous_pkt_
     packetHead = (uint16_t)((packetHead + 1) % PACKET_RING_SIZE);
     portEXIT_CRITICAL_ISR(&packetRingMux);
   }
+
+  // G3 — Live pcap stream intake. RX-safe: bounded memcpy into the static
+  // stream ring only while a TCP client is connected.
+  StreamPcap::ingest(payload, len);
 
   // G4 — Karma probe intake: harvest directed probe requests for spoofed
   // probe responses. RX-safe: parse + copy into the PACKETLAB ring only.
@@ -9450,6 +9455,7 @@ static String neonPageStart(const String& title,
   html += neonNavLink("/keys/config", "API Keys", activeNav);
   html += neonNavLink("/analyzer", "Analyzer Sync", activeNav);
   html += neonNavLink("/portal", "Evil Portal", activeNav);
+  html += neonNavLink("/stream", "Live Stream", activeNav);
   html += neonNavLink("/subghz", "Sub-GHz", activeNav);
   html += "</nav></header><main class='nd-main'>";
   return html;
@@ -11660,6 +11666,37 @@ function startPortal() {
   webServer.on("/api/portal/stop", HTTP_POST, [](){
     evil_portal_obj.stop();
     webServer.send(200, "application/json", "{\"ok\":true,\"running\":false}");
+  });
+
+  // G3 — Live pcap stream (Wireshark-compatible, TCP port 8081).
+  // GET /stream — instructions + status.
+  webServer.on("/stream", HTTP_GET, [](){
+    String html = neonPageStart("Live Capture Stream",
+      "Wireshark-compatible pcap stream. SD staging continues in parallel.",
+      "/stream");
+    html += "<section class='nd-panel'><h2>Stream</h2>";
+    html += "<p>Status: <span id='st'>loading&hellip;</span></p>";
+    html += "<p>Connect Wireshark with:</p>";
+    html += "<pre>nc ";
+    html += WiFi.localIP().toString();
+    if (WiFi.localIP().toString() == "0.0.0.0") html += WiFi.softAPIP().toString();
+    html += " 8081 | wireshark -k -i -</pre>";
+    html += "<p><i>Packets truncated to 256 bytes. Ring-full drops are counted, "
+            "never block capture.</i></p>";
+    html += "</div></section>";
+    html += R"JS(<script>
+fetch('/api/stream/status').then(function(r){ return r.json(); }).then(function(d){
+  document.getElementById('st').textContent =
+    d.clients + ' client(s), ' + d.dropped + ' dropped, port ' + d.port;
+});
+</script>)JS";
+    html += neonPageEnd();
+    webServer.send(200, "text/html", html);
+  });
+
+  // GET /api/stream/status
+  webServer.on("/api/stream/status", HTTP_GET, [](){
+    webServer.send(200, "application/json", StreamPcap::statusJson());
   });
 
   // G2 — Sub-GHz toolkit (T-Embed CC1101; no-op stubs elsewhere).
@@ -18858,6 +18895,9 @@ void loop() {
     webServerRunning = true;
     Serial.println("[portal] management UI restored");
   }
+
+  // G3 — drain the live pcap stream ring to TCP clients (port 8081).
+  StreamPcap::tick();
 
   // G2 — sub-GHz toolkit service (T-Embed CC1101; no-op elsewhere).
   SubGhz::tick();

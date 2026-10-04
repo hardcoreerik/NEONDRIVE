@@ -42,3 +42,9 @@ The portal is a **credential assessment aid**, not a credential harvester:
 - The jammer is capped at 10 s per activation from the web UI (configurable
   per call in scripts, still time-bounded).
 
+### Live capture stream
+
+- The TCP pcap stream carries raw 802.11 frames — treat the listening network
+  as untrusted. No authentication is provided; keep it on a lab network and
+  stop capture when not actively analysing.
+
