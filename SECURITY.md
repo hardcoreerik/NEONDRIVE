@@ -34,3 +34,11 @@ The portal is a **credential assessment aid**, not a credential harvester:
 - The portal SSID defaults to `LAB-PORTAL` and channel selection prefers the
   currently locked target — lab-scoped defaults, no public-nuisance presets.
 
+### Sub-GHz toolkit (CC1101)
+
+- Transmit functions (`replay`, `jam`) are intended for **your own devices in
+  a shielded/lab setting**. Check local radio regulations before transmitting
+  on 315/434/868/915 MHz — many bands have duty-cycle and power limits.
+- The jammer is capped at 10 s per activation from the web UI (configurable
+  per call in scripts, still time-bounded).
+

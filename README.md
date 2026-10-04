@@ -39,6 +39,10 @@ NEONDRIVE is organized around a set of functional modules that share common targ
   - Captive-portal assessment module (AP + DNS + HTTP). Credential values are
     never recorded — only timestamped submission counts enter the evidence
     bundle, which auto-stages on portal stop and feeds the quick-verdict.
+- **Sub-GHz Toolkit** (T-Embed CC1101 Plus)
+  - CC1101 315/434/868/915 MHz scan, packet capture, replay, and jammer.
+    Captures land in the session bundle (`artifacts/`, `events.csv`) with
+    wall-clock timestamps.
 - **Web + Data Ops**
   - On-device web endpoints, status/telemetry views, and optional sync integrations (for example WPA-SEC/Dropbox paths when configured).
 

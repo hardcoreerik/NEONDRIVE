@@ -108,6 +108,7 @@ using fs::File;
 #include "dropbox_client.h"
 #include "analyzer_sync.h"
 #include "evil_portal.h"
+#include "subghz.h"
 #include "gps_service.h"
 #include "hypercube_widget.h"
 #include "wpasec_client.h"
@@ -9449,6 +9450,7 @@ static String neonPageStart(const String& title,
   html += neonNavLink("/keys/config", "API Keys", activeNav);
   html += neonNavLink("/analyzer", "Analyzer Sync", activeNav);
   html += neonNavLink("/portal", "Evil Portal", activeNav);
+  html += neonNavLink("/subghz", "Sub-GHz", activeNav);
   html += "</nav></header><main class='nd-main'>";
   return html;
 }
@@ -11658,6 +11660,92 @@ function startPortal() {
   webServer.on("/api/portal/stop", HTTP_POST, [](){
     evil_portal_obj.stop();
     webServer.send(200, "application/json", "{\"ok\":true,\"running\":false}");
+  });
+
+  // G2 — Sub-GHz toolkit (T-Embed CC1101; no-op stubs elsewhere).
+  // GET /subghz — controls page.
+  webServer.on("/subghz", HTTP_GET, [](){
+    String html = neonPageStart("Sub-GHz Toolkit",
+      "CC1101 315/434/868/915 MHz: scan, capture, replay, jam. "
+      "T-Embed CC1101 Plus only.", "/subghz");
+    html += "<section class='nd-panel'><h2>Sub-GHz</h2>";
+    if (!SubGhz::available()) {
+      html += "<p>Sub-GHz radio not detected on this target.</p>";
+      html += "<p><i>Requires the LilyGO T-Embed CC1101 Plus build.</i></p>";
+    } else {
+      html += "<p>Status: <span id='sgst'>loading&hellip;</span></p>";
+      html += "<p>Frequency MHz<br><input id='sgf' value='433.92' size='10'></p>";
+      html += "<button class='nd-btn' onclick=\"sgGo('rx')\">Capture</button> ";
+      html += "<button class='nd-btn' onclick=\"sgGo('replay')\">Replay</button> ";
+      html += "<button class='nd-btn' onclick=\"sgGo('jam')\">Jam 10s</button> ";
+      html += "<button class='nd-btn-ghost' onclick=\"sgGo('stop')\">Stop</button>";
+      html += "<p>Scan 430&ndash;440 MHz<br><button class='nd-btn' onclick=\"sgGo('scan')\">Scan</button></p>";
+      html += "<p>Last capture (hex):<br><code id='sghex'></code></p>";
+    }
+    html += "</div></section>";
+    html += R"JS(<script>
+function sgGo(action) {
+  var f = document.getElementById('sgf') ? document.getElementById('sgf').value : '433.92';
+  var fd = new FormData();
+  fd.append('action', action); fd.append('freq', f);
+  fetch('/api/subghz/action', { method: 'POST', body: new URLSearchParams(fd) })
+    .then(function(r){ return r.json(); })
+    .then(function(d){ sgStatus(); });
+}
+function sgStatus() {
+  fetch('/api/subghz/status').then(function(r){ return r.json(); }).then(function(d){
+    var el = document.getElementById('sgst');
+    if (el) el.textContent = 'present=' + d.present + ' mode=' + d.mode +
+      ' freq=' + d.freq_mhz + 'MHz caps=' + d.captures + ' rssi=' + d.last_rssi + 'dBm' +
+      (d.last_error ? ' err=' + d.last_error : '');
+    var hx = document.getElementById('sghex');
+    if (hx) hx.textContent = d.last_hex || '';
+  });
+}
+sgStatus(); setInterval(sgStatus, 3000);
+</script>)JS";
+    html += neonPageEnd();
+    webServer.send(200, "text/html", html);
+  });
+
+  // GET /api/subghz/status
+  webServer.on("/api/subghz/status", HTTP_GET, [](){
+    SubGhz::Status s = SubGhz::status();
+    const char* modeStr = "idle";
+    switch (s.mode) {
+      case SubGhz::Mode::SCAN: modeStr = "scan"; break;
+      case SubGhz::Mode::RX:   modeStr = "rx"; break;
+      case SubGhz::Mode::TX:   modeStr = "tx"; break;
+      case SubGhz::Mode::JAM:  modeStr = "jam"; break;
+      default: break;
+    }
+    String out = "{\"ok\":true,\"present\":";
+    out += s.present ? "true" : "false";
+    out += ",\"mode\":\""; out += modeStr; out += "\"";
+    out += ",\"freq_mhz\":"; out += String(s.freqMhz, 3);
+    out += ",\"captures\":"; out += s.captures;
+    out += ",\"tx_count\":"; out += s.txCount;
+    out += ",\"last_rssi\":"; out += s.lastRssi;
+    out += ",\"peak_freq_mhz\":"; out += String(s.peakFreqMhz, 3);
+    out += ",\"last_hex\":\""; out += SubGhz::lastCaptureHex(); out += "\"";
+    if (s.lastError[0]) { out += ",\"last_error\":\""; out += s.lastError; out += "\""; }
+    out += "}";
+    webServer.send(200, "application/json", out);
+  });
+
+  // POST /api/subghz/action — action=scan|rx|replay|jam|stop, freq=MHz
+  webServer.on("/api/subghz/action", HTTP_POST, [](){
+    String action = webServer.arg("action");
+    float freq = webServer.arg("freq").toFloat();
+    if (freq < 300.0f || freq > 928.0f) freq = 433.92f;
+    bool ok = false;
+    if (action == "scan")        ok = SubGhz::startScan(430.0f, 440.0f, 0.2f);
+    else if (action == "rx")     ok = SubGhz::startRx(freq);
+    else if (action == "replay") ok = SubGhz::startReplay(freq, 3);
+    else if (action == "jam")    ok = SubGhz::startJam(freq, 10000);
+    else if (action == "stop")   { SubGhz::stop(); ok = true; }
+    String out = "{\"ok\":"; out += ok ? "true" : "false"; out += "}";
+    webServer.send(ok ? 200 : 500, "application/json", out);
   });
 
   // G4 — Karma attack API (probe-response spoofing).
@@ -18770,6 +18858,9 @@ void loop() {
     webServerRunning = true;
     Serial.println("[portal] management UI restored");
   }
+
+  // G2 — sub-GHz toolkit service (T-Embed CC1101; no-op elsewhere).
+  SubGhz::tick();
 
 #if defined(NEONDRIVE_TARGET_BUTTON_NAV)
   if (tdisplayNavConsumeRefreshRequest()) {

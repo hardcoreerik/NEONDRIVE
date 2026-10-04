@@ -12,5 +12,11 @@ The format is based on Keep a Changelog and follows Semantic Versioning.
   are never persisted to SD or logs; only timestamped submission events and
   counts enter the session bundle, which auto-stages on portal stop and feeds
   the quick-verdict. Web UI at `/portal` + API; management UI suspends while
-  the portal owns the WiFi stack and restores on stop.- Repository hygiene baseline refresh (README, templates, workflow standards)
+  the portal owns the WiFi stack and restores on stop.
+- **G2 — Sub-GHz toolkit (B2)**: CC1101 support on the T-Embed CC1101 Plus
+  target (RadioLib, 315/434/868/915 MHz) — spectrum scan, packet capture,
+  replay, and duty-capped jammer. Captures are staged into the session bundle
+  (`artifacts/`, `events.csv`) with wall-clock timestamps. No-op stubs on all
+  other targets.
+- Repository hygiene baseline refresh (README, templates, workflow standards)
 - Standard issue templates and pull request quality checks
