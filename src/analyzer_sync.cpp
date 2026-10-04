@@ -1,6 +1,7 @@
 #include "analyzer_sync.h"
 #include "dropbox_client.h"
 #include "device_profile_select.h"
+#include "usb_msc_tdisplay.h"
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -74,14 +75,52 @@ static String readFile(fs::FS& sd, const char* path) {
 }
 
 // Escape a string for inclusion inside a JSON double-quoted value.
+// F5: all control chars U+0000–U+001F must be escaped — a hostile SSID
+// containing e.g. 0x01 previously produced invalid JSON.
 static String jsonEsc(const char* s) {
     String out;
+    if (!s) return out;
     for (const char* p = s; *p; ++p) {
-        if (*p == '"' || *p == '\\') out += '\\';
-        if (*p == '\n') { out += "\\n"; continue; }
-        if (*p == '\r') { out += "\\r"; continue; }
-        out += *p;
+        unsigned char c = (unsigned char)*p;
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char u[7];
+                    snprintf(u, sizeof(u), "\\u%04x", c);
+                    out += u;
+                } else {
+                    out += (char)c;
+                }
+        }
     }
+    return out;
+}
+
+// Escape a field for CSV: double embedded quotes and wrap the field in
+// quotes when it contains a comma, quote, or line break (RFC 4180).
+// F6: the events.csv builder previously used JSON escaping, so an SSID
+// containing ',' or '"' silently shifted columns.
+static String csvEsc(const char* s) {
+    if (!s) return "";
+    bool needQuotes = false;
+    String out;
+    for (const char* p = s; *p; ++p) {
+        if (*p == '"') {
+            out += "\"\"";
+            needQuotes = true;
+        } else {
+            out += *p;
+            if (*p == ',' || *p == '\n' || *p == '\r') needQuotes = true;
+        }
+    }
+    if (needQuotes) return "\"" + out + "\"";
     return out;
 }
 
@@ -127,6 +166,14 @@ bool stageSession(fs::FS& sd, const StageParams& p) {
     // Reset state.
     memset(&g_state, 0, sizeof(g_state));
     strncpy(g_state.sync_status, "none", sizeof(g_state.sync_status) - 1);
+
+    // F2: never write SD while a USB MSC host has the card — host sector
+    // writes would silently invalidate our FATFS cache.
+    if (nd_usb_msc_sd_app_locked()) {
+        strncpy(g_state.last_error, "SD locked by USB MSC host", sizeof(g_state.last_error) - 1);
+        strncpy(g_state.sync_status, "failed", sizeof(g_state.sync_status) - 1);
+        return false;
+    }
 
     if (!sd.exists("/neondrive")) sd.mkdir("/neondrive");
 
@@ -303,33 +350,34 @@ bool stageSession(fs::FS& sd, const StageParams& p) {
     writeFile(sd, summaryPath, summary);  // non-fatal if fails
 
     // ── events.csv ───────────────────────────────────────────────────────────
+    // F6: CSV fields use csvEsc (quote-doubling), not JSON escaping.
     String events = "timestamp_ms,event_type,module,severity,target_ssid,target_bssid,channel,message,artifact_path\n";
     events += "0,session_start,";
-    events += mod; events += ",info,";
-    events += jsonEsc(p.ssid ? p.ssid : ""); events += ",";
-    events += jsonEsc(p.bssid ? p.bssid : ""); events += ",";
+    events += csvEsc(mod); events += ",info,";
+    events += csvEsc(p.ssid ? p.ssid : ""); events += ",";
+    events += csvEsc(p.bssid ? p.bssid : ""); events += ",";
     events += p.channel; events += ",Session bundle staged,\n";
     if (p.pmkid_count > 0) {
         events += String(millis()); events += ",pmkid_captured,";
-        events += mod; events += ",warning,";
-        events += jsonEsc(p.ssid ? p.ssid : ""); events += ",";
-        events += jsonEsc(p.bssid ? p.bssid : ""); events += ",";
+        events += csvEsc(mod); events += ",warning,";
+        events += csvEsc(p.ssid ? p.ssid : ""); events += ",";
+        events += csvEsc(p.bssid ? p.bssid : ""); events += ",";
         events += p.channel; events += ",";
         events += p.pmkid_count; events += " PMKID candidate(s) observed,artifacts/specter.hc22000\n";
     }
     if (p.handshake_count > 0) {
         events += String(millis()); events += ",eapol_frames,";
-        events += mod; events += ",info,";
-        events += jsonEsc(p.ssid ? p.ssid : ""); events += ",";
-        events += jsonEsc(p.bssid ? p.bssid : ""); events += ",";
+        events += csvEsc(mod); events += ",info,";
+        events += csvEsc(p.ssid ? p.ssid : ""); events += ",";
+        events += csvEsc(p.bssid ? p.bssid : ""); events += ",";
         events += p.channel; events += ",";
         events += p.handshake_count; events += " EAPOL frame(s) captured,";
         events += hasPcap ? "artifacts/handshakes.pcap" : ""; events += "\n";
     }
     events += String(millis()); events += ",session_end,";
-    events += mod; events += ",info,";
-    events += jsonEsc(p.ssid ? p.ssid : ""); events += ",";
-    events += jsonEsc(p.bssid ? p.bssid : ""); events += ",";
+    events += csvEsc(mod); events += ",info,";
+    events += csvEsc(p.ssid ? p.ssid : ""); events += ",";
+    events += csvEsc(p.bssid ? p.bssid : ""); events += ",";
     events += p.channel; events += ",Bundle ready for Wardrive Analyzer sync,\n";
 
     char eventsPath[112];
