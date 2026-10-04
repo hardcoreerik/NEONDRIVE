@@ -1998,6 +1998,24 @@ static void IRAM_ATTR promiscuousPacketCallback(void *buf, wifi_promiscuous_pkt_
     portEXIT_CRITICAL_ISR(&packetRingMux);
   }
 
+  // G4 — Karma probe intake: harvest directed probe requests for spoofed
+  // probe responses. RX-safe: parse + copy into the PACKETLAB ring only.
+  // (mgmt subtype 4 = probe request; SSID IE is the first body IE.)
+  if (len >= 24) {
+    uint8_t fc0k = payload[0];
+    if (((fc0k >> 2) & 0x03) == 0 && ((fc0k >> 4) & 0x0F) == 4) {
+      if (len >= 26 && payload[24] == 0x00) {
+        uint8_t ssidLen = payload[25];
+        if (ssidLen > 0 && ssidLen <= 32 && len >= (uint32_t)(26 + ssidLen)) {
+          char pssid[33];
+          memcpy(pssid, payload + 26, ssidLen);
+          pssid[ssidLen] = '\0';
+          PACKETLABKarmaIngestProbe(payload + 10, pssid, ssidLen);  // addr2 = SA
+        }
+      }
+    }
+  }
+
   // Feed Recon Deauth Hunter parser from the shared global callback.
   DeauthHunter::ingestPromiscuousPacket(ppkt, type);
   handleCapturedPacket(payload, len);
@@ -11429,6 +11447,39 @@ function syncSession()  { apiAction('/api/analyzer/sync',  event.target, 'Synced
     }
     webServer.send(200, "application/json",
       AnalyzerSync::sessionManifestJson(SD, session.c_str()));
+  });
+
+  // G4 — Karma attack API (probe-response spoofing).
+  // GET /api/karma — status
+  webServer.on("/api/karma", HTTP_GET, [](){
+    bool running = PACKETLABIsAttacking() &&
+        PACKETLABGetCurrentAttackType() == PACKETLABAttackType::KARMA;
+    String out = "{\"ok\":true,\"attacking\":";
+    out += running ? "true" : "false";
+    out += ",\"probes_seen\":"; out += PACKETLABKarmaProbesSeen();
+    out += ",\"responses_sent\":"; out += PACKETLABKarmaResponsesSent();
+    out += "}";
+    webServer.send(200, "application/json", out);
+  });
+
+  // POST /api/karma — action=start|stop, channel=1..14, duration_s=5..60
+  webServer.on("/api/karma", HTTP_POST, [](){
+    String action = webServer.arg("action");
+    if (action == "stop") {
+      if (PACKETLABGetCurrentAttackType() == PACKETLABAttackType::KARMA)
+        PACKETLABStopAttack();
+      webServer.send(200, "application/json", "{\"ok\":true,\"attacking\":false}");
+      return;
+    }
+    int ch = webServer.arg("channel").toInt();
+    if (ch < 1 || ch > 14) ch = 6;
+    int durS = webServer.arg("duration_s").toInt();
+    if (durS < 5) durS = 30;
+    if (durS > 60) durS = 60;
+    PACKETLABStartKarma((uint8_t)ch, (uint16_t)(durS * 1000));
+    String out = "{\"ok\":true,\"attacking\":true,\"channel\":";
+    out += ch; out += ",\"duration_s\":"; out += durS; out += "}";
+    webServer.send(200, "application/json", out);
   });
 
   webServer.begin();

