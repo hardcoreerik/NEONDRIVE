@@ -14,6 +14,11 @@ namespace AnalyzerSync {
 
 SyncState g_state = {};
 
+// F3: conservative per-file cap for the Dropbox single-call upload endpoint
+// (/2/files/upload, server limit 150 MB). Streaming tens of MB would freeze
+// the device for minutes on a slow uplink, so refuse early with a clear error.
+static constexpr size_t kDropboxSingleUploadMaxBytes = 25UL * 1024UL * 1024UL;
+
 // ── Internal constants ────────────────────────────────────────────────────────
 
 static constexpr const char* kSessionsRoot = "/neondrive/sessions";
@@ -439,6 +444,26 @@ bool uploadSession(fs::FS& sd,
         char localPath[128];
         snprintf(localPath, sizeof(localPath), "%s/%s", g_state.local_root, spec.rel);
         if (!sd.exists(localPath)) continue;
+
+        // F3: Dropbox's single-call /2/files/upload endpoint caps at 150 MB,
+        // and streaming tens of MB over TLS would freeze the device for
+        // minutes on a slow uplink (no UI/touch servicing). Refuse anything
+        // over the conservative threshold with a clear error instead.
+        {
+            File probe = sd.open(localPath, FILE_READ);
+            size_t fsz = probe ? (size_t)probe.size() : 0;
+            if (probe) probe.close();
+            if (fsz > kDropboxSingleUploadMaxBytes) {
+                Serial.printf("[analyzer] upload SKIPPED (too large, %u bytes): %s\n",
+                              (unsigned)fsz, localPath);
+                if (spec.required) {
+                    allRequiredOk = false;
+                    snprintf(g_state.last_error, sizeof(g_state.last_error),
+                             "Required file too large for single-call upload: %s", spec.rel);
+                }
+                continue;
+            }
+        }
 
         g_state.files_total++;
         String remotePath = remoteBase + "/" + spec.rel;

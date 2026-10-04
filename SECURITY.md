@@ -47,6 +47,22 @@ We aim to acknowledge all valid reports and publish a fix or mitigation within 3
 
 ---
 
+## TLS certificate validation (accepted risk, 2026-10-03)
+
+All cloud upload paths — Dropbox (`src/dropbox_client.cpp`), WPA-SEC
+(`src/wpasec_client.cpp`), and WiGLE (`src/wigle_client.cpp`) — currently use
+`WiFiClientSecure::setInsecure()`, i.e. **TLS without certificate validation**.
+The connections carry captured handshakes, PMKIDs, and session bundles, so a
+network-position attacker in the lab could intercept or alter them.
+
+This is a deliberate trade-off for now: the firmware ships no CA store and
+targets lab networks, but it is **not** safe for hostile networks. To harden,
+place the relevant API CA (PEM) on SD and switch the call site to
+`client.setCACert()` with its contents — each call site carries a comment
+pointing at this section.
+
+---
+
 ## Supported Versions
 
 Security fixes will be applied to the latest release only.

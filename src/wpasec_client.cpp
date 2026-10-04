@@ -375,9 +375,12 @@ static bool uploadSingleCapture(fs::FS& fs, const char* path, const char* apiKey
 
   static WiFiClientSecure client;
   client.stop();
+  // F4 SECURITY NOTE: setInsecure() disables TLS certificate validation, so
+  // this upload (captured handshakes sent to WPA-SEC) is trivially MITM-able
+  // on the lab network. Kept as-is for now because the firmware ships no CA
+  // store; to harden, place the WPA-SEC API CA (PEM) on SD and use
+  // client.setCACert() instead of setInsecure(). See SECURITY.md.
   client.setInsecure();
-  if (!client.connect(kHost, kPort, 15000)) {
-    cap.close();
     setLastError("TLS CONNECT FAILED");
     return false;
   }
@@ -394,7 +397,16 @@ static bool uploadSingleCapture(fs::FS& fs, const char* path, const char* apiKey
                          boundary, filename);
   static char bodyTail[64];
   int tailLen = snprintf(bodyTail, sizeof(bodyTail), "\r\n--%s--\r\n", boundary);
-  size_t contentLen = (size_t)headLen + fileSize + (size_t)tailLen;
+  // F10: snprintf returns the would-be length, so a truncated header would
+  // make Content-Length lie about the bytes actually sent. Fail loudly if
+  // either header was truncated, then size from the real buffer contents.
+  if (headLen < 0 || (size_t)headLen >= sizeof(bodyHead) ||
+      tailLen < 0 || (size_t)tailLen >= sizeof(bodyTail)) {
+    cap.close();
+    setLastError("HEADER TRUNCATED");
+    return false;
+  }
+  size_t contentLen = strlen(bodyHead) + fileSize + strlen(bodyTail);
 
   client.printf("POST %s HTTP/1.1\r\n", kUploadPath);
   client.printf("Host: %s\r\n", kHost);
@@ -462,9 +474,12 @@ static bool downloadPotfile(fs::FS& fs, const char* resultsPath, const char* api
 
   static WiFiClientSecure client;
   client.stop();
+  // F4 SECURITY NOTE: setInsecure() disables TLS certificate validation, so
+  // this potfile download is trivially MITM-able on the lab network. Kept
+  // as-is for now because the firmware ships no CA store; to harden, place
+  // the WPA-SEC API CA (PEM) on SD and use client.setCACert() instead of
+  // setInsecure(). See SECURITY.md.
   client.setInsecure();
-  if (!client.connect(kHost, kPort, 15000)) {
-    setLastError("POTFILE TLS FAILED");
     return false;
   }
   client.setTimeout(30000);

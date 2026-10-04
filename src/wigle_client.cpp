@@ -171,6 +171,11 @@ static bool uploadSingleFile(fs::FS& fs, const char* path, const char* authHeade
 
   static WiFiClientSecure client;
   client.stop();
+  // F4 SECURITY NOTE: setInsecure() disables TLS certificate validation, so
+  // this WiGLE CSV upload is trivially MITM-able on the lab network. Kept
+  // as-is for now because the firmware ships no CA store; to harden, place
+  // the WiGLE API CA (PEM) on SD and use client.setCACert() instead of
+  // setInsecure(). See SECURITY.md.
   client.setInsecure();
   if (!client.connect(kHost, kPort, 15000)) {
     csv.close();
@@ -190,7 +195,16 @@ static bool uploadSingleFile(fs::FS& fs, const char* path, const char* authHeade
                          boundary, filename);
   static char bodyTail[72];
   int tailLen = snprintf(bodyTail, sizeof(bodyTail), "\r\n--%s--\r\n", boundary);
-  size_t contentLen = (size_t)headLen + fileSize + (size_t)tailLen;
+  // F10: snprintf returns the would-be length, so a truncated header would
+  // make Content-Length lie about the bytes actually sent. Fail loudly if
+  // either header was truncated, then size from the real buffer contents.
+  if (headLen < 0 || (size_t)headLen >= sizeof(bodyHead) ||
+      tailLen < 0 || (size_t)tailLen >= sizeof(bodyTail)) {
+    csv.close();
+    setLastError("HEADER TRUNCATED");
+    return false;
+  }
+  size_t contentLen = strlen(bodyHead) + fileSize + strlen(bodyTail);
 
   client.printf("POST %s HTTP/1.1\r\n", kUploadPath);
   client.printf("Host: %s\r\n", kHost);
@@ -258,6 +272,11 @@ static bool uploadSingleFile(fs::FS& fs, const char* path, const char* authHeade
 static bool fetchStats(fs::FS& fs, const char* statsPath, const char* authHeader) {
   static WiFiClientSecure client;
   client.stop();
+  // F4 SECURITY NOTE: setInsecure() disables TLS certificate validation, so
+  // this WiGLE stats fetch is trivially MITM-able on the lab network. Kept
+  // as-is for now because the firmware ships no CA store; to harden, place
+  // the WiGLE API CA (PEM) on SD and use client.setCACert() instead of
+  // setInsecure(). See SECURITY.md.
   client.setInsecure();
   if (!client.connect(kHost, kPort, 15000)) {
     setLastError("WIGLE STATS TLS FAILED");

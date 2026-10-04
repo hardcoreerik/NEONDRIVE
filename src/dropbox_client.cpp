@@ -74,6 +74,12 @@ UploadResult uploadFile(fs::FS& fs,
 
   // TLS connect — fresh object each call to avoid stale session state.
   WiFiClientSecure client;
+  // F4 SECURITY NOTE: setInsecure() disables TLS certificate validation, so
+  // this upload (captured handshakes / PMKIDs / session bundles) is trivially
+  // MITM-able on the lab network it operates on. Kept as-is for now because
+  // the firmware ships no CA store; to harden, place the Dropbox CA (PEM) on
+  // SD at /dropbox_ca.pem and call client.setCACert() with its contents
+  // instead of setInsecure(). See SECURITY.md "TLS certificate validation".
   client.setInsecure();
   if (!client.connect(kHost, kPort, 15000)) {
     strncpy(res.error, "TLS CONNECT FAILED", sizeof(res.error) - 1);
