@@ -81,4 +81,18 @@ String sessionsJson(fs::FS& sd);
 // Raw JSON content of manifest.json for a given session_id (or error JSON).
 String sessionManifestJson(fs::FS& sd, const char* session_id);
 
+// Append a single event row to the staged session's events.csv.
+// No-op when no session is staged. Used by live modules (evil portal,
+// sub-GHz toolkit, script runner) to keep an auditable event trail.
+// SSID/BSSID default to the staged session's target context when known.
+void appendEvent(fs::FS& sd, const char* event_type, const char* module,
+                 const char* severity, const char* message,
+                 const char* artifact_path = "",
+                 const char* target_ssid = "", const char* target_bssid = "",
+                 int channel = 0);
+
+// Current wall-clock timestamp as ISO-8601 UTC, or "" when unavailable.
+// Exposed for modules that log their own artifacts.
+bool currentWallclockUtc(char* out, size_t outSize, const char*& source);
+
 } // namespace AnalyzerSync

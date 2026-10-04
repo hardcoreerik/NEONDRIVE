@@ -1,13 +1,70 @@
 #include "analyzer_sync.h"
 #include "dropbox_client.h"
 #include "device_profile_select.h"
+#include "gps_service.h"
 
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ArduinoJson.h>
 #include <SD.h>
+#include <time.h>
 
 namespace AnalyzerSync {
+
+// ── Wall-clock time (B4: evidence-grade timestamps) ──────────────────────────
+// NTP primary (via main.cpp timeServiceTick), GPS fallback when offline,
+// boot-millis otherwise. Consumers get ISO-8601 UTC + source label.
+
+static constexpr time_t kMinValidEpoch = 1704067200;  // 2024-01-01 UTC
+
+// Formats `t` as "YYYY-MM-DDTHH:MM:SSZ" into out. Returns false if out too small.
+static bool formatIso8601(time_t t, char* out, size_t outSize) {
+    struct tm tmUtc;
+    if (!gmtime_r(&t, &tmUtc)) return false;
+    int n = snprintf(out, outSize, "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                     tmUtc.tm_year + 1900, tmUtc.tm_mon + 1, tmUtc.tm_mday,
+                     tmUtc.tm_hour, tmUtc.tm_min, tmUtc.tm_sec);
+    return n > 0 && (size_t)n < outSize;
+}
+
+// GPS NMEA time ("HHMMSSss") + date ("DDMMYY") → ISO-8601 UTC. Returns false
+// when the GPS fix has no usable time/date.
+static bool gpsIso8601(char* out, size_t outSize) {
+    const GpsFix& fx = GpsService::fix();
+    if (!fx.valid) return false;
+    if (strlen(fx.timeUtc) < 6 || strlen(fx.dateUtc) < 6) return false;
+    // Validate digits to avoid emitting garbage from a partial NMEA sentence.
+    for (int i = 0; i < 6; i++) {
+        if (!isdigit((unsigned char)fx.timeUtc[i])) return false;
+        if (!isdigit((unsigned char)fx.dateUtc[i])) return false;
+    }
+    int n = snprintf(out, outSize, "20%c%c-%c%c-%c%cT%c%c:%c%c:%c%cZ",
+                     fx.dateUtc[4], fx.dateUtc[5],
+                     fx.dateUtc[2], fx.dateUtc[3],
+                     fx.dateUtc[0], fx.dateUtc[1],
+                     fx.timeUtc[0], fx.timeUtc[1],
+                     fx.timeUtc[2], fx.timeUtc[3],
+                     fx.timeUtc[4], fx.timeUtc[5]);
+    return n > 0 && (size_t)n < outSize;
+}
+
+// Best-effort wall-clock timestamp for evidence bundles.
+// Returns true and fills `out` when a trustworthy source exists; `source`
+// is set to "ntp", "gps", or "none".
+static bool wallclockUtc(char* out, size_t outSize, const char*& source) {
+    time_t now = time(nullptr);
+    if (now >= kMinValidEpoch && formatIso8601(now, out, outSize)) {
+        source = "ntp";
+        return true;
+    }
+    if (gpsIso8601(out, outSize)) {
+        source = "gps";
+        return true;
+    }
+    source = "none";
+    if (outSize > 0) out[0] = '\0';
+    return false;
+}
 
 // ── Persistent state ─────────────────────────────────────────────────────────
 
@@ -259,7 +316,11 @@ bool stageSession(fs::FS& sd, const StageParams& p) {
       manifest += "\"security\":\""; manifest += jsonEsc(p.security ? p.security : ""); manifest += "\"";
     manifest += "},";
     manifest += "\"timing\":{";
-      manifest += "\"millis_since_boot\":"; manifest += (unsigned long)millis();
+      manifest += "\"millis_since_boot\":"; manifest += (unsigned long)millis(); manifest += ",";
+      char wallclock[28]; const char* timeSource = "none";
+      bool haveWallclock = wallclockUtc(wallclock, sizeof(wallclock), timeSource);
+      manifest += "\"wallclock_utc\":\""; manifest += haveWallclock ? wallclock : ""; manifest += "\",";
+      manifest += "\"time_source\":\""; manifest += timeSource; manifest += "\"";
     manifest += "},";
     manifest += "\"artifacts\":["; manifest += artArray; manifest += "],";
     manifest += "\"quick_result\":{";
@@ -282,6 +343,10 @@ bool stageSession(fs::FS& sd, const StageParams& p) {
     summary += "\"device_id\":\""; summary += jsonEsc(devId.c_str()); summary += "\",";
     summary += "\"module\":\""; summary += jsonEsc(mod); summary += "\",";
     summary += "\"status\":\""; summary += verdict; summary += "\",";
+    char sumWallclock[28]; const char* sumTimeSource = "none";
+    bool sumHaveWall = wallclockUtc(sumWallclock, sizeof(sumWallclock), sumTimeSource);
+    summary += "\"captured_at_utc\":\""; summary += sumHaveWall ? sumWallclock : ""; summary += "\",";
+    summary += "\"time_source\":\""; summary += sumTimeSource; summary += "\",";
     summary += "\"evidence\":{";
       summary += "\"pmkid_count\":"; summary += p.pmkid_count; summary += ",";
       summary += "\"handshake_frames\":"; summary += p.handshake_count; summary += ",";
@@ -303,19 +368,26 @@ bool stageSession(fs::FS& sd, const StageParams& p) {
     writeFile(sd, summaryPath, summary);  // non-fatal if fails
 
     // ── events.csv ───────────────────────────────────────────────────────────
-    String events = "timestamp_ms,event_type,module,severity,target_ssid,target_bssid,channel,message,artifact_path\n";
+    // wallclock_utc is appended as the final column (B4); existing columns
+    // keep their positions for backward compatibility with the v1 schema.
+    char evWallclock[28]; const char* evTimeSource = "none";
+    bool evHaveWall = wallclockUtc(evWallclock, sizeof(evWallclock), evTimeSource);
+    (void)evTimeSource;
+    String evWall = evHaveWall ? String(",") + evWallclock : String(",");
+    String events = "timestamp_ms,event_type,module,severity,target_ssid,target_bssid,channel,message,artifact_path,wallclock_utc\n";
     events += "0,session_start,";
     events += mod; events += ",info,";
     events += jsonEsc(p.ssid ? p.ssid : ""); events += ",";
     events += jsonEsc(p.bssid ? p.bssid : ""); events += ",";
-    events += p.channel; events += ",Session bundle staged,\n";
+    events += p.channel; events += ",Session bundle staged,"; events += evWall; events += "\n";
     if (p.pmkid_count > 0) {
         events += String(millis()); events += ",pmkid_captured,";
         events += mod; events += ",warning,";
         events += jsonEsc(p.ssid ? p.ssid : ""); events += ",";
         events += jsonEsc(p.bssid ? p.bssid : ""); events += ",";
         events += p.channel; events += ",";
-        events += p.pmkid_count; events += " PMKID candidate(s) observed,artifacts/specter.hc22000\n";
+        events += p.pmkid_count; events += " PMKID candidate(s) observed,artifacts/specter.hc22000";
+        events += evWall; events += "\n";
     }
     if (p.handshake_count > 0) {
         events += String(millis()); events += ",eapol_frames,";
@@ -324,13 +396,13 @@ bool stageSession(fs::FS& sd, const StageParams& p) {
         events += jsonEsc(p.bssid ? p.bssid : ""); events += ",";
         events += p.channel; events += ",";
         events += p.handshake_count; events += " EAPOL frame(s) captured,";
-        events += hasPcap ? "artifacts/handshakes.pcap" : ""; events += "\n";
+        events += hasPcap ? "artifacts/handshakes.pcap" : ""; events += evWall; events += "\n";
     }
     events += String(millis()); events += ",session_end,";
     events += mod; events += ",info,";
     events += jsonEsc(p.ssid ? p.ssid : ""); events += ",";
     events += jsonEsc(p.bssid ? p.bssid : ""); events += ",";
-    events += p.channel; events += ",Bundle ready for Wardrive Analyzer sync,\n";
+    events += p.channel; events += ",Bundle ready for Wardrive Analyzer sync,"; events += evWall; events += "\n";
 
     char eventsPath[112];
     snprintf(eventsPath, sizeof(eventsPath), "%s/events.csv", g_state.local_root);
@@ -488,6 +560,54 @@ String sessionManifestJson(fs::FS& sd, const char* session_id) {
     if (content.isEmpty())
         return "{\"ok\":false,\"error\":\"manifest.json not found\"}";
     return content;
+}
+
+bool currentWallclockUtc(char* out, size_t outSize, const char*& source) {
+    return wallclockUtc(out, outSize, source);
+}
+
+// RFC-4180 field escaping for event rows written by live modules.
+static String csvField(const char* s) {
+    if (!s) s = "";
+    bool needQuote = false;
+    for (const char* p = s; *p; ++p) {
+        if (*p == ',' || *p == '"' || *p == '\n' || *p == '\r') { needQuote = true; break; }
+    }
+    if (!needQuote) return String(s);
+    String out = "\"";
+    for (const char* p = s; *p; ++p) {
+        if (*p == '"') out += '"';
+        out += *p;
+    }
+    out += "\"";
+    return out;
+}
+
+void appendEvent(fs::FS& sd, const char* event_type, const char* module,
+                 const char* severity, const char* message,
+                 const char* artifact_path,
+                 const char* target_ssid, const char* target_bssid,
+                 int channel) {
+    if (g_state.session_id[0] == '\0' || g_state.local_root[0] == '\0') return;
+    char path[128];
+    snprintf(path, sizeof(path), "%s/events.csv", g_state.local_root);
+    File f = sd.open(path, FILE_APPEND);
+    if (!f) return;
+    char wallclock[28]; const char* source = "none";
+    bool haveWall = wallclockUtc(wallclock, sizeof(wallclock), source);
+    (void)source;
+    f.print((unsigned long)millis()); f.print(',');
+    f.print(csvField(event_type));    f.print(',');
+    f.print(csvField(module));        f.print(',');
+    f.print(csvField(severity));      f.print(',');
+    f.print(csvField(target_ssid));   f.print(',');
+    f.print(csvField(target_bssid));  f.print(',');
+    f.print(channel);                 f.print(',');
+    f.print(csvField(message));       f.print(',');
+    f.print(csvField(artifact_path)); f.print(',');
+    if (haveWall) f.print(wallclock);
+    f.print('\n');
+    f.close();
 }
 
 } // namespace AnalyzerSync
