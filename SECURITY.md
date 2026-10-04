@@ -48,3 +48,43 @@ The portal is a **credential assessment aid**, not a credential harvester:
   as untrusted. No authentication is provided; keep it on a lab network and
   stop capture when not actively analysing.
 
+### Lab scripts
+
+- Scripts execute device operations unattended. Review any `.ndm` file before
+  running it, and note that a failing step **aborts the run** (by design —
+  lab procedures must not silently skip steps).
+- Do not accept `.ndm` files from untrusted sources; they can start portals,
+  jammers, and uploads.
+
+## Reporting a Vulnerability
+
+If you discover a security vulnerability in this project (e.g. a flaw that could
+allow credential leakage, unintended remote access, or unsafe default config), please
+**do not open a public GitHub Issue**.
+
+Instead:
+
+1. Email the maintainer at the address listed in [.github/FUNDING.yml](.github/FUNDING.yml),
+   or open a [GitHub Security Advisory](../../security/advisories/new) on this repo.
+2. Include a description of the issue, steps to reproduce, and impact assessment.
+3. Allow up to 14 days for an initial response before any public disclosure.
+
+We aim to acknowledge all valid reports and publish a fix or mitigation within 30 days.
+
+---
+
+## Scope
+
+| In scope | Out of scope |
+|---|---|
+| Firmware credential handling (config.json, API keys at rest) | Vulnerabilities in third-party libraries (report upstream) |
+| Unintended network exposure via AP mode or web UI | Social engineering |
+| Config parsing / injection flaws | Physical hardware attacks |
+| Companion app (CYDCompanion) data handling | Expected offensive behaviour (that is the feature) |
+
+---
+
+## Supported Versions
+
+Security fixes will be applied to the latest release only.
+Older release binaries in `Device-Bins/` or GitHub Releases are not backported.

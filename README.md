@@ -46,6 +46,10 @@ NEONDRIVE is organized around a set of functional modules that share common targ
 - **Live Capture Stream**
   - Wireshark-compatible pcap stream over TCP (port 8081) while SD staging
     continues in parallel: `nc <ip> 8081 | wireshark -k -i -`.
+- **Lab Scripts**
+  - Line-based procedure macros on SD (`/neondrive/scripts/*.ndm`): scan,
+    target, capture, portal, sub-GHz, stage, verdict, sync — every step logged
+    to the session bundle for auditability.
 - **Web + Data Ops**
   - On-device web endpoints, status/telemetry views, and optional sync integrations (for example WPA-SEC/Dropbox paths when configured).
 

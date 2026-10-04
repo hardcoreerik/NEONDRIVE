@@ -21,5 +21,10 @@ The format is based on Keep a Changelog and follows Semantic Versioning.
 - **G3 — Live capture streaming (B3)**: Wireshark-compatible pcap stream over
   TCP (port 8081) from the WiFi RX path; SD staging continues in parallel.
   RX-safe static ring buffer, drops counted, zero blocking.
+- **G6 — Lab procedure scripting (B5)**: line-based macro runner (`.ndm` files
+  in `/neondrive/scripts/`) — `scan/target/capture/stage/verdict/sync/portal/
+  subghz/delay/log` commands mapping to existing operations. Non-blocking
+  execution; every step is logged to the session bundle for auditability.
+  Web UI at `/scripts`.
 - Repository hygiene baseline refresh (README, templates, workflow standards)
 - Standard issue templates and pull request quality checks
