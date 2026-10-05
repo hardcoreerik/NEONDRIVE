@@ -4860,7 +4860,9 @@ static uint32_t scopeScanStartedMs = 0;
 static constexpr int SCOPE_CH_COUNT = 13;
 static constexpr int SCOPE_WATERFALL_MAX_ROWS = 72;
 static constexpr int SCOPE_WATERFALL_BINS = 104;
-static uint8_t scopeWaterfall[SCOPE_WATERFALL_MAX_ROWS][SCOPE_WATERFALL_BINS];
+// Heap-allocated on first scope entry (was 7,488 B of static .bss; moved to
+// heap to fit the CYD DRAM budget). Null until scopeWaterfallEnsure() runs.
+static uint8_t* scopeWaterfall = nullptr;
 static uint8_t scopeWaterfallRows = 0;
 static uint16_t neonPanicFrame = 0;
 static uint32_t neonPanicLastTickMs = 0;
@@ -7377,12 +7379,27 @@ static uint16_t scopeWaterfallColor(uint8_t level) {
   return TFT_BLACK;
 }
 
+// Allocate the waterfall framebuffer on first use. Returns false when the
+// heap cannot satisfy it; callers degrade gracefully (no waterfall rendered).
+static bool scopeWaterfallEnsure() {
+  if (scopeWaterfall) return true;
+  scopeWaterfall = (uint8_t*)malloc((size_t)SCOPE_WATERFALL_MAX_ROWS * SCOPE_WATERFALL_BINS);
+  if (!scopeWaterfall) {
+    Serial.println("[scope] waterfall alloc failed (7488 B) — waterfall disabled");
+    return false;
+  }
+  memset(scopeWaterfall, 0, (size_t)SCOPE_WATERFALL_MAX_ROWS * SCOPE_WATERFALL_BINS);
+  return true;
+}
+
 static void scopeResetWaterfall() {
-  memset(scopeWaterfall, 0, sizeof(scopeWaterfall));
   scopeWaterfallRows = 0;
+  if (!scopeWaterfallEnsure()) return;
+  memset(scopeWaterfall, 0, (size_t)SCOPE_WATERFALL_MAX_ROWS * SCOPE_WATERFALL_BINS);
 }
 
 static void scopePushWaterfallFrame() {
+  if (!scopeWaterfall) return;  // allocation failed; waterfall disabled
   float chPower[SCOPE_CH_COUNT + 1] = {0};  // 1..13 used
 
   // Aggregate AP energy onto channels with spill-over to adjacent channels.
@@ -7415,7 +7432,9 @@ static void scopePushWaterfallFrame() {
   int rowsToShift = scopeWaterfallRows;
   if (rowsToShift >= SCOPE_WATERFALL_MAX_ROWS) rowsToShift = SCOPE_WATERFALL_MAX_ROWS - 1;
   for (int row = rowsToShift; row > 0; row--) {
-    memcpy(scopeWaterfall[row], scopeWaterfall[row - 1], SCOPE_WATERFALL_BINS);
+    memcpy(scopeWaterfall + (size_t)row * SCOPE_WATERFALL_BINS,
+           scopeWaterfall + (size_t)(row - 1) * SCOPE_WATERFALL_BINS,
+           SCOPE_WATERFALL_BINS);
   }
 
   // Build a smooth spectrum line across bins by interpolating channel power.
@@ -7435,7 +7454,7 @@ static void scopePushWaterfallFrame() {
     // Gamma emphasis to make weak/medium signals visible like a spectrum waterfall.
     float shaped = sqrtf(norm);
     uint8_t level = (uint8_t)(shaped * 100.0f);
-    scopeWaterfall[0][b] = level;
+    scopeWaterfall[b] = level;
   }
 
   if (scopeWaterfallRows < SCOPE_WATERFALL_MAX_ROWS) {
@@ -7540,7 +7559,8 @@ static void drawScopeGraph() {
         int srcBin = (px * SCOPE_WATERFALL_BINS) / wfInnerW;
         if (srcBin < 0) srcBin = 0;
         if (srcBin >= SCOPE_WATERFALL_BINS) srcBin = SCOPE_WATERFALL_BINS - 1;
-        uint8_t level = rowValid ? scopeWaterfall[srcRow][srcBin] : 0;
+        uint8_t level = (rowValid && scopeWaterfall)
+            ? scopeWaterfall[(size_t)srcRow * SCOPE_WATERFALL_BINS + srcBin] : 0;
         tft.drawPixel(wfInnerX + px, wfInnerY + py, scopeWaterfallColor(level));
       }
     }
