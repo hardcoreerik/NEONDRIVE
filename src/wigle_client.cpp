@@ -15,7 +15,7 @@ static constexpr uint16_t kPort = 443;
 static constexpr const char* kUploadPath = "/api/v2/file/upload";
 static constexpr const char* kStatsPath = "/api/v2/stats/user";
 static constexpr size_t kMaxTracked = 400;
-static constexpr size_t kMaxPendingUploads = 32;
+static constexpr size_t kMaxPendingUploads = 16;
 
 struct UploadedEntry {
   char name[64];

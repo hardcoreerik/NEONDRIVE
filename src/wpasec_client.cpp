@@ -13,7 +13,7 @@ static constexpr uint16_t kPort = 443;
 static constexpr const char* kUploadPath = "/";
 static constexpr const char* kPotfilePath = "/?api&dl=1";
 static constexpr size_t kMaxEntries = 600;
-static constexpr size_t kMaxPendingUploads = 32;
+static constexpr size_t kMaxPendingUploads = 16;
 
 struct CrackedEntry {
   char bssid[13];
